@@ -9,7 +9,7 @@
 - **Player**: authenticated participant in ad-hoc rooms or tournaments.
 - **Spectator**: read-only observer of a room's progress, receiving live spectator-safe state updates without the right to act or to see private hands, hidden deck order, or player-only decisions.
 - **Room Session**: one authoritative Uno game room, from `waiting` to `in_progress` to `completed`; in tournaments, a Match may be composed of multiple Room Sessions.
-- **Match**: best-of-three tournament contest with early termination when a player wins 2 of 3 Room Sessions; it must produce an authoritative ranked result, including the top 3 advancing players when the Match is not the final one.
+- **Match**: best-of-three tournament contest with early termination when a player wins 2 of 3 Room Sessions; it must produce an authoritative ranked result by match wins, including the top 3 advancing players when the Match is not the final one, with ties broken by lowest total card points and then earliest completion time.
 - **Tournament**: multi-round elimination competition with bracket-based advancement that repeats until the remaining player set fits in a final room of 10 players or fewer.
 - **Bracket Slot**: a player's assigned position in a tournament round.
 - **Round**: one phase of a tournament in which all bracket slots play simultaneously; it closes only after every room assigned to that round has reported its authoritative result.
@@ -21,15 +21,15 @@
 - **Penalty Stack**: pending draw penalty accumulated by special-card interactions (e.g., stacked +2 cards).
 - **Hand**: private set of cards held by one player in a Room Session; only that player may see and play those cards.
 - **Uno Window**: rule window in which a player must call Uno or may be penalized, this window lasts 5 seconds once the player has played his second-to-last card in his turn; the penalty of the Uno window is to draw 2 cards.
-- **Challenge Window**: Another player can challenge a player with the Uno window available, penalizing the challenged player if successful, otherwise the challenger receives the Uno window penalty himself.
+- **Challenge Window**: Another player can challenge a player with the Uno window available, penalizing the challenged player if successful, otherwise the challenger receives the Uno window penalty himself; it closes after 5 seconds or as soon as the next player begins their turn, whichever comes first.
 - **Deck Seed**: the authoritative seed used to ensure fair, reproducible shuffling; immutable once a room starts.
 - **Game Log Entry**: immutable record of a single state change within a room, ordered chronologically to guarantee that the full history of a Room Session can be replayed deterministically.
 - **Room State Update**: a minimal description of what changed in the room after an action resolves, published outward as either a player-specific update or a spectator-safe projection.
 - **Elo Rating**: a player's casual-game skill score, recalculated from authoritative completed room results; tournament placement is tracked separately so elimination performance does not distort casual Elo.
 - **Tournament Placement Rating**: competitive tournament score derived from ranked tournament finishes, advancement depth, and final placement rather than casual room outcomes.
-- **Advancement Rule**: the criterion by which ranked tournament results progress to the next round, normally the top 3 players per non-final Match.
+- **Advancement Rule**: the criterion by which ranked tournament results progress to the next round, normally the top 3 players by match wins per non-final Match after tie-breaks by lowest total card points and earliest completion time.
 - **Replay Position**: a pointer into the Game Log used to reconstruct room state for audit or dispute resolution.
-- **Forfeit**: timeout outcome for an absent or disconnected player; in an ad-hoc room it removes the player and the game may continue, while in a tournament it records a match loss and eliminates that player from advancement.
+- **Forfeit**: timeout outcome after the fixed 60-second reconnection window for an absent or disconnected player; in an ad-hoc room it removes the player and the game may continue, while in a tournament it records a match loss and eliminates that player from advancement.
 
 ## 2. Domain Storytelling
 
@@ -45,7 +45,7 @@ Play begins. Alice plays a Red 7 at sequence number 5. The Room Session validate
 
 Now Carol plays a Reverse card at sequence 6, but Bob, who has not yet received that update, submits a Green 3 also at sequence 6. The Room Session detects the stale sequence number and **rejects** Bob's action. Bob's client receives the rejection and immediately reconciles by consuming the incoming state update stream, which contains Carol's Reverse. Bob now sees the updated board, adjusts, and resubmits at the correct sequence number.
 
-Play continues until Alice plays her second-to-last card. The Uno Window opens, so Alice must call Uno before any opponent reports her. Alice calls in time, `UnoCalled` is recorded. One turn later, Alice plays her final card, and the Room Session transitions to `completed`. The `RoomCompleted` event is published and consumed downstream by Ranking & Player Stats (to update casual Elo) and **Bracket** Projection & Analytics (to update player statistics).
+Play continues until Alice plays her second-to-last card. The Uno Window opens for exactly 5 seconds or until the next player begins their turn, whichever comes first, so Alice must call Uno before any opponent reports her. If Bob or Carol successfully challenge her during that window, Alice draws 2 cards; if the challenge is invalid, the challenger draws the same 2-card penalty. Alice calls in time, `UnoCalled` is recorded, and the spectator-safe projection is updated with only public state such as discard pile, active color, turn, card counts, and roster. One turn later, Alice plays her final card, and the Room Session transitions to `completed`. The `RoomCompleted` event is published and consumed downstream by Ranking & Player Stats (to update casual Elo only because this is a completed casual game) and **Bracket** Projection & Analytics (to update player statistics).
 
 **Actor handoffs in this scenario:**
 
@@ -93,9 +93,9 @@ An organizer creates a 1000 player tournament. Players register over the next ho
 
 Registration closes. The Tournament Orchestrator runs SeedBracket, producing 100 groups of 10 players for Round 1. It then issues StartRound, which triggers room provisioning: 100 rooms are requested from the Room Session context. Each room is created in `waiting` status with the assigned players pre-filled. As each room locks and starts, the Game Integrity context handles its own deck shuffle and deal. This means 100 independent rooms running in parallel.
 
-Room 42 finishes first. Its `RoomCompleted` event contains the ranked room result and propagates to two consumers:
+Room 42 finishes first. Its `RoomCompleted` event contains the ranked room result, match wins, top 3 advancing players, total card points, and completion time, then propagates to two consumers:
 
-1. The Tournament Orchestrator, which records the match result and advances the top 3 players. Their bracket slots for Round 2 are filled.
+1. The Tournament Orchestrator, which records the match result and advances the top 3 players by match wins, after applying tie-breaks by lowest total card points and earliest completion time. Their bracket slots for Round 2 are filled.
 2. The Bracket Projection & Analytics context, which updates the denormalized bracket view so spectators can see real-time progress.
 
 Over the next few minutes, the remaining 99 rooms complete. Each `RoomCompleted` triggers the same flow. When the orchestrator detects that all 100 rooms in Round 1 have reported results, it emits `TournamentRoundCompleted` and opens the next round, seeding Round 2 with 300 advancing players in 30 new rooms.
@@ -150,8 +150,8 @@ sequenceDiagram
 
 | Actor / Aggregate | Command | Domain Event | Policy / Rule |
 | --- | --- | --- | --- |
-| Player | `CreateRoom` | `RoomCreated` | Room starts in `waiting`. |
-| Player | `JoinRoom` | `PlayerJoinedRoom` | Max capacity: 2-10 players. |
+| Player | `CreateRoom` | `RoomCreated` | Room starts in `waiting`; payload includes `roomId`, `hostPlayerId`, and `status`. |
+| Player | `JoinRoom` | `PlayerJoinedRoom` | Max capacity: 2-10 players; payload includes `roomId`, `playerId`, and `seatPosition`. |
 | Player | `LeaveRoom` | `PlayerLeftRoom` | If game not started, roster can still change. |
 | Host / System | `LockRoom` | `RoomLocked` | No more joins after lock. |
 | System | `StartRoom` | `RoomStarted` | Only valid when minimum players reached and roster valid. |
@@ -170,22 +170,22 @@ This flow comes directly from the assignment's room lifecycle requirement: rooms
 
 | Actor / Aggregate | Command | Domain Event | Policy / Rule |
 | --- | --- | --- | --- |
-| Player | `SubmitPlayCard(sequenceNumber)` | `CardPlayed` | Only accepted if sequence number matches current room version. |
+| Player | `SubmitPlayCard(sequenceNumber)` | `CardPlayed` | Only accepted if sequence number matches current room version, the action is authorized, and rate limits allow it; payload includes `roomId`, `playerId`, `card`, and `sequenceNumber`. |
 | Player | `SubmitDrawCard(sequenceNumber)` | `CardDrawn` | Draw comes from authoritative deck service. |
 | Player | `ChooseColor` | `ColorChanged` | Required after wild cards. |
 | Room Session | `ResolveSpecialCard` | `TurnOrderChanged` / `PenaltyStackIncreased` | Handles reverse, skip, +2, wild +4, etc. |
-| Player | `CallUno` | `UnoCalled` | Must happen inside the valid Uno window. |
-| Opponent / System | `ReportMissingUno` | `UnoPenaltyApplied` | Only valid if target player had one card and failed to call Uno in time. |
+| Player | `CallUno` | `UnoCalled` | Must happen before the fixed 5-second Uno window closes or the next player begins their turn. |
+| Opponent / System | `ReportMissingUno` | `UnoChallengeIssued` / `UnoPenaltyApplied` | Only valid if target player had one card and failed to call Uno before the 5-second window closed or the next player began their turn; the penalized player draws 2 cards. |
 | Room Session | `AdvanceTurn` | `TurnAdvanced` | Happens only after current action fully resolves. |
 | Game Integrity | `AppendLogEntry` | `GameLogEntryAppended` | Every state change must be immutable and auditable. |
 
-This is the hardest real-time part, since actions are concurrent and must be serialized, and stale actions must be rejected with `409 Conflict`; every state change must also be appended to an immutable log before broadcast. This means that this flow must be the most efficient one and the most carefully made. As in Flow A, outward publication of state updates to players and spectators is an adapter-level concern, not a domain event, the domain facts are captured by events like `CardPlayed`, `TurnAdvanced`, and `GameLogEntryAppended`.
+This is the hardest real-time part, since actions are concurrent and must be serialized, and stale actions must be rejected with `409 Conflict`; every state change must also be appended to an immutable log before broadcast. This means that this flow must be the most efficient one and the most carefully made. As in Flow A, outward publication of state updates to players and spectators is an adapter-level concern, not a domain event, the domain facts are captured by events like `CardPlayed`, `TurnAdvanced`, and `GameLogEntryAppended`. After each committed gameplay event, the projection adapter also emits a spectator-safe update that excludes private hands and hidden deck state.
 
 ### Hotspots
 
 - Exact interpretation of jump-ins and stacking rules.
 - Whether a failed stale command should emit a domain event or remain only an API outcome.
-- Whether Uno timing is based on room logical time, server time, or previous committed event offset.
+- How clients should display the server-authoritative 5-second Uno deadline under latency.
 
 ## Flow C: Tournament round orchestration
 
@@ -197,44 +197,56 @@ This is the hardest real-time part, since actions are concurrent and must be ser
 | Tournament Orchestrator | `StartRound` | `TournamentRoundStarted` | Starts a wave of room creation. |
 | Tournament Orchestrator | `ProvisionTournamentRooms` | `TournamentRoomsProvisioned` | May create 100k+ rooms in large rounds. |
 | Tournament Orchestrator | `AssignPlayersToRoom` | `PlayerAssignedToTournamentRoom` | Links bracket slots to room sessions. |
-| Room Session | `CompleteRoom` | `RoomCompleted` | Emits authoritative ranked result for bracket advancement. |
+| Room Session | `CompleteRoom` | `RoomCompleted` | Emits authoritative ranked result for bracket advancement, including `rankedPlayerIds`, `matchWinsByPlayer`, `advancingPlayerIds[3]`, `cardPointsByPlayer`, and `completionTime`. |
 | Tournament Orchestrator | `RecordMatchResult` | `TournamentMatchResultRecorded` | Consumes room result, not direct DB reads. |
-| Tournament Orchestrator | `AdvanceTopPlayers` | `PlayersAdvanced` | Updates next-round bracket slots with the top 3 players from each non-final match. |
+| Tournament Orchestrator | `AdvanceTopPlayers` | `PlayersAdvanced` | Updates next-round bracket slots with the top 3 players by match wins from each non-final match, after tie-breaks by lowest total card points and earliest completion time. |
 | Tournament Orchestrator | `CompleteRound` | `TournamentRoundCompleted` | Fires only when all rooms in the round have reported authoritative results. |
-| Tournament Orchestrator | `OpenNextRound` | `NextTournamentRoundStarted` | Repeats until 10 or fewer players remain for the final room. |
+| Tournament Orchestrator | `OpenNextRound` | `NextTournamentRoundStarted` | Repeats until 10 or fewer players remain, then opens one final room. |
 | Tournament Orchestrator | `CloseTournament` | `TournamentCompleted` | Final ranked tournament result is published. |
 
 This flow is justified by the assignment's explicit tournament-orchestrator requirement, it is suggested from the lectures to use **orchestration / saga** for complex workflows that need visibility and reliable error handling.
 
 ### Hotspots
 
-- How long tournament rooms may wait before an absent player forfeits.
+- How should reconnect deadline scheduling be implemented so each 60-second forfeit emits once?
 - Whether score reporting is idempotent only by `roomId`, or by `(roomId, completionVersion)`.
 - What compensation happens if a room reports completion twice or reports corrupted results.
 
-## Flow D: Match completion, ranking, and bracket projection
+## Flow D: Game completion, ranking, and bracket projection
 
 | Actor / Aggregate | Command | Domain Event | Policy / Rule |
 | --- | --- | --- | --- |
-| Room Session | `FinalizeMatch` | `RoomCompleted` | Produces authoritative ranked result / score facts. |
-| Ranking | `ApplyCasualEloUpdate` | `PlayerRatingUpdated` | Updates casual Elo from authoritative ad-hoc room results only. |
+| Room Session | `FinalizeCasualGame` | `RoomCompleted` | Produces authoritative ranked result / score facts for a completed non-abandoned casual room. |
+| Ranking | `ApplyCasualEloUpdate` | `PlayerRatingUpdated` | Updates casual Elo from completed casual games only; payload includes `playerId`, `roomId`, `previousRating`, `newRating`, and placement. |
 | Ranking | `ApplyTournamentPlacementUpdate` | `TournamentPlacementRatingUpdated` | Updates tournament rating from authoritative tournament match placements and final standings. |
 | Ranking | `UpdatePlayerStats` | `PlayerStatsUpdated` | Win rate, streaks, total matches, tournament finishes, etc. |
 | Bracket Projection | `ProjectMatchResult` | `BracketProjectionUpdated` | Pure read-model projection. |
 | Analytics Projection | `ProjectStats` | `AnalyticsProjectionUpdated` | Optimized for reads, not transactional writes. |
 
-The assignment explicitly requires a global Elo-based ranking system and a CQRS read model that consumes `game.completed`-like events to build denormalized bracket and player-stat views for heavy read traffic. Ranking separates casual Elo from tournament placement rating: the former measures ordinary room performance, while the latter measures advancement and final placement in elimination tournaments.
+The assignment explicitly requires a global Elo-based ranking system and a CQRS read model that consumes `game.completed`-like events to build denormalized bracket and player-stat views for heavy read traffic. Ranking separates casual Elo from tournament placement rating: the former measures completed non-abandoned casual games using placement positions from first to last, while the latter measures advancement and final placement in elimination tournaments.
 
 ## Flow E: Concurrency and recovery
 
 | Actor / Aggregate | Command | Outcome / Event | Policy / Rule |
 | --- | --- | --- | --- |
 | Player | `SubmitAction(staleSequenceNumber)` | *(API 409 Conflict)* | Not a domain event: the room state is unchanged. The action is rejected at the API boundary; the client reconciles by consuming the live state update stream. No log entry is appended. |
+| Player | `ReconnectToRoom` | `PlayerReconnected` | Accepted within 60 seconds; the player keeps the same seat and hand and receives only their own private state plus public room state. |
+| Room Session | `SkipDisconnectedTurn` | `TurnSkipped` | If the disconnected player is on turn, the turn is skipped during the 60-second window; no bot acts for that player. |
+| Room Session | `ForfeitPlayer` | `PlayerForfeited` | Emitted once when the 60-second reconnect deadline expires. In casual rooms the player is removed and the game may continue; in tournaments the player loses the match and cannot advance. |
 | Game Integrity | `ReplayFromLog` | `RoomStateRebuilt` | Used for audit / dispute resolution. |
 | Tournament Orchestrator | `ReconcileMissingResult` | `TournamentResultReconciled` | Needed if round completion and bracket advancement diverge. |
 | Projection Context | `RebuildProjection` | `ProjectionRebuilt` | CQRS view can be rebuilt from event stream. |
 
 The stale-sequence rejection is explicitly required by the assignment; replay-safety is implied by the immutable log and authoritative RNG setup.
+
+Disconnection behavior is split by timing: if a player disconnects during another player's turn, their seat and hand are reserved while the game continues; if they disconnect during their own turn, their turn is skipped for up to 60 seconds without bot substitution. Reconnecting inside the 60-second window restores the same hand and seat. Reconnecting after the window observes the resulting forfeit state instead of undoing it.
+
+## Flow F: Identity session lifecycle
+
+| Actor / Aggregate | Command | Domain Event | Policy / Rule |
+| --- | --- | --- | --- |
+| Player | `LoginPlayer` | `PlayerLoggedIn` / `SessionInvalidated` | A new login invalidates the player's previous active session before the new session becomes active. |
+| Identity & Access | `InvalidateSession` | `SessionInvalidated` | Idempotent by `sessionId`; already-invalid sessions stay invalid. |
 
 ## 4. Proposed Bounded Contexts
 
@@ -244,6 +256,13 @@ The stale-sequence rejection is explicitly required by the assignment; replay-sa
 Authentication, player identity, tournament eligibility, and stable player IDs.
 
 **Core model** `PlayerAccount`, `AuthSession`, `PlayerEligibility`.
+
+**Aggregate root** `PlayerSession`
+
+**Invariants**
+
+1. A player can have only one active session at a time.
+2. A new successful login invalidates the previous active session by emitting `SessionInvalidated` before the new `AuthSession` is accepted.
 
 **Why separate**
 Identity is necessary but is not UnoArena's differentiator. This is a Generic subdomain, because it solves a commodity problem (authentication, identity) that is standard across industries. The strategy is to delegate to an external provider such as Keycloak and protect the internal domain via an **Anti-Corruption Layer** that translates external tokens and claims into UnoArena's own `PlayerId` and `PlayerEligibility` value objects.
@@ -261,14 +280,16 @@ Owns the authoritative lifecycle of a single room session: roster, current turn,
 **Internal entities / value objects**
 
 - *Entities*: `Seat` (identity = player + position; mutates as players join/leave or get eliminated).
-- *Value objects*: `TurnOrder`, `PenaltyStack`, `ActiveColor`, `SequenceNumber`, `RoomStatus`.
+- *Value objects*: `TurnOrder`, `PenaltyStack`, `ActiveColor`, `SequenceNumber`, `RoomStatus`, `Card`, `Hand`.
 
 **Invariants**
 
-1. A card can only be played if the acting player holds it, it is their turn, and the submitted sequence number matches the current room version.
+1. A card can only be played if the acting player holds it, it is their turn, and the submitted sequence number matches the current room version; every successful mutation increments the sequence number exactly once.
 2. Room capacity must be between 2 and 10 seats; joins beyond the limit are rejected.
 3. Status transitions follow strictly `waiting` → `in_progress` → `completed`; no backwards transitions are allowed.
-4. The Uno penalty window closes after a configurable number of committed events past the triggering play; late `CallUno` commands are rejected.
+4. The Uno penalty window closes exactly 5 seconds after the player plays their second-to-last card or as soon as the next player begins their turn, whichever comes first; late `CallUno` commands are rejected.
+5. A player who fails to call Uno within that 5-second window and is successfully challenged draws 2 penalty cards.
+6. If a player disconnects during their own turn, their turn is skipped for up to 60 seconds without bot substitution; reconnecting within 60 seconds preserves their seat and hand, while missing the deadline causes `PlayerForfeited`.
 
 **Why separate**
 It owns the core consistency boundary for a match, and all gameplay mutations must pass through the aggregate root, not be updated piecemeal. This is the Core Domain that differentiates UnoArena.
@@ -328,7 +349,8 @@ Owns tournament lifecycle, bracket seeding, round progression, and advancement f
     - *Invariants*:
         1. A bracket slot's advancing player can only be set by an authoritative ranked result from the specific room assigned to that slot; results from other rooms are rejected.
         2. Once a bracket slot's advancing player is recorded, it cannot be overwritten (idempotent by `roomId` + `completionVersion`).
-        3. A round transitions to `completed` only when every assigned room has reported an authoritative result and the resulting advancement slots have been filled.
+        3. A non-final match advances exactly the top 3 ranked players by match wins, using lowest total card points and then earliest completion time as tie-breaks.
+        4. A round transitions to `completed` only when every assigned room has reported an authoritative result and the resulting advancement slots have been filled.
 
 A million-player tournament with ~20 rounds should not load all bracket data as a single aggregate. Each Round is its own consistency boundary, sized to one phase. The Tournament aggregate coordinates Rounds by identity references, keeping its own footprint small.
 
@@ -351,10 +373,11 @@ Consumes authoritative gameplay and tournament results, updates casual `EloRatin
 
 **Invariants**
 
-1. Casual Elo updates are derived only from authoritative ad-hoc `RoomCompleted` events; direct writes are not allowed.
+1. Casual Elo updates are derived only from authoritative, completed, non-abandoned ad-hoc `RoomCompleted` events; direct writes are not allowed.
 2. Tournament placement rating updates are derived only from authoritative tournament `MatchResult` and `TournamentCompleted` events.
 3. A player's rating cannot drop below a configured floor value.
 4. Duplicate room or tournament results are ignored using the relevant source idempotency key.
+5. Casual Elo deltas are calculated from placement positions from first to last; tournament games never update casual Elo.
 
 **Why separate**
 The model here is not "whose turn is it?" but "how did this result change long-term competitive standing?" It also distinguishes casual skill from tournament achievement, which is a different language and therefore a different bounded context.
@@ -373,7 +396,7 @@ This is a read model, not the source of truth.
 **Internal entities / value objects** `BracketProjection`, `PlayerStatsProjection`, `TournamentSummaryView`, `SpectatorRoomProjection`.
 
 **Why separate**
-This context exists to serve reads efficiently, not to enforce business invariants transactionally. Critically, it consumes events from multiple upstream contexts, both Room Session and Tournament Orchestration, which gives it its own integration boundary and published-language contracts. Spectator projections are explicitly sanitized: even if an active player opens a second anonymous spectator connection, that connection receives only public room progress, card counts, discard state, and bracket/stat views, never private hand contents, hidden deck information, or action privileges.
+This context exists to serve reads efficiently, not to enforce business invariants transactionally. Critically, it consumes events from multiple upstream contexts, both Room Session and Tournament Orchestration, which gives it its own integration boundary and published-language contracts. Spectator projections are explicitly sanitized: even if an active player opens a second anonymous spectator connection, that connection receives only public room progress, card counts, discard state, and bracket/stat views, never private hand contents, hidden deck information, or action privileges. The immutable GameLog may contain full private state for audit, but Spectator View cannot query it directly and can only consume sanitized projection events.
 
 **Data ownership**
 Denormalized, eventually consistent store optimized for heavy read traffic. Can be fully rebuilt from the upstream event streams at any time.
@@ -439,7 +462,7 @@ flowchart LR
 
 | Context | Aggregate Root(s) | Why |
 | --- | --- | --- |
-| Player Identity & Access | `PlayerAccount` | Stable identity and eligibility decisions. |
+| Player Identity & Access | `PlayerSession` | Stable identity, eligibility decisions, and the single-active-session invariant. |
 | Room Session | `RoomSession` | Single consistency boundary for roster, turn, penalties, sequence, and status. |
 | Game Integrity | `AuthoritativeDeck`, `GameLog` | Two distinct consistency boundaries: deck/RNG state vs. immutable audit trail. |
 | Tournament Orchestration | `Tournament`, `Round` | Tournament owns lifecycle; Round owns per-phase bracket data. Split to avoid loading all bracket data as one unit at scale. |
@@ -460,6 +483,8 @@ This facilitates lazy loading, reduces memory footprint, and ensures that each a
 | --- | --- | --- |
 | `RoomSession` | Entity (Root) | Has a unique `RoomSessionId`; mutable state (status, turn, seats). |
 | `Seat` | Entity | Identity = player + position within a room; mutates as players join/leave. |
+| `Card` | Value Object | Immutable descriptor of color, rank/action, and points. |
+| `Hand` | Value Object | Immutable private set of cards for one player at a point in room history; replaced when cards are drawn or played. |
 | `TurnOrder` | Value Object | Describes direction and current index; replaced wholesale on reverse. |
 | `SequenceNumber` | Value Object | Immutable counter; a new VO is created on each state change. |
 | `ActiveColor` | Value Object | Immutable descriptor of current pile color. |
@@ -520,6 +545,10 @@ No service shares a database with another.
 
 **Ranking stream separation.** Casual Elo and tournament placement rating consume different published events and use different idempotency keys. This prevents a tournament placement update from being accidentally applied as a casual Elo update, or an ad-hoc room result from inflating tournament achievement.
 
+**Forfeit deadline enforcement.** Disconnection deadlines are stored as room-scoped timers keyed by `(roomId, playerId, disconnectVersion)`. When the 60-second window expires, `PlayerForfeited` is emitted exactly once; retries use the same key and do not duplicate the forfeit.
+
+**Command security.** Sequence numbers are server-issued room versions, not client authority. A command with a forged future sequence or replayed old sequence is rejected before domain mutation and produces no `GameLogEntryAppended` event. Sensitive commands require authenticated player identity, input validation, per-IP/per-user/per-room rate limits, and audit log entries; published events that cross trust boundaries are signed or otherwise integrity-protected.
+
 ### 8.4 Distributed Monolith avoidance
 
 This design explicitly avoids the three symptoms of a Distributed Monolith:
@@ -532,15 +561,13 @@ This design explicitly avoids the three symptoms of a Distributed Monolith:
 
 ### 9.1 Consolidated open questions
 
-The following are the five highest-impact unresolved design questions, gathered from the Hotspots across all flows:
+The following are the highest-impact unresolved design questions, gathered from the Hotspots across all flows:
 
 | # | Open Question | Impact | Where it surfaces |
 | --- | --- | --- | --- |
-| 1 | **Uno Window timing mechanism**: should it be based on room logical time, wall-clock time, or committed event offset? | Affects fairness under network latency; different answers produce different player experiences. | Flow B |
-| 2 | **Room locking semantics**: explicit by host vs. implicit when a tournament assigns players? | Determines whether the Room Session aggregate needs to distinguish ad-hoc from tournament rooms, or if the lock command is polymorphic. | Flow A |
-| 3 | **Stale-command event emission**: should a rejected `409 Conflict` also produce a domain event, or remain only an API-level outcome? | If events are emitted for rejections, the GameLog grows faster and the audit trail is richer, but the event stream is noisier. | Flow B |
-| 4 | **Tournament forfeit timeout**: how long does a tournament room wait before declaring an absent player as forfeited? | Directly affects tournament pace at scale; too short causes false forfeits, too long blocks Round progression for all other completed rooms. | Flow C |
-| 5 | **Score reporting idempotency key**: by `roomId` alone, or by `(roomId, completionVersion)`? | Using only `roomId` risks ignoring a legitimate retry after a corrupted first report. Using the compound key adds complexity to the saga. | Flow C |
+| 1 | **Room locking semantics**: explicit by host vs. implicit when a tournament assigns players? | Determines whether the Room Session aggregate needs to distinguish ad-hoc from tournament rooms, or if the lock command is polymorphic. | Flow A |
+| 2 | **Stale-command event emission**: should a rejected `409 Conflict` also produce a domain event, or remain only an API-level outcome? | If events are emitted for rejections, the GameLog grows faster and the audit trail is richer, but the event stream is noisier. | Flow B |
+| 3 | **Score reporting idempotency key**: by `roomId` alone, or by `(roomId, completionVersion)`? | Using only `roomId` risks ignoring a legitimate retry after a corrupted first report. Using the compound key adds complexity to the saga. | Flow C |
 
 ### 9.2 Trade-offs made in this design
 
