@@ -8,24 +8,27 @@
 
 - **Player**: authenticated participant in ad-hoc rooms or tournaments.
 - **Spectator**: read-only observer of a room's progress, receiving live state updates without the right to act.
-- **Room Session**: one authoritative Uno match, from `waiting` to `in_progress` to `completed`.
-- **Tournament**: multi-round elimination competition with bracket-based advancement.
+- **Room Session**: one authoritative Uno game room, from `waiting` to `in_progress` to `completed`; in tournaments, a Match may be composed of multiple Room Sessions.
+- **Match**: best-of-three tournament contest with early termination when a player wins 2 of 3 Room Sessions; it must produce an authoritative ranked result, including the top 3 advancing players when the Match is not the final one.
+- **Tournament**: multi-round elimination competition with bracket-based advancement that repeats until the remaining player set fits in a final room of 10 players or fewer.
 - **Bracket Slot**: a player's assigned position in a tournament round.
-- **Round**: one phase of a tournament in which all bracket slots play simultaneously; a tournament consists of multiple sequential rounds.
+- **Round**: one phase of a tournament in which all bracket slots play simultaneously; it closes only after every room assigned to that round has reported its authoritative result.
 - **Turn**: the current right to act in a Room Session.
 - **Seat**: a player's assigned position within a Room Session roster; each seat has a distinct identity tied to a player and a position.
 - **Turn Order**: the circular sequence determining which Seat acts next; may reverse direction.
 - **Sequence Number**: monotonic version attached to every player action, used to reject stale moves and guarantee that only one action at a time is accepted against the current room state.
 - **Active Color**: the current effective color on the discard pile, especially relevant after a wild card.
 - **Penalty Stack**: pending draw penalty accumulated by special-card interactions (e.g., stacked +2 cards).
-- **Uno Window**: short rule window in which a player must call Uno or may be penalized. *(Open question: the exact timing mechanism -- room logical clock vs. wall clock vs. event offset -- is unresolved; see Hotspot in Flow B.)*
+- **Hand**: private set of cards held by one player in a Room Session; only that player may see and play those cards.
+- **Uno Window**: rule window in which a player must call Uno or may be penalized, this window lasts 5 seconds once the player has played his second-to-last card in his turn; the penalty of the Uno window is to draw 2 cards.
+- **Challenge Window**: Another player can challenge a player with the Uno window available, penalizing the challenged player if successful, otherwise the challenger receives the Uno window penalty himself.
 - **Deck Seed**: the authoritative seed used to ensure fair, reproducible shuffling; immutable once a room starts.
-- **Game Log Entry**: immutable record of a single state change within a room, ordered chronologically to guarantee that the full history of a match can be replayed deterministically.
+- **Game Log Entry**: immutable record of a single state change within a room, ordered chronologically to guarantee that the full history of a Room Session can be replayed deterministically.
 - **Room State Update**: a minimal description of what changed in the room after an action resolves, published outward so that all connected players and spectators see the result.
-- **Elo Rating**: a player's global competitive ranking score, recalculated after each completed room.
-- **Advancement Rule**: the criterion by which winners of a tournament round progress to the next round (e.g., top 1 per room).
+- **Elo Rating**: a player's global competitive ranking score, recalculated from authoritative completed room or match results.
+- **Advancement Rule**: the criterion by which ranked tournament results progress to the next round, normally the top 3 players per non-final Match.
 - **Replay Position**: a pointer into the Game Log used to reconstruct room state for audit or dispute resolution.
-- **Forfeit**: automatic loss assigned to a player who is absent or disconnected beyond the allowed timeout in a tournament room.
+- **Forfeit**: timeout outcome for an absent or disconnected player; in an ad-hoc room it removes the player and the game may continue, while in a tournament it records a match loss and eliminates that player from advancement.
 
 ## 2. Domain Storytelling
 
@@ -89,14 +92,14 @@ An organizer creates a 1000 player tournament. Players register over the next ho
 
 Registration closes. The Tournament Orchestrator runs SeedBracket, producing 100 groups of 10 players for Round 1. It then issues StartRound, which triggers room provisioning: 100 rooms are requested from the Room Session context. Each room is created in `waiting` status with the assigned players pre-filled. As each room locks and starts, the Game Integrity context handles its own deck shuffle and deal. This means 100 independent rooms running in parallel.
 
-Room 42 finishes first. Its `RoomCompleted` event propagates to two consumers:
+Room 42 finishes first. Its `RoomCompleted` event contains the ranked room result and propagates to two consumers:
 
-1. The Tournament Orchestrator, which records the match result and advances the winner. The winner's bracket slot for Round 2 is filled.
+1. The Tournament Orchestrator, which records the match result and advances the top 3 players. Their bracket slots for Round 2 are filled.
 2. The Bracket Projection & Analytics context, which updates the denormalized bracket view so spectators can see real-time progress.
 
-Over the next few minutes, the remaining 99 rooms complete. Each `RoomCompleted` triggers the same flow. When the orchestrator detects that all 100 rooms in Round 1 have reported results, it emits `TournamentRoundCompleted` and opens the next round, seeding Round 2 with 100 winners in 10 new rooms.
+Over the next few minutes, the remaining 99 rooms complete. Each `RoomCompleted` triggers the same flow. When the orchestrator detects that all 100 rooms in Round 1 have reported results, it emits `TournamentRoundCompleted` and opens the next round, seeding Round 2 with 300 advancing players in 30 new rooms.
 
-This pattern repeats until a single champion emerges and the tournament transitions to `completed`.
+This pattern repeats until the remaining field is small enough for a final room of 10 players or fewer. That final room produces the tournament's final ranked result, and the tournament transitions to `completed`.
 
 **Actor handoffs in this scenario:**
 
@@ -125,8 +128,8 @@ sequenceDiagram
     RS->>GI: ShuffleDeck (per room)
     GI-->>RS: DeckShuffled
 
-    RS-->>TO: RoomCompleted (Room 42, winner=PlayerX)
-    TO->>TO: RecordMatchResult + AdvanceWinner
+    RS-->>TO: RoomCompleted (Room 42, rankedResult, top3)
+    TO->>TO: RecordMatchResult + AdvanceTop3
     RS-->>Proj: RoomCompleted (Room 42)
     Proj->>Proj: ProjectMatchResult
 
@@ -134,9 +137,9 @@ sequenceDiagram
 
     TO->>TO: TournamentRoundCompleted
     TO->>TO: OpenNextRound(2)
-    TO->>RS: ProvisionTournamentRooms (x10)
+    TO->>RS: ProvisionTournamentRooms (x30)
 
-    Note over TO: Rounds repeat until champion
+    Note over TO: Rounds repeat until <=10 players remain
     TO->>TO: CloseTournament
 ```
 
@@ -193,12 +196,12 @@ This is the hardest real-time part, since actions are concurrent and must be ser
 | Tournament Orchestrator | `StartRound` | `TournamentRoundStarted` | Starts a wave of room creation. |
 | Tournament Orchestrator | `ProvisionTournamentRooms` | `TournamentRoomsProvisioned` | May create 100k+ rooms in large rounds. |
 | Tournament Orchestrator | `AssignPlayersToRoom` | `PlayerAssignedToTournamentRoom` | Links bracket slots to room sessions. |
-| Room Session | `CompleteRoom` | `RoomCompleted` | Emits authoritative result for bracket advancement. |
+| Room Session | `CompleteRoom` | `RoomCompleted` | Emits authoritative ranked result for bracket advancement. |
 | Tournament Orchestrator | `RecordMatchResult` | `TournamentMatchResultRecorded` | Consumes room result, not direct DB reads. |
-| Tournament Orchestrator | `AdvanceWinner` | `WinnerAdvanced` | Updates next bracket slot. |
-| Tournament Orchestrator | `CompleteRound` | `TournamentRoundCompleted` | Fires when all round rooms are finalized. |
-| Tournament Orchestrator | `OpenNextRound` | `NextTournamentRoundStarted` | Repeats until champion exists. |
-| Tournament Orchestrator | `CloseTournament` | `TournamentCompleted` | Final winner is published. |
+| Tournament Orchestrator | `AdvanceTopPlayers` | `PlayersAdvanced` | Updates next-round bracket slots with the top 3 players from each non-final match. |
+| Tournament Orchestrator | `CompleteRound` | `TournamentRoundCompleted` | Fires only when all rooms in the round have reported authoritative results. |
+| Tournament Orchestrator | `OpenNextRound` | `NextTournamentRoundStarted` | Repeats until 10 or fewer players remain for the final room. |
+| Tournament Orchestrator | `CloseTournament` | `TournamentCompleted` | Final ranked tournament result is published. |
 
 This flow is justified by the assignment's explicit tournament-orchestrator requirement, it is suggested from the lectures to use **orchestration / saga** for complex workflows that need visibility and reliable error handling.
 
@@ -212,7 +215,7 @@ This flow is justified by the assignment's explicit tournament-orchestrator requ
 
 | Actor / Aggregate | Command | Domain Event | Policy / Rule |
 | --- | --- | --- | --- |
-| Room Session | `FinalizeMatch` | `RoomCompleted` | Produces authoritative winners / losers / score facts. |
+| Room Session | `FinalizeMatch` | `RoomCompleted` | Produces authoritative ranked result / score facts. |
 | Ranking | `ApplyEloUpdate` | `PlayerRatingUpdated` | Must consume authoritative match result only. |
 | Ranking | `UpdatePlayerStats` | `PlayerStatsUpdated` | Win rate, streaks, total matches, etc. |
 | Bracket Projection | `ProjectMatchResult` | `BracketProjectionUpdated` | Pure read-model projection. |
@@ -307,7 +310,7 @@ Append-only log store. Deployed close to the room-session process for low-latenc
 ## 4.4 Tournament Orchestration
 
 **Responsibility**
-Owns tournament lifecycle, bracket seeding, round progression, and winner advancement. It is the coordinator for the large-scale elimination workflow.
+Owns tournament lifecycle, bracket seeding, round progression, and advancement from ranked results. It is the coordinator for the large-scale elimination workflow.
 
 **Aggregate roots** (two aggregates in this context)
 
@@ -317,13 +320,13 @@ Owns tournament lifecycle, bracket seeding, round progression, and winner advanc
         1. A tournament can only transition forward through phases: `registration` → `seeding` → `in_progress` → `completed`.
         2. Registration closes when the player count reaches `TournamentSize` or a deadline passes.
         3. A tournament cannot be marked `completed` until every Round it references has reached `completed` status.
-2. `Round` → owns the bracket slots and advancement logic for one tournament phase. Referenced by `Tournament` via `RoundId`.
-    - *Entities*: `BracketSlot` (identity = slot index within the round; mutates as winners are recorded).
-    - *Value objects*: `AdvancementRule`, `RoundStatus`.
+2. `Round` → owns the bracket slots, room reports, and advancement logic for one tournament phase. Referenced by `Tournament` via `RoundId`.
+    - *Entities*: `BracketSlot` (identity = slot index within the round; mutates as advancing players are recorded).
+    - *Value objects*: `AdvancementRule`, `RoundStatus`, `MatchResult`.
     - *Invariants*:
-        1. A bracket slot's winner can only be set by an authoritative result from the specific room assigned to that slot; results from other rooms are rejected.
-        2. Once a bracket slot's winner is recorded, it cannot be overwritten (idempotent by `roomId` + `completionVersion`).
-        3. A round transitions to `completed` only when every bracket slot has a recorded winner.
+        1. A bracket slot's advancing player can only be set by an authoritative ranked result from the specific room assigned to that slot; results from other rooms are rejected.
+        2. Once a bracket slot's advancing player is recorded, it cannot be overwritten (idempotent by `roomId` + `completionVersion`).
+        3. A round transitions to `completed` only when every assigned room has reported an authoritative result and the resulting advancement slots have been filled.
 
 A million-player tournament with ~20 rounds should not load all bracket data as a single aggregate. Each Round is its own consistency boundary, sized to one phase. The Tournament aggregate coordinates Rounds by identity references, keeping its own footprint small.
 
@@ -414,7 +417,7 @@ flowchart LR
 
 | From | To | Pattern | Why |
 | --- | --- | --- | --- |
-| Tournament Orchestration | Room Session | **Customer-Supplier** | Tournament defines what kind of room it needs for a bracket match (commands); Room Session provides it. The dependency is directional: Tournament is the customer, Room is the supplier. |
+| Tournament Orchestration | Room Session | **Customer-Supplier** | Tournament defines what kind of room it needs for a tournament match (commands); Room Session provides it. The dependency is directional: Tournament is the customer, Room is the supplier. |
 | Room Session | Tournament Orchestration | **OHS / Published Language** | Room Session publishes `RoomCompleted` events via a stable contract. Tournament consumes them to advance brackets. This is **not** a bidirectional coupling -- it is a unidirectional event publication. |
 | Room Session | Game Integrity | **Customer-Supplier** | Room Session needs authoritative shuffle/draw/log behavior in room terms. |
 | Room Session | Ranking & Player Stats | **Open Host Service / Published Language** | Ranking consumes stable match-completion events. |
@@ -462,8 +465,9 @@ This facilitates lazy loading, reduces memory footprint, and ensures that each a
 | `ReplayPosition` | Value Object | A stateless pointer -- just an offset into the log. |
 | `Tournament` | Entity (Root) | Has `TournamentId`; mutable phase and round references. |
 | `Round` | Entity (Root) | Has `RoundId`; mutable bracket slot states. |
-| `BracketSlot` | Entity | Identity = index within a round; mutable (initially empty, then filled with a winner). |
+| `BracketSlot` | Entity | Identity = index within a round; mutable (initially empty, then filled with an advancing player). |
 | `AdvancementRule` | Value Object | Immutable criterion for progression. |
+| `MatchResult` | Value Object | Immutable ranked outcome from a tournament match or completed room, including advancing players when applicable. |
 | `TournamentPhase` | Value Object | Enum-like phase descriptor. |
 | `PlayerRating` | Entity (Root) | Has identity (tied to `PlayerId`); mutable rating value. |
 | `EloRating` | Value Object | Immutable number; replaced on each update. |
