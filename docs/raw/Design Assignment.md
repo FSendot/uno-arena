@@ -7,7 +7,7 @@
 ## 1. Ubiquitous Language
 
 - **Player**: authenticated participant in ad-hoc rooms or tournaments.
-- **Spectator**: read-only observer of a room's progress, receiving live state updates without the right to act.
+- **Spectator**: read-only observer of a room's progress, receiving live spectator-safe state updates without the right to act or to see private hands, hidden deck order, or player-only decisions.
 - **Room Session**: one authoritative Uno game room, from `waiting` to `in_progress` to `completed`; in tournaments, a Match may be composed of multiple Room Sessions.
 - **Match**: best-of-three tournament contest with early termination when a player wins 2 of 3 Room Sessions; it must produce an authoritative ranked result, including the top 3 advancing players when the Match is not the final one.
 - **Tournament**: multi-round elimination competition with bracket-based advancement that repeats until the remaining player set fits in a final room of 10 players or fewer.
@@ -24,8 +24,9 @@
 - **Challenge Window**: Another player can challenge a player with the Uno window available, penalizing the challenged player if successful, otherwise the challenger receives the Uno window penalty himself.
 - **Deck Seed**: the authoritative seed used to ensure fair, reproducible shuffling; immutable once a room starts.
 - **Game Log Entry**: immutable record of a single state change within a room, ordered chronologically to guarantee that the full history of a Room Session can be replayed deterministically.
-- **Room State Update**: a minimal description of what changed in the room after an action resolves, published outward so that all connected players and spectators see the result.
-- **Elo Rating**: a player's global competitive ranking score, recalculated from authoritative completed room or match results.
+- **Room State Update**: a minimal description of what changed in the room after an action resolves, published outward as either a player-specific update or a spectator-safe projection.
+- **Elo Rating**: a player's casual-game skill score, recalculated from authoritative completed room results; tournament placement is tracked separately so elimination performance does not distort casual Elo.
+- **Tournament Placement Rating**: competitive tournament score derived from ranked tournament finishes, advancement depth, and final placement rather than casual room outcomes.
 - **Advancement Rule**: the criterion by which ranked tournament results progress to the next round, normally the top 3 players per non-final Match.
 - **Replay Position**: a pointer into the Game Log used to reconstruct room state for audit or dispute resolution.
 - **Forfeit**: timeout outcome for an absent or disconnected player; in an ad-hoc room it removes the player and the game may continue, while in a tournament it records a match loss and eliminates that player from advancement.
@@ -44,7 +45,7 @@ Play begins. Alice plays a Red 7 at sequence number 5. The Room Session validate
 
 Now Carol plays a Reverse card at sequence 6, but Bob, who has not yet received that update, submits a Green 3 also at sequence 6. The Room Session detects the stale sequence number and **rejects** Bob's action. Bob's client receives the rejection and immediately reconciles by consuming the incoming state update stream, which contains Carol's Reverse. Bob now sees the updated board, adjusts, and resubmits at the correct sequence number.
 
-Play continues until Alice plays her second-to-last card. The Uno Window opens, so Alice must call Uno before any opponent reports her. Alice calls in time, `UnoCalled` is recorded. One turn later, Alice plays her final card, and the Room Session transitions to `completed`. The `RoomCompleted` event is published and consumed downstream by Ranking & Player Stats (to update Elo) and **Bracket** Projection & Analytics (to update player statistics).
+Play continues until Alice plays her second-to-last card. The Uno Window opens, so Alice must call Uno before any opponent reports her. Alice calls in time, `UnoCalled` is recorded. One turn later, Alice plays her final card, and the Room Session transitions to `completed`. The `RoomCompleted` event is published and consumed downstream by Ranking & Player Stats (to update casual Elo) and **Bracket** Projection & Analytics (to update player statistics).
 
 **Actor handoffs in this scenario:**
 
@@ -83,7 +84,7 @@ sequenceDiagram
     Note over RS: ... game continues to completion ...
     RS-->>SSE: RoomCompleted
     RS->>Rank: RoomCompleted event
-    Rank->>Rank: ApplyEloUpdate
+    Rank->>Rank: ApplyCasualEloUpdate
 ```
 
 ### Scenario 2: Tournament Round Progression
@@ -216,12 +217,13 @@ This flow is justified by the assignment's explicit tournament-orchestrator requ
 | Actor / Aggregate | Command | Domain Event | Policy / Rule |
 | --- | --- | --- | --- |
 | Room Session | `FinalizeMatch` | `RoomCompleted` | Produces authoritative ranked result / score facts. |
-| Ranking | `ApplyEloUpdate` | `PlayerRatingUpdated` | Must consume authoritative match result only. |
-| Ranking | `UpdatePlayerStats` | `PlayerStatsUpdated` | Win rate, streaks, total matches, etc. |
+| Ranking | `ApplyCasualEloUpdate` | `PlayerRatingUpdated` | Updates casual Elo from authoritative ad-hoc room results only. |
+| Ranking | `ApplyTournamentPlacementUpdate` | `TournamentPlacementRatingUpdated` | Updates tournament rating from authoritative tournament match placements and final standings. |
+| Ranking | `UpdatePlayerStats` | `PlayerStatsUpdated` | Win rate, streaks, total matches, tournament finishes, etc. |
 | Bracket Projection | `ProjectMatchResult` | `BracketProjectionUpdated` | Pure read-model projection. |
 | Analytics Projection | `ProjectStats` | `AnalyticsProjectionUpdated` | Optimized for reads, not transactional writes. |
 
-The assignment explicitly requires a global Elo-based ranking system and a CQRS read model that consumes `game.completed`-like events to build denormalized bracket and player-stat views for heavy read traffic.
+The assignment explicitly requires a global Elo-based ranking system and a CQRS read model that consumes `game.completed`-like events to build denormalized bracket and player-stat views for heavy read traffic. Ranking separates casual Elo from tournament placement rating: the former measures ordinary room performance, while the latter measures advancement and final placement in elimination tournaments.
 
 ## Flow E: Concurrency and recovery
 
@@ -339,22 +341,23 @@ Relational database. Stores tournament metadata, bracket structures, and saga st
 ## 4.5 Ranking & Player Stats
 
 **Responsibility**
-Consumes authoritative match results and updates `EloRating` plus long-lived player performance statistics.
+Consumes authoritative gameplay and tournament results, updates casual `EloRating`, updates `TournamentPlacementRating`, and maintains long-lived player performance statistics.
 
-**Aggregate root**`PlayerRating`
+**Aggregate root** `PlayerRating`
 
 **Internal entities / value objects**
 
-- *Value objects*: `EloRating`, `RatingDelta`, `PlayerPerformanceSnapshot`.
+- *Value objects*: `EloRating`, `TournamentPlacementRating`, `RatingDelta`, `TournamentPlacementDelta`, `PlayerPerformanceSnapshot`.
 
 **Invariants**
 
-1. Elo updates are derived only from authoritative `RoomCompleted` events; direct writes are not allowed.
-2. A player's rating cannot drop below a configured floor value.
-3. Duplicate match results for the same `roomId` are ignored (idempotent consumption).
+1. Casual Elo updates are derived only from authoritative ad-hoc `RoomCompleted` events; direct writes are not allowed.
+2. Tournament placement rating updates are derived only from authoritative tournament `MatchResult` and `TournamentCompleted` events.
+3. A player's rating cannot drop below a configured floor value.
+4. Duplicate room or tournament results are ignored using the relevant source idempotency key.
 
 **Why separate**
-The model here is not "whose turn is it?" but "how did this match change long-term competitive standing?" That is a different language and therefore a different bounded context.
+The model here is not "whose turn is it?" but "how did this result change long-term competitive standing?" It also distinguishes casual skill from tournament achievement, which is a different language and therefore a different bounded context.
 
 **Data ownership**
 Relational database. Consumes events asynchronously via a durable message bus.
@@ -362,15 +365,15 @@ Relational database. Consumes events asynchronously via a durable message bus.
 ## 4.6 Bracket Projection & Analytics
 
 **Responsibility**
-Maintains denormalized tournament bracket views and player-stat projections optimized for heavy read traffic.
+Maintains denormalized tournament bracket views, player-stat projections, and spectator-safe room projections optimized for heavy read traffic.
 
 **Core model**
 This is a read model, not the source of truth.
 
-**Internal entities / value objects** `BracketProjection`, `PlayerStatsProjection`, `TournamentSummaryView`.
+**Internal entities / value objects** `BracketProjection`, `PlayerStatsProjection`, `TournamentSummaryView`, `SpectatorRoomProjection`.
 
 **Why separate**
-This context exists to serve reads efficiently, not to enforce business invariants transactionally. Critically, it consumes events from multiple upstream contexts, both Room Session and Tournament Orchestration, which gives it its own integration boundary and published-language contracts.
+This context exists to serve reads efficiently, not to enforce business invariants transactionally. Critically, it consumes events from multiple upstream contexts, both Room Session and Tournament Orchestration, which gives it its own integration boundary and published-language contracts. Spectator projections are explicitly sanitized: even if an active player opens a second anonymous spectator connection, that connection receives only public room progress, card counts, discard state, and bracket/stat views, never private hand contents, hidden deck information, or action privileges.
 
 **Data ownership**
 Denormalized, eventually consistent store optimized for heavy read traffic. Can be fully rebuilt from the upstream event streams at any time.
@@ -381,11 +384,12 @@ The following are critical parts of the architecture, but I would **not** model 
 
 - REST API layer
 - SSE broadcaster tier
+- Spectator View / anonymous spectator connection
 - Redis Streams
 - Kafka topics / consumers / producers
 - Kubernetes pods / autoscaling
 
-REST controllers and Kafka listeners are adapters around the domain, not the domain itself; they translate external requests/events into commands and publish outward-facing effects, while the core remains independent of those technologies. So, for UnoArena, the SSE broadcaster is infrastructure, not a domain context. The domain context is `Room Session`; SSE is one way that room state updates are delivered outward.
+REST controllers and Kafka listeners are adapters around the domain, not the domain itself; they translate external requests/events into commands and publish outward-facing effects, while the core remains independent of those technologies. So, for UnoArena, the SSE broadcaster is infrastructure, not a domain context. The domain context is `Room Session`; SSE is one way that room state updates are delivered outward. Similarly, Spectator View is a sanitized projection plus delivery policy, not a separate source of truth. Anonymous spectator traffic is always served from spectator-safe projections, so a player cannot gain private information by opening a second unauthenticated connection.
 
 ## 6. Context Map
 
@@ -407,10 +411,12 @@ flowchart LR
     Room -->|"OHS / Published Language: RoomCompleted"| Tournament
 
     Room -->|"OHS / Published Language"| Ranking
+    Tournament -->|"OHS / Published Language: placements"| Ranking
     Room -->|"OHS / Published Language"| Projection
     Tournament -->|"OHS / Published Language"| Projection
 
-    Room -. "publishes state updates" .-> SSE
+    Room -. "player-specific state updates" .-> SSE
+    Projection -. "spectator-safe projections" .-> SSE
 ```
 
 ### Relationship patterns
@@ -420,9 +426,11 @@ flowchart LR
 | Tournament Orchestration | Room Session | **Customer-Supplier** | Tournament defines what kind of room it needs for a tournament match (commands); Room Session provides it. The dependency is directional: Tournament is the customer, Room is the supplier. |
 | Room Session | Tournament Orchestration | **OHS / Published Language** | Room Session publishes `RoomCompleted` events via a stable contract. Tournament consumes them to advance brackets. This is **not** a bidirectional coupling -- it is a unidirectional event publication. |
 | Room Session | Game Integrity | **Customer-Supplier** | Room Session needs authoritative shuffle/draw/log behavior in room terms. |
-| Room Session | Ranking & Player Stats | **Open Host Service / Published Language** | Ranking consumes stable match-completion events. |
-| Room Session | Bracket Projection & Analytics | **Open Host Service / Published Language** | Projection consumes room-completion and stats facts to build read models. |
+| Room Session | Ranking & Player Stats | **Open Host Service / Published Language** | Ranking consumes stable ad-hoc room-completion events for casual Elo. |
+| Tournament Orchestration | Ranking & Player Stats | **Open Host Service / Published Language** | Ranking consumes tournament placements and final standings for tournament placement rating. |
+| Room Session | Bracket Projection & Analytics | **Open Host Service / Published Language** | Projection consumes room-completion and public state facts to build read models, including spectator-safe room projections. |
 | Tournament Orchestration | Bracket Projection & Analytics | **Open Host Service / Published Language** | Projection also consumes round/tournament events. |
+| Bracket Projection & Analytics | SSE Broadcaster | **Published Language to Adapter** | SSE may deliver public spectator projections, but it cannot query private room state or enrich anonymous spectators with player-only data. |
 | External auth provider | Player Identity & Access | **Conformist + ACL** | The external provider's model does not leak into UnoArena's domain. The ACL translates external identities into `PlayerId` and `PlayerEligibility` value objects. |
 
 ## 7. Aggregate Design
@@ -435,7 +443,7 @@ flowchart LR
 | Room Session | `RoomSession` | Single consistency boundary for roster, turn, penalties, sequence, and status. |
 | Game Integrity | `AuthoritativeDeck`, `GameLog` | Two distinct consistency boundaries: deck/RNG state vs. immutable audit trail. |
 | Tournament Orchestration | `Tournament`, `Round` | Tournament owns lifecycle; Round owns per-phase bracket data. Split to avoid loading all bracket data as one unit at scale. |
-| Ranking & Player Stats | `PlayerRating` | Owns Elo transitions and rating invariants. |
+| Ranking & Player Stats | `PlayerRating` | Owns casual Elo, tournament placement rating, and rating invariants. |
 
 ### 7.2 Reference by identity
 
@@ -470,8 +478,11 @@ This facilitates lazy loading, reduces memory footprint, and ensures that each a
 | `MatchResult` | Value Object | Immutable ranked outcome from a tournament match or completed room, including advancing players when applicable. |
 | `TournamentPhase` | Value Object | Enum-like phase descriptor. |
 | `PlayerRating` | Entity (Root) | Has identity (tied to `PlayerId`); mutable rating value. |
-| `EloRating` | Value Object | Immutable number; replaced on each update. |
-| `RatingDelta` | Value Object | Immutable description of a rating change from one match. |
+| `EloRating` | Value Object | Immutable casual skill score; replaced after authoritative ad-hoc room results. |
+| `TournamentPlacementRating` | Value Object | Immutable tournament achievement score; replaced after authoritative placement events. |
+| `RatingDelta` | Value Object | Immutable description of a casual Elo change from one room result. |
+| `TournamentPlacementDelta` | Value Object | Immutable description of a tournament rating change from placement depth or final standing. |
+| `SpectatorRoomProjection` | Value Object / Read Model | Sanitized public room view: progress, discard state, card counts, and public roster only. |
 
 ## 8. Service Decomposition
 
@@ -485,8 +496,8 @@ One microservice per bounded context:
 | Room Session | room-session-service | Event-sourced store | Core domain; owns all game-rule logic and room lifecycle. Must be autonomous so game play is never blocked by other services. |
 | Game Integrity | game-integrity-service | Append-only log store | Separate audit and fairness boundary; must be independently verifiable. Deployed close to the room service for low latency. |
 | Tournament Orchestration | tournament-service | Relational DB | Core domain; owns bracket structure and round-progression saga. Needs transactional guarantees for bracket state. |
-| Ranking & Player Stats | ranking-service | Relational DB | Supporting domain; consumes match results asynchronously. Decoupled so ranking lag never affects live gameplay. |
-| Bracket Projection & Analytics | projection-service | Denormalized store | CQRS read model; aggregates events from multiple upstream contexts. Optimized for read throughput, not write consistency. |
+| Ranking & Player Stats | ranking-service | Relational DB | Supporting domain; consumes ad-hoc room results for casual Elo and tournament placement events for tournament rating. Decoupled so ranking lag never affects live gameplay. |
+| Bracket Projection & Analytics | projection-service | Denormalized store | CQRS read model; aggregates events from multiple upstream contexts and serves spectator-safe projections. Optimized for read throughput, not write consistency. |
 
 ### 8.2 Data ownership and isolation
 
@@ -494,7 +505,8 @@ No service shares a database with another.
 
 - Room Session and Game Integrity each own their own event/log partitions. Game Integrity's append-only log is not the same store as Room Session's aggregate state.
 - Tournament Orchestration owns its relational schema exclusively. Bracket data is never queried directly by other services; it is published as events.
-- Bracket Projection builds its read models by consuming events from Room Session and Tournament Orchestration. If the projection store is lost, it can be fully rebuilt by replaying the upstream event streams.
+- Ranking owns both casual Elo and tournament placement rating tables. Tournament placement ratings are not written directly by Tournament Orchestration; they are computed from published placement events.
+- Bracket Projection builds its read models by consuming events from Room Session and Tournament Orchestration. If the projection store is lost, it can be fully rebuilt by replaying the upstream event streams. Spectator-safe projections are stored separately from private room state and never contain private hands or hidden deck data.
 
 ### 8.3 Resilience reasoning
 
@@ -502,9 +514,11 @@ No service shares a database with another.
 
 **Room recovery from event log.** If a room-session process crashes mid-game, the authoritative event log (written by Game Integrity) contains every state change. A new process can replay the log and resume from the exact point of failure. This is the direct benefit of combining event sourcing with the immutable GameLog aggregate.
 
-**State-update broadcaster independence.** The SSE broadcaster tier is stateless and scaled independently from the game-logic services. If a broadcaster instance crashes, clients reconnect and catch up from the last known sequence number. The game logic is unaffected because the broadcaster is a pure infrastructure adapter with no domain state.
+**State-update broadcaster independence.** The SSE broadcaster tier is stateless and scaled independently from the game-logic services. If a broadcaster instance crashes, clients reconnect and catch up from the last known sequence number. The game logic is unaffected because the broadcaster is a pure infrastructure adapter with no domain state. For anonymous spectator connections, the broadcaster can only stream the `SpectatorRoomProjection`; it never receives private per-player hands, so a player opening a second anonymous connection does not gain extra information.
 
 **Tournament saga idempotency.** The Tournament Orchestrator's saga must handle duplicate `RoomCompleted` events (e.g., at-least-once delivery). Each `RecordMatchResult` command is idempotent by `(roomId, completionVersion)`, so duplicates are safely ignored.
+
+**Ranking stream separation.** Casual Elo and tournament placement rating consume different published events and use different idempotency keys. This prevents a tournament placement update from being accidentally applied as a casual Elo update, or an ad-hoc room result from inflating tournament achievement.
 
 ### 8.4 Distributed Monolith avoidance
 
@@ -534,7 +548,7 @@ The following are the five highest-impact unresolved design questions, gathered 
 
 **Game Integrity as a separate BC from Room Session.** This adds a process-boundary call for every card draw and log append. The alternative, merging Game Integrity into Room Session, would simplify latency but blur the audit boundary: the same aggregate that enforces game rules would also own the tamper-proof log, reducing separation of concerns. Keeping them separate means the audit trail can be independently verified and the RNG service can be independently tested, which is critical for the assignment's cash-prize dispute resolution requirement. If auditability were not a first-class requirement, merging would be the simpler and correct choice.
 
-**Bracket Projection as its own BC rather than a read model inside Tournament.** This adds operational cost (an extra service to deploy and monitor) but avoids coupling the read-optimized store to the tournament saga logic. Since the projection consumes events from both Room Session and Tournament Orchestration, folding it into Tournament would mean Tournament has a direct dependency on Room Session's event schema, which would increase coupling.
+**Bracket Projection as its own BC rather than a read model inside Tournament.** This adds operational cost (an extra service to deploy and monitor) but avoids coupling the read-optimized store to the tournament saga logic. Since the projection consumes events from both Room Session and Tournament Orchestration, folding it into Tournament would mean Tournament has a direct dependency on Room Session's event schema, which would increase coupling. Keeping spectator-safe projections here also avoids exposing private Room Session state through the anonymous spectator path.
 
 ### 9.3 CRUD vs. DDD decisions
 
@@ -545,8 +559,8 @@ Not every bounded context warrants full DDD. Following the matrix (complexity vs
 | Room Session | High | High (Core) | Full DDD: rich domain model, aggregates, event sourcing. |
 | Tournament Orchestration | High | High (Core) | Full DDD: rich aggregates, orchestrated saga. |
 | Game Integrity | Medium-High | High (Core/Supporting) | DDD: two focused aggregates with strict invariants. |
-| Ranking & Player Stats | Low-Medium | Medium (Supporting) | Simpler Transaction Script or thin domain layer. Elo calculation is formulaic, not behavior-rich. |
-| Bracket Projection & Analytics | Low | Medium (Supporting) | CQRS read-model projections. No domain logic; pure denormalization. CRUD-style writes to the read store. |
+| Ranking & Player Stats | Low-Medium | Medium (Supporting) | Simpler Transaction Script or thin domain layer. Casual Elo and tournament placement formulas are explicit policies, not behavior-rich aggregates. |
+| Bracket Projection & Analytics | Low | Medium (Supporting) | CQRS read-model projections. Sanitization for spectator-safe views is a projection policy; writes remain CRUD-style denormalization. |
 | Player Identity & Access | Low | Low (Generic) | Buy, don't build. Delegate to auth provider. The ACL adapter is simple CRUD/stateless translation. |
 
 ### 9.4 Adaptability
