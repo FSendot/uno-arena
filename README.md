@@ -12,6 +12,7 @@ This repository contains the first assignment deliverables for the UnoArena doma
 - [06. Edge Cases and Failure-Path Analysis](./docs/06-edge-cases-and-failure-path-analysis.md)
 - [07. Consistency and Recovery Strategy](./docs/07-consistency-and-recovery-strategy.md)
 - [08. Open Questions and Assumptions](./docs/08-open-questions-and-assumptions.md)
+- [EventStorming Raw Artifact](./docs/raw/Design%20Assignment.md)
 
 ## Scope Notes
 
@@ -25,3 +26,4 @@ This repository contains the first assignment deliverables for the UnoArena doma
 2. Read the bounded contexts and context map to understand ownership and integration boundaries.
 3. Review aggregates and invariants before reading the command/event catalog.
 4. Use the event-flow and failure-path documents to validate the model under realistic conditions.
+5. Review the raw EventStorming artifact for the event-first discovery tables, hotspots, and narrative flow evidence.

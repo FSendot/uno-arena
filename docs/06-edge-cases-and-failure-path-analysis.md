@@ -24,16 +24,21 @@ Two players attempt to play different cards at nearly the same time.
 ### Expected domain behavior
 
 - A temporary disconnect does not immediately remove the player from the room.
-- The seat remains reserved for a reconnect grace period.
+- The seat and hand remain reserved for the fixed 60-second reconnection window.
+- If the disconnect happens during another player's turn, play continues and the disconnected player can return with the same hand while the window is open.
+- If the disconnect happens during the disconnected player's own turn, that turn is skipped during the 60-second window and no bot substitution occurs.
 - Rejoin is allowed only for the same authenticated player identity and only while the match is not terminal.
-- If the grace period expires in a tournament match, Tournament Orchestration may declare a forfeit based on policy.
-- If the room is ad-hoc, the room may either wait, continue under timeout rules, or cancel before start depending on the current phase.
+- Reconnecting within the window restores the original seat and hand.
+- Reconnecting after the window observes the resulting forfeit state and does not undo it.
+- If the window expires in a casual room, the player leaves participation and the game continues with remaining players.
+- If the window expires in a tournament room, `PlayerForfeited` counts as a match loss and eliminates the player from advancement.
 
 ### Emitted events
 
 - `PlayerDisconnected`
 - `PlayerReconnected` when successful
-- `PlayerForfeited` if reconnect window expires under tournament policy
+- `TurnSkipped` if the disconnected player's own turn is skipped
+- `PlayerForfeited` if the 60-second reconnect window expires
 - `MatchCompleted` and `RoomCompleted` if the forfeit resolves the match
 
 ## 3. Stale Commands and Replayed Commands
@@ -66,7 +71,7 @@ Room Gameplay commits `MatchCompleted`, but Ranking is temporarily unavailable.
 ### Emitted events
 
 - initial business event: `MatchCompleted`, `RoomCompleted`
-- later downstream business events: `PlayerRatingUpdated`, `TournamentMatchResultRecorded`, `WinnerAdvanced`
+- later downstream business events: `PlayerRatingUpdated`, `TournamentMatchResultRecorded`, `PlayersAdvanced`
 - retry attempts themselves are infrastructure concerns, not new business events
 
 ## 5. Security and Abuse Scenarios
@@ -96,6 +101,19 @@ Room Gameplay commits `MatchCompleted`, but Ranking is temporarily unavailable.
 - `PlayerRemovedFromRoomForAbuse` if moderation escalates
 - otherwise no business event for each rejected spam request
 
+### Sequence number spoofing and replay
+
+**Behavior**
+
+- Sequence numbers are server-issued room versions, not client authority.
+- A forged future sequence number or replayed old sequence number is rejected before domain mutation.
+- The rejected command appends no game-log entry and cannot alter turn order, hands, or penalties.
+
+**Events**
+
+- no business event for the rejected command
+- optional internal `SuspiciousCommandDetected` audit signal
+
 ## 6. Spectator Privacy Violations
 
 ### Example
@@ -105,8 +123,10 @@ A player attempts to subscribe through the spectator channel to infer another pl
 
 - Spectator View publishes only filtered projections.
 - Private hand events never cross the Spectator View boundary.
+- A reconnecting player receives only their own private hand plus public room state, never opponent hands through any channel.
+- The immutable GameLog may contain full private state for audit, but Spectator View cannot query the raw log.
 - If an unsafe event enters the projector, it is dropped and flagged internally.
-- A player using a spectator connection still receives only the spectator-safe projection unless they are separately authorized as a room participant on the player channel.
+- A player opening a second anonymous spectator connection still receives only the spectator-safe projection unless they are separately authorized as a room participant on the player channel.
 
 ### Emitted events
 
@@ -124,7 +144,7 @@ A player attempts to subscribe through the spectator channel to infer another pl
 
 ### Emitted events
 
-- accepted result: `TournamentMatchResultRecorded`, `WinnerAdvanced`
+- accepted result: `TournamentMatchResultRecorded`, `PlayersAdvanced`
 - conflict branch: `TournamentResultQuarantined`
 
 ## 8. Host Leaves Before Match Start

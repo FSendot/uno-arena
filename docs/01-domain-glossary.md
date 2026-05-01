@@ -5,12 +5,12 @@ This glossary defines the ubiquitous language used across the rest of the submis
 ## Core Competition Terms
 
 - **Player**: authenticated participant allowed to join rooms, play games, and register for tournaments.
-- **Spectator**: read-only observer of a room or tournament who receives filtered updates but cannot submit gameplay commands.
+- **Spectator**: read-only observer of a room or tournament who receives filtered updates but cannot submit gameplay commands or see private hands, hidden deck order, or player-only decisions.
 - **Room**: the bounded play space where a roster of players and spectators connect. A room hosts exactly one match.
 - **Game**: one single Uno game, starting from the initial deal and ending when one player empties their hand or another terminating rule applies.
-- **Match**: a best-of-three series played inside one room. A match contains up to three games and ends when one player or team wins two games.
-- **Round**: one elimination tier of a tournament. A round contains many matches running in parallel and advances winners to the next tier.
-- **Tournament**: the full elimination competition composed of sequential rounds until one champion remains.
+- **Match**: a best-of-three series played inside one room. A match contains up to three games, can end early once a player wins two games, and produces an authoritative ranked result by match wins for advancement.
+- **Round**: one elimination tier of a tournament. A round contains many matches running in parallel and closes only after every assigned room reports an authoritative terminal result.
+- **Tournament**: the full elimination competition composed of sequential rounds until 10 or fewer players remain for a final room.
 
 ## Room Gameplay Terms
 
@@ -22,7 +22,9 @@ This glossary defines the ubiquitous language used across the rest of the submis
 - **Sequence Number**: monotonic room version attached to commands so stale or replayed actions can be rejected.
 - **Active Color**: the current effective color on the discard pile, including a color chosen after a wild card.
 - **Penalty Stack**: the pending draw penalty that must be resolved before ordinary play resumes.
-- **Uno Window**: the rule window in which a player who reached one remaining card must successfully call Uno or be penalized.
+- **Hand**: private set of cards held by one player in a game; only that player may see and play those cards.
+- **Uno Window**: the rule window in which a player who reached one remaining card must successfully call Uno or be penalized; it closes after 5 seconds or as soon as the next player begins their turn, whichever comes first.
+- **Challenge Window**: the period in which an opponent may challenge a missing Uno call; a successful challenge makes the target draw 2 cards, while an invalid challenge makes the challenger draw 2 cards.
 - **Game Scoreboard**: the match-level score tracking how many games each player has won in the current best-of-three match.
 
 ## Integrity and Audit Terms
@@ -36,14 +38,15 @@ This glossary defines the ubiquitous language used across the rest of the submis
 ## Tournament Terms
 
 - **Bracket Slot**: a participant position in a round, later filled by a registered player or an advancing winner.
-- **Advancement Rule**: rule that determines which player advances from a match to the next round.
-- **Forfeit**: loss assigned because a player failed to appear, reconnect, or remain eligible within the allowed policy window.
+- **Advancement Rule**: rule that determines the top 3 advancing players from a non-final match by match wins, then by lowest cumulative card points, then by earliest final-game completion time.
+- **Forfeit**: loss assigned after the fixed 60-second reconnection window expires. In a casual room it ends the player's participation and the game may continue; in a tournament room it counts as a match loss and eliminates the player.
 - **Round Result**: the authoritative set of completed match outcomes used to decide round completion and next-round seeding.
 
 ## Ranking Terms
 
-- **Elo Rating**: a player's competitive rating used for persistent ranking across matches.
-- **Rating Delta**: the calculated Elo increase or decrease produced by one completed rated match.
+- **Elo Rating**: a player's casual-game skill rating, updated only from completed non-abandoned ad-hoc games.
+- **Tournament Placement Rating**: separate tournament score derived from tournament advancement depth and final placement, never from casual Elo updates.
+- **Rating Delta**: the calculated Elo increase or decrease produced by one completed casual game using final placement order from first through last.
 - **Player Performance Snapshot**: immutable summary of a player's standing after a rating update.
 
 ## Explicit Distinctions
@@ -55,7 +58,7 @@ This glossary defines the ubiquitous language used across the rest of the submis
 
 Because of this distinction:
 
-- `GameCompleted` means one Uno game ended, but the room may continue if the match score is not yet decisive.
-- `MatchCompleted` means the best-of-three series ended and the room can transition toward completion.
+- `GameCompleted` means one Uno game ended and may update casual Elo if the game is ad-hoc and non-abandoned.
+- `MatchCompleted` means the best-of-three series ended and the room can transition toward completion or report tournament advancement facts.
 - `TournamentRoundCompleted` means every match assigned to that round has a final result.
 - `TournamentCompleted` means the final round produced the champion.

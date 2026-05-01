@@ -61,13 +61,13 @@ Its language is about brackets, rounds, and advancement across many rooms. It co
 - tournament registration
 - round creation and completion
 - room assignment for tournament matches
-- winner advancement
+- top-3 advancement by match wins, card-point tie-break, and completion-time tie-break
 - champion publication
 
 ## 5. Ranking
 
 **Responsibility**
-Owns persistent competitive standing, Elo calculations, and ranking history.
+Owns persistent competitive standing, casual Elo calculations, tournament-placement rating, and ranking history.
 
 **Why separate**
 The model is long-lived and cross-match. Ranking must consume authoritative results but should never block live gameplay.
@@ -76,6 +76,7 @@ The model is long-lived and cross-match. Ranking must consume authoritative resu
 
 - `PlayerRating`
 - `EloRating`
+- `TournamentPlacementRating`
 - `RatingDelta`
 - rating history and ranking projections
 
@@ -109,10 +110,10 @@ flowchart LR
     IS -->|eligibility, authenticated identity| TO
     GI -->|deck and log confirmations| RG
     RG -->|match/game outcomes| TO
-    RG -->|authoritative match completion| RK
+    RG -->|completed casual game outcomes| RK
     RG -->|filtered room facts| SV
     TO -->|round and bracket facts| SV
-    TO -->|tournament participation facts| RK
+    TO -->|tournament placement facts| RK
 ```
 
 ## Upstream and Downstream Summary
@@ -123,9 +124,10 @@ flowchart LR
 | Identity and Session | Tournament Orchestration | Upstream provider of eligibility and identity |
 | Game Integrity | Room Gameplay | Supporting upstream service for deck and append-only log confirmations |
 | Room Gameplay | Tournament Orchestration | Upstream provider of authoritative tournament match results |
-| Room Gameplay | Ranking | Upstream provider of authoritative rated match outcomes |
+| Room Gameplay | Ranking | Upstream provider of authoritative completed non-abandoned casual game outcomes |
 | Room Gameplay | Spectator View | Upstream provider of filtered room-level facts |
 | Tournament Orchestration | Spectator View | Upstream provider of bracket and round status |
+| Tournament Orchestration | Ranking | Upstream provider of tournament placement facts for the separate tournament-placement rating |
 
 ## Spectator View Boundary
 
@@ -138,6 +140,7 @@ flowchart LR
 - active color
 - direction of play
 - public penalty stack
+- public card counts
 - game score within the match
 - match winner after completion
 - tournament bracket and round status
@@ -173,7 +176,7 @@ flowchart LR
 - `TournamentCreated`
 - `TournamentRoundStarted`
 - `TournamentMatchResultRecorded`
-- `WinnerAdvanced`
+- `PlayersAdvanced`
 - `TournamentRoundCompleted`
 - `TournamentCompleted`
 
@@ -185,3 +188,5 @@ The Spectator View context never subscribes to raw player-private events such as
 - a richer internal event that is translated by an anti-corruption/filtering layer before entering Spectator View.
 
 This prevents accidental leakage of hidden information through replay, logs, or transport-level fan-out.
+
+If an active player opens a second anonymous spectator connection, that connection is still treated as a spectator-only reader. It receives the same sanitized projection as any other observer and never gains access to that player's private hand, opponent hands, hidden deck state, or player-command privileges. The immutable game log may contain full private state for audit, but Spectator View cannot query that log directly.
