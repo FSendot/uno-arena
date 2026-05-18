@@ -1,8 +1,8 @@
-# UnoArena - First Assignment
+# UnoArena - Design and Architecture Assignments
 
-This repository contains the first assignment deliverables for the UnoArena domain modeling exercise. The documents are organized by required deliverable so the submission can be reviewed section by section.
+This repository contains the current UnoArena design package and the architecture checkpoint deliverables. The documents are organized so the domain model, architecture views, ADRs, and design changelog can be reviewed section by section.
 
-## Index
+## Design Package
 
 - [01. Domain Glossary](./docs/01-domain-glossary.md)
 - [02. Bounded Contexts and Context Map](./docs/02-bounded-contexts-and-context-map.md)
@@ -14,10 +14,38 @@ This repository contains the first assignment deliverables for the UnoArena doma
 - [08. Open Questions and Assumptions](./docs/08-open-questions-and-assumptions.md)
 - [EventStorming Raw Artifact](./docs/raw/Design%20Assignment.md)
 
+## Architecture Package
+
+- [00. Overview and Traceability](./docs/architecture/00-overview-and-traceability.md)
+- [01. Context and Container View](./docs/architecture/01-context-and-container-view.md)
+- [02. Bounded Context Architecture](./docs/architecture/02-bounded-context-architecture.md)
+- [03. Communication Patterns](./docs/architecture/03-communication-patterns.md)
+- [04. Persistence by Context](./docs/architecture/04-persistence-by-context.md)
+- [05. Capacity Sketch](./docs/architecture/05-capacity-sketch.md)
+- [06. Cross-Cutting Concerns](./docs/architecture/06-cross-cutting-concerns.md)
+- [07. Sequence Diagrams](./docs/architecture/07-sequence-diagrams.md)
+
+## Decision Log
+
+- [ADR-0001. REST Command Envelope and SSE](./docs/adr/0001-rest-command-envelope-and-sse.md)
+- [ADR-0002. EventStoreDB for Game Integrity](./docs/adr/0002-eventstoredb-for-game-integrity.md)
+- [ADR-0003. Kafka for Async Integration](./docs/adr/0003-kafka-for-async-integration.md)
+- [ADR-0004. Separate Physical Databases per Bounded Context](./docs/adr/0004-separate-physical-databases-per-bounded-context.md)
+- [ADR-0005. Redis as Acceleration and Projection Only](./docs/adr/0005-redis-as-acceleration-and-projection-only.md)
+- [ADR-0006. Sharded Tournament Provisioning](./docs/adr/0006-sharded-tournament-provisioning.md)
+- [ADR-0007. Projections Own Privacy Filtering and BFF Only Routes](./docs/adr/0007-projections-own-privacy-filtering-and-bff-only-routes.md)
+- [ADR-0008. Analytics Public Read Models with ClickHouse](./docs/adr/0008-analytics-public-read-models-with-clickhouse.md)
+- [ADR-0009. No Service Mesh as Required Component](./docs/adr/0009-no-service-mesh-as-required-component.md)
+
+## Change Tracking
+
+- [Design Changelog](./CHANGELOG-design.md)
+
 ## Scope Notes
 
-- The focus is domain modeling, not deployment or infrastructure design.
-- Architectural adapters such as REST, SSE, Kafka, Redis, and Kubernetes are intentionally treated as implementation concerns unless they affect domain boundaries or invariants.
+- The design package defines domain language, bounded contexts, aggregates, commands, events, edge cases, consistency, and assumptions.
+- The architecture package translates those design decisions into deployable services, interfaces, persistence, communication patterns, capacity reasoning, and operational constraints.
+- Architectural adapters such as REST, SSE, Kafka, Redis, EventStoreDB, ClickHouse, and service deployment choices are documented where they affect assignment invariants or scaling constraints.
 - The modeling assumes Uno rooms support ad-hoc play and tournament-assigned play, and that tournament matches are best-of-three series.
 
 ## Suggested Reading Order
@@ -26,4 +54,6 @@ This repository contains the first assignment deliverables for the UnoArena doma
 2. Read the bounded contexts and context map to understand ownership and integration boundaries.
 3. Review aggregates and invariants before reading the command/event catalog.
 4. Use the event-flow and failure-path documents to validate the model under realistic conditions.
-5. Review the raw EventStorming artifact for the event-first discovery tables, hotspots, and narrative flow evidence.
+5. Read the architecture overview and traceability document before the detailed architecture views.
+6. Review the ADRs for the major technology and boundary decisions.
+7. Review the raw EventStorming artifact for the event-first discovery tables, hotspots, and narrative flow evidence.

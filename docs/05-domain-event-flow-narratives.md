@@ -14,9 +14,9 @@ This document describes end-to-end event flows with both synchronous decision po
 6. Room Gameplay synchronously requests deck initialization from Game Integrity for Game 1.
 7. Game Integrity commits the deck seed and confirms authoritative deal material.
 8. Room Gameplay emits `MatchStarted` and `GameStarted`.
-9. Players submit gameplay commands. Each accepted command is synchronously validated against room invariants and then committed as domain events such as `CardPlayed`, `CardDrawn`, `ColorChosen`, `UnoCalled`, `UnoPenaltyApplied`, and `TurnAdvanced`.
+9. Players submit gameplay commands. Each accepted command is synchronously validated against room invariants and then committed as domain events such as `CardPlayed`, `CardDrawn`, `ColorChosen`, `UnoCalled`, `UnoWindowExpired`, `UnoPenaltyApplied`, and `TurnAdvanced`.
 10. In parallel with each accepted gameplay decision, Game Integrity appends the immutable log entry.
-11. If a player plays their second-to-last card, the Uno challenge window opens and closes after 5 seconds or when the next player begins their turn; a successful missing-Uno challenge emits `UnoPenaltyApplied` with a 2-card draw.
+11. If a player plays their second-to-last card, the Uno challenge window opens and closes after 5 seconds or when the next player begins their turn. If the persisted deadline is reached first, Room Gameplay emits `UnoWindowExpired`; a later missing-Uno challenge is rejected because the window is closed. A successful missing-Uno challenge before expiry emits `UnoPenaltyApplied` with a 2-card draw.
 12. After each committed gameplay event, Spectator View receives only public projection facts such as discard state, active color, turn, public roster, and card counts.
 13. When a player empties their hand, Room Gameplay emits `GameCompleted`.
 14. Room Gameplay updates the best-of-three score by emitting `MatchScoreUpdated`.
@@ -31,6 +31,7 @@ This document describes end-to-end event flows with both synchronous decision po
 - turn ownership and sequence-number validation
 - hand ownership of the played card
 - whether the 5-second Uno window is still open and whether the next player has begun their turn
+- whether an `UnoWindowExpired` timer command still corresponds to the currently open Uno window
 - whether `GameCompleted` also implies `MatchCompleted`
 
 ### Asynchronous propagation
@@ -38,6 +39,7 @@ This document describes end-to-end event flows with both synchronous decision po
 - spectator-safe room updates flow to Spectator View
 - `GameCompleted` flows to Ranking only for completed non-abandoned casual games
 - `MatchCompleted` also flows to Tournament Orchestration if the room belongs to a tournament
+- sanitized gameplay metrics flow to Analytics and Public Read Models; ad-hoc metrics are anonymized before publication
 
 ## 2. Tournament Round Advancement
 
@@ -49,8 +51,8 @@ This document describes end-to-end event flows with both synchronous decision po
 4. Tournament policy seeds the bracket and emits `TournamentRoundSeeded`.
 5. Tournament policy provisions room assignments and emits `TournamentMatchAssigned` for every bracket slot pairing.
 6. Each assigned match is executed independently in Room Gameplay.
-7. When a room finishes, Room Gameplay emits `MatchCompleted` and `RoomCompleted` with ranked players, match wins, cumulative card points, completion time, and `advancingPlayerIds[3]`.
-8. Tournament Orchestration consumes the room result asynchronously, verifies that the room belongs to the expected slot, and applies advancement ordering by match wins, then lowest cumulative card points, then earliest final-game completion time.
+7. When a tournament match finishes, Room Gameplay emits `MatchCompleted` with ranked match facts such as match wins, cumulative card points, completion time, and forfeit/abandonment markers; `RoomCompleted` is only the terminal room-lifecycle fact.
+8. Tournament Orchestration consumes the room result asynchronously, verifies that the room belongs to the expected slot, and calculates advancement ordering by match wins, then lowest cumulative card points, then earliest final-game completion time.
 9. If the result is valid and not already processed, Tournament Orchestration emits `TournamentMatchResultRecorded` and `PlayersAdvanced`.
 10. Once all slots for the round are terminal, Tournament Orchestration emits `TournamentRoundCompleted`.
 11. If more than 10 players remain, it emits the next `TournamentRoundSeeded` and new `TournamentMatchAssigned` events.
@@ -65,8 +67,10 @@ This document describes end-to-end event flows with both synchronous decision po
 ### Asynchronous propagation
 
 - room completion events arrive independently and out of order
-- bracket and spectator projections update after `TournamentMatchResultRecorded` and `PlayersAdvanced`
+- tournament bracket projections update after `TournamentMatchResultRecorded` and `PlayersAdvanced`
+- room spectator projections remain owned by Spectator View and update from room-level spectator-safe facts
 - tournament placement rating updates may occur in parallel without blocking advancement
+- public tournament analytics update asynchronously from tournament result and advancement facts
 
 ## 3. Elo / Ranking Updates After Game Completion
 
@@ -103,6 +107,7 @@ sequenceDiagram
     participant TO as Tournament Orchestration
     participant RK as Ranking
     participant SV as Spectator View
+    participant AN as Analytics
 
     P->>RG: CreateRoom / JoinRoom / PlayCard
     RG->>IS: Validate session
@@ -112,6 +117,8 @@ sequenceDiagram
     RG-->>SV: spectator-safe room event
     RG-->>TO: MatchCompleted (if tournament room)
     RG-->>RK: GameCompleted (if non-abandoned casual game)
-    TO-->>SV: bracket update
+    RG-->>AN: sanitized gameplay metric
     RK-->>SV: ranking snapshot update (optional public view)
+    TO-->>AN: public tournament facts
+    RK-->>AN: public rating facts
 ```

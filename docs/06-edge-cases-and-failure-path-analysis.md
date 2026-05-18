@@ -32,6 +32,7 @@ Two players attempt to play different cards at nearly the same time.
 - Reconnecting after the window observes the resulting forfeit state and does not undo it.
 - If the window expires in a casual room, the player leaves participation and the game continues with remaining players.
 - If the window expires in a tournament room, `PlayerForfeited` counts as a match loss and eliminates the player from advancement.
+- The reconnect deadline is persisted with the room state and `disconnectVersion`, so timer retries after worker restart cannot forfeit the same player twice or forfeit a newer reconnection attempt.
 
 ### Emitted events
 
@@ -39,7 +40,7 @@ Two players attempt to play different cards at nearly the same time.
 - `PlayerReconnected` when successful
 - `TurnSkipped` if the disconnected player's own turn is skipped
 - `PlayerForfeited` if the 60-second reconnect window expires
-- `MatchCompleted` and `RoomCompleted` if the forfeit resolves the match
+- `MatchCompleted` if the forfeit resolves the match, plus `RoomCompleted` if the room reaches terminal status
 
 ## 3. Stale Commands and Replayed Commands
 
@@ -59,20 +60,40 @@ Two players attempt to play different cards at nearly the same time.
 ## 4. Partial Failures Between Contexts
 
 ### Example
-Room Gameplay commits `MatchCompleted`, but Ranking is temporarily unavailable.
+Room Gameplay commits an eligible casual `GameCompleted`, but Ranking is temporarily unavailable.
 
 ### Expected domain behavior
 
-- Room Gameplay remains authoritative and does not roll back the completed match.
+- Room Gameplay remains authoritative and does not roll back the completed game.
 - The completion event is durably retried until Ranking consumes it.
-- Tournament Orchestration and Spectator View may process the same result earlier than Ranking.
+- Spectator View and Analytics may process the same result earlier than Ranking. Tournament advancement is a separate path from `MatchCompleted`.
 - Eventual consistency is accepted; cross-context rollback is avoided.
 
 ### Emitted events
 
-- initial business event: `MatchCompleted`, `RoomCompleted`
-- later downstream business events: `PlayerRatingUpdated`, `TournamentMatchResultRecorded`, `PlayersAdvanced`
+- initial business event: `GameCompleted`
+- later downstream business event: `PlayerRatingUpdated`
 - retry attempts themselves are infrastructure concerns, not new business events
+
+## 4.1 Saga Fallback and Dead-Lettered Work
+
+### Example
+A tournament round kickoff emits provisioning batches, but one shard repeatedly fails to create all assigned rooms.
+
+### Expected domain behavior
+
+- Retryable worker failures are retried with the same deterministic slot identities.
+- Duplicate room creation is ignored by `(tournamentId, roundNumber, slotId)`.
+- If the batch retry budget is exhausted or conflicting assignments are detected, Tournament Orchestration records a business-visible quarantine state rather than silently losing the batch.
+- Quarantined batches block round start or completion until reconciled by an explicit operator or recovery command.
+- Pure broker redelivery and transient consumer lag remain operational signals; they become domain events only when the saga state changes.
+
+### Emitted events
+
+- `TournamentProvisioningBatchRetried` when retry is recorded as part of saga state
+- `TournamentProvisioningBatchQuarantined` when retry budget is exhausted or assignments conflict
+- `TournamentResultQuarantined` when a consumed room result conflicts with the assigned slot or previous completion
+- `RoomStateReconciled` when Room Gameplay repairs operational state from the Game Integrity log after append/local-commit divergence
 
 ## 5. Security and Abuse Scenarios
 

@@ -22,6 +22,7 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | `ChooseColor` | Player | `ColorChosen` | Follows a wild-card play that requires a color decision | Same command id must not apply twice |
 | `CallUno` | Player | `UnoCalled` | Allowed only before the 5-second Uno window closes or the next player begins their turn | Duplicate calls after success are ignored |
 | `ReportMissingUno` | Opponent or system | `UnoChallengeIssued`, `UnoPenaltyApplied` | Triggered when eligible target failed to call Uno before the challenge window closed; penalty event includes `roomId`, `targetPlayerId`, `challengerPlayerId`, and `cardsDrawn=2` | Idempotent by `(targetPlayerId, triggeringGameEventId)` |
+| `ExpireUnoWindow` | Room Gameplay policy | `UnoWindowExpired` | Internal timer command triggered when the persisted Uno deadline is reached and the window was not already closed by `CallUno`, `ReportMissingUno`, or `TurnAdvanced` | Idempotent by `(roomId, gameId, playerId, triggeringGameEventId)` |
 | `EndTurn` | System policy | `TurnAdvanced` | Triggered after the accepted action fully resolves | Internal command; ignored if turn already advanced |
 
 ## Game and Match Completion
@@ -41,7 +42,7 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | `CloseRegistration` | System or organizer | `TournamentRegistrationClosed` | Triggered at capacity or deadline | Duplicate close ignored |
 | `SeedRound` | Tournament policy | `TournamentRoundSeeded` | Triggered after registration closes | Idempotent by `(tournamentId, roundNumber)` |
 | `ProvisionRoundMatches` | Tournament policy | `TournamentMatchAssigned` | Creates room assignments for bracket slots | Duplicate assignments ignored by slot identity |
-| `RecordMatchResult` | Tournament policy | `TournamentMatchResultRecorded`, `PlayersAdvanced` | Consumes authoritative `MatchCompleted` containing match wins, card points, completion time, and `advancingPlayerIds[3]` | Idempotent by `(roomId, completionVersion)` |
+| `RecordMatchResult` | Tournament policy | `TournamentMatchResultRecorded`, `PlayersAdvanced` | Consumes authoritative `MatchCompleted` containing ranked match facts such as match wins, card points, completion time, and forfeit/abandonment markers; Tournament Orchestration calculates the advancing players | Idempotent by `(roomId, completionVersion)` |
 | `CompleteRound` | Tournament policy | `TournamentRoundCompleted` | Triggered when all assigned matches are terminal | Idempotent by round status |
 | `CompleteTournament` | Tournament policy | `TournamentCompleted` | Triggered when the final room has an authoritative ranked result | Idempotent by tournament status |
 
@@ -73,8 +74,27 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | Command | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
 | `ProjectRoomEventForSpectators` | Spectator projection policy | `SpectatorRoomProjectionUpdated` | Consumes spectator-safe room events | Idempotent by upstream event id |
-| `ProjectTournamentEventForSpectators` | Spectator projection policy | `SpectatorBracketProjectionUpdated` | Consumes tournament round and advancement events | Idempotent by upstream event id |
 | `DropUnsafeSpectatorEvent` | Spectator visibility policy | `SpectatorEventDropped` | Triggered when an event cannot be safely exposed | Idempotent by upstream event id |
+
+## Analytics and Public Read Model Commands
+
+| Command | Issuer | Primary Event(s) | Causality | Idempotency |
+| --- | --- | --- | --- | --- |
+| `ProjectGameplayMetric` | Analytics projection policy | `PublicGameplayMetricProjected` | Consumes sanitized gameplay metrics from Room Gameplay; ad-hoc metrics are anonymized before projection | Idempotent by upstream event id |
+| `ProjectTournamentStatistic` | Analytics projection policy | `PublicTournamentStatisticProjected` | Consumes public tournament lifecycle, result, and advancement facts | Idempotent by upstream event id |
+| `ProjectRatingStatistic` | Analytics projection policy | `PublicRatingStatisticProjected` | Consumes public rating update facts or ranking snapshots from Ranking | Idempotent by upstream event id |
+
+## Saga, Reconciliation, and Fallback Commands
+
+These commands model fallback outcomes that are meaningful to the business process.
+
+| Command | Issuer | Primary Event(s) | Causality | Idempotency |
+| --- | --- | --- | --- | --- |
+| `RetryTournamentProvisioningBatch` | Tournament provisioning policy | `TournamentProvisioningBatchRetried` | Reissues missing room-provisioning work for a deterministic slot batch after a retryable worker or Room Gameplay failure | Idempotent by `(tournamentId, roundNumber, batchId, retryAttempt)` |
+| `QuarantineTournamentProvisioningBatch` | Tournament provisioning policy | `TournamentProvisioningBatchQuarantined` | Marks a provisioning batch for operator review after retry budget is exhausted or conflicting room assignments are detected | Idempotent by `(tournamentId, roundNumber, batchId)` |
+| `QuarantineTournamentResult` | Tournament policy | `TournamentResultQuarantined` | A consumed `MatchCompleted` conflicts with slot ownership, completion version, or already-recorded result | Idempotent by `(roomId, completionVersion)` |
+| `ReconcileRoomStateFromIntegrityLog` | Room recovery policy | `RoomStateReconciled` | Rebuilds or repairs Room Gameplay operational state from the Game Integrity log after a partial failure between append and local commit | Idempotent by `(roomId, logOffset)` |
+| `QuarantineUnsafeProjectionEvent` | Spectator or Analytics projection policy | `ProjectionEventQuarantined` | A projector receives an event that violates privacy, anonymization, schema, or source-ownership rules | Idempotent by upstream event id |
 
 ## Rejection and No-Event Cases
 

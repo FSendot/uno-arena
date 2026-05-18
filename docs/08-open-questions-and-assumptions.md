@@ -29,7 +29,7 @@ These assumptions were used to make the domain model concrete where the brief do
 ### Tournament assumptions
 
 - Tournament matches reuse the same room gameplay model as ad-hoc matches.
-- Tournament advancement is based on authoritative `MatchCompleted`, including match wins, card points, completion time, and top 3 advancing players.
+- Tournament advancement is calculated by Tournament Orchestration from authoritative `MatchCompleted` facts, including match wins, card points, completion time, and forfeit/abandonment markers.
 - A round may advance players only after every assigned match reaches a terminal outcome.
 
 ### Ranking assumptions
@@ -42,6 +42,12 @@ These assumptions were used to make the domain model concrete where the brief do
 - Spectators can observe public room and tournament state in near real time.
 - Spectators must never receive private hand data or player-authentication data.
 - Spectator projections may lag slightly behind authoritative room state.
+
+### Analytics assumptions
+
+- Public analytics are derived and non-authoritative.
+- Ad-hoc gameplay metrics are anonymized before they enter public analytics.
+- Public tournament metrics may include already-public tournament facts, but not hidden card, hand, deck, session, or audit data.
 
 ## Connection-Semantics Assumptions
 

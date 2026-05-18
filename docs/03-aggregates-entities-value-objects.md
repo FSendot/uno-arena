@@ -181,11 +181,38 @@ Projection consistency only. This context does not decide game rules, but it doe
 2. Projected order must be monotonic by upstream event sequence.
 3. If an event cannot be safely filtered, it is dropped and an internal audit signal is emitted.
 
+## Analytics and Public Read Models
+
+### Aggregate: `PublicAnalyticsProjection`
+
+**Consistency boundary**
+Projection consistency only. This context owns derived public reporting state and does not decide gameplay, tournament advancement, ratings, session validity, spectator privacy, or audit truth.
+
+**Entities**
+
+- `GameplayMetric`
+- `TournamentStatistic`
+- `PlayerPublicStatistic`
+
+**Value Objects**
+
+- `ProjectionVersion`
+- `MetricWindow`
+- `AnonymizationPolicy`
+
+**Key invariants**
+
+1. Ad-hoc gameplay metrics are anonymized before they enter public analytics projections.
+2. Public tournament metrics may include only facts that are already public through tournament or spectator views.
+3. No private hand contents, hidden deck order, private draw identities, session tokens, or raw audit metadata may appear in analytics projections.
+4. Analytics projections are rebuildable from upstream published events and do not become authoritative sources for domain decisions.
+
 ## Reference-by-Identity Rules
 
 - `Room` stores `TournamentId` only when the match is tournament-assigned.
 - `Round` stores `RoomId` references, not embedded room state.
 - `PlayerRating` stores `PlayerId` plus processed `GameId` and tournament placement event references, not full room or tournament history objects.
 - `SpectatorRoomProjection` stores `RoomId` and visible seat/player references only.
+- `PublicAnalyticsProjection` stores derived metric identifiers and source event references, not mutable source aggregates.
 
 This keeps each aggregate small and prevents accidental cross-context transactional coupling.

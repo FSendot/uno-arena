@@ -83,7 +83,7 @@ The model is long-lived and cross-match. Ranking must consume authoritative resu
 ## 6. Spectator View
 
 **Responsibility**
-Owns the filtered read model exposed to spectators for rooms and tournaments.
+Owns the filtered read model exposed to spectators for rooms.
 
 **Why separate**
 Spectators do not need the full internal model, and some information must never cross this boundary. Treating it as its own context makes the privacy rules explicit instead of burying them in transport logic.
@@ -91,9 +91,23 @@ Spectators do not need the full internal model, and some information must never 
 **Owns**
 
 - room spectator projection
-- tournament bracket spectator projection
 - visibility filtering rules
 - spectator-oriented event translation
+
+## 7. Analytics and Public Read Models
+
+**Responsibility**
+Owns public, derived, non-authoritative analytical views such as aggregate gameplay metrics, tournament participation statistics, public reporting dashboards, and historical platform statistics.
+
+**Why separate**
+Analytics absorbs high-read reporting workloads without moving gameplay, advancement, rating, privacy, or audit decisions out of their owning contexts. It consumes published events asynchronously and must never become the source of truth for domain decisions.
+
+**Owns**
+
+- public gameplay and tournament metrics
+- anonymized ad-hoc gameplay statistics
+- public tournament analytics
+- reporting-oriented projections and dashboards
 
 ## Context Relationships
 
@@ -105,6 +119,7 @@ flowchart LR
     TO["Tournament Orchestration"]
     RK["Ranking"]
     SV["Spectator View"]
+    AN["Analytics and Public Read Models"]
 
     IS -->|eligibility, authenticated identity| RG
     IS -->|eligibility, authenticated identity| TO
@@ -112,8 +127,10 @@ flowchart LR
     RG -->|match/game outcomes| TO
     RG -->|completed casual game outcomes| RK
     RG -->|filtered room facts| SV
-    TO -->|round and bracket facts| SV
+    RG -->|sanitized gameplay metrics and completion facts| AN
     TO -->|tournament placement facts| RK
+    TO -->|public tournament lifecycle and advancement facts| AN
+    RK -->|rating update facts and public snapshots| AN
 ```
 
 ## Upstream and Downstream Summary
@@ -126,8 +143,10 @@ flowchart LR
 | Room Gameplay | Tournament Orchestration | Upstream provider of authoritative tournament match results |
 | Room Gameplay | Ranking | Upstream provider of authoritative completed non-abandoned casual game outcomes |
 | Room Gameplay | Spectator View | Upstream provider of filtered room-level facts |
-| Tournament Orchestration | Spectator View | Upstream provider of bracket and round status |
+| Room Gameplay | Analytics and Public Read Models | Upstream provider of sanitized gameplay metrics and completion facts |
 | Tournament Orchestration | Ranking | Upstream provider of tournament placement facts for the separate tournament-placement rating |
+| Tournament Orchestration | Analytics and Public Read Models | Upstream provider of public tournament lifecycle, advancement, and participation facts |
+| Ranking | Analytics and Public Read Models | Upstream provider of rating update facts and public ranking snapshots |
 
 ## Spectator View Boundary
 
@@ -143,7 +162,6 @@ flowchart LR
 - public card counts
 - game score within the match
 - match winner after completion
-- tournament bracket and round status
 - join/leave visibility for already-public participants
 
 ## Information Explicitly Withheld
@@ -169,16 +187,11 @@ flowchart LR
 - `ColorChosen`
 - `PenaltyApplied`
 - `UnoCalled`
+- `UnoWindowExpired`
 - `GameCompleted`
 - `MatchScoreUpdated`
 - `MatchCompleted`
 - `RoomCompleted`
-- `TournamentCreated`
-- `TournamentRoundStarted`
-- `TournamentMatchResultRecorded`
-- `PlayersAdvanced`
-- `TournamentRoundCompleted`
-- `TournamentCompleted`
 
 ## Boundary Rule
 
@@ -190,3 +203,9 @@ The Spectator View context never subscribes to raw player-private events such as
 This prevents accidental leakage of hidden information through replay, logs, or transport-level fan-out.
 
 If an active player opens a second anonymous spectator connection, that connection is still treated as a spectator-only reader. It receives the same sanitized projection as any other observer and never gains access to that player's private hand, opponent hands, hidden deck state, or player-command privileges. The immutable game log may contain full private state for audit, but Spectator View cannot query that log directly.
+
+## Analytics Boundary
+
+Analytics and Public Read Models consumes only sanitized or public facts. For ad-hoc rooms, gameplay metrics are anonymized and aggregated. For public tournament rooms, metrics may include already-public tournament and player display facts, but never hidden hand contents, hidden deck order, private draw identities, reconnect/session tokens, or raw Game Integrity audit metadata.
+
+Analytics is downstream only. It does not issue gameplay commands, decide tournament advancement, calculate Elo, enforce spectator privacy, or provide audit truth.
