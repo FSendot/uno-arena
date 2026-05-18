@@ -16,7 +16,7 @@ Two players attempt to play different cards at nearly the same time.
 
 ### Emitted events
 
-- accepted branch: `CardPlayed`, follow-up events such as `ColorChosen`, `PenaltyApplied`, `TurnAdvanced`
+- accepted branch: `CardPlayed`, follow-up events such as `ColorChosen`, `UnoPenaltyApplied`, `TurnAdvanced`
 - rejected branch: no business event; API returns stale-command outcome
 
 ## 2. Disconnections and Late Rejoin Attempts
@@ -102,12 +102,12 @@ A tournament round kickoff emits provisioning batches, but one shard repeatedly 
 **Behavior**
 
 - Commands from revoked or displaced sessions are rejected synchronously by Identity and Session.
-- If suspicious takeover is confirmed, the session is revoked and the player may be disconnected from active rooms.
+- If suspicious takeover is confirmed, the old session is invalidated and active room participation may be disconnected separately.
 
 **Events**
 
-- `SessionRevoked`
-- `PlayerDisconnected` if an in-room session is terminated
+- `SessionInvalidated`
+- `PlayerDisconnected` if Room Gameplay terminates active room participation
 
 ### Spam and flooding
 

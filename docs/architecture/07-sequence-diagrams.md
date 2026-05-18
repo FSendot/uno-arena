@@ -27,12 +27,6 @@ sequenceDiagram
     S-->>C: Realtime state
 ```
 
-### Image Asset Brief
-
-Prompt brief:
-
-> Polished sequence diagram illustration for a multiplayer game platform. Show client, BFF, identity, gameplay, integrity, and SSE stream with a strict append-before-broadcast flow. Make the visual crisp, minimal, and editorial, with strong directional arrows and emphasis on idempotent command envelopes.
-
 ## 2. Session Invalidation Closes SSE
 
 ```mermaid
@@ -62,17 +56,14 @@ sequenceDiagram
 
     R-->>K: MatchCompleted / room result
     K-->>T: Async consume result
+    T->>T: Validate slot and record result
     T->>T: Calculate PlayersAdvanced
+    T->>T: Wait until every round slot is terminal
+    T-->>K: TournamentRoundCompleted
     T->>W: Provision next round rooms
     T->>P: Update bracket projection
     T-->>K: Tournament progression event
 ```
-
-### Image Asset Brief
-
-Prompt brief:
-
-> Clean enterprise diagram of tournament orchestration for a multiplayer card platform. Show async room results feeding a tournament service, then sharded workers provisioning the next round, with a Redis bracket projection on the side. Use restrained colors and clear separation between business flow and read projection.
 
 ## 4. Timer Expiry
 
@@ -82,6 +73,8 @@ sequenceDiagram
     participant D as Postgres Deadline Record
     participant X as Redis Index
     participant W as Room Timer Worker
+    participant G as Game Integrity
+    participant K as Kafka / Outbox
     participant B as BFF
     participant S as SSE Stream
 
@@ -89,8 +82,12 @@ sequenceDiagram
     R->>X: Add scheduling index entry
     W->>X: Poll due timers
     W->>R: Trigger expiry check
-    R->>R: Revalidate current room state
-    R-->>B: Expiry result
+    R->>R: Revalidate current state and timer key
+    R->>G: Append expiry / forfeit log entry
+    G-->>R: Append confirmed
+    R->>R: Commit room state + outbox
+    R-->>K: Publish timer outcome
+    K-->>B: Deliver player/safe update
     B-->>S: SSE timer update
 ```
 
@@ -110,9 +107,3 @@ sequenceDiagram
     S->>S: Rebuild Redis materialized projection
     S-->>B: Spectator-safe read model
 ```
-
-## Diagram Asset Notes
-
-- The mermaid diagrams are the canonical textual source for this package.
-- Any final polished image assets should mirror these flows without adding new semantics.
-- Visual assets should emphasize the BFF boundary, the separation between business streams and projection streams, and the privacy split between player and spectator views.

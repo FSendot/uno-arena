@@ -185,7 +185,7 @@ flowchart LR
 - `CardDrawnPubliclyObserved`
 - `TurnAdvanced`
 - `ColorChosen`
-- `PenaltyApplied`
+- `UnoPenaltyApplied`
 - `UnoCalled`
 - `UnoWindowExpired`
 - `GameCompleted`

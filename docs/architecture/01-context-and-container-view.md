@@ -144,17 +144,6 @@ flowchart TB
 - `Analytics / Public Read Models Service`
   - consumes sanitized/public events into ClickHouse and other derived read models
 
-## Polished Diagram Placeholder
-
-> Replace this placeholder with a polished C4-style container diagram image if needed.
-> Suggested path: `docs/architecture/assets/container-view.png`
-
-Image prompt:
-
-```text
-Create a professional C4-style container architecture diagram for UnoArena, a global real-time Uno platform. Show clients using REST commands and SSE streams through one Realtime Gateway/BFF. Show internal bounded-context services: Identity and Session, Room Gameplay, Game Integrity, Tournament Orchestration, Ranking, Spectator View, Analytics and Public Read Models. Show separate stores: PostgreSQL for Identity, Room Gameplay, Tournament, and Ranking; EventStoreDB for Game Integrity; Redis for timers, rate limits, spectator projection, bracket projection, and leaderboard cache; Kafka for async integration; ClickHouse for Analytics. Emphasize that clients never call microservices directly, Room Gameplay calls Game Integrity before broadcast, Tournament Orchestration fans out sharded room provisioning, and Spectator View/Analytics consume sanitized events only.
-```
-
 ## Local and Test Topology
 
 - Local development can run the BFF plus a reduced set of services and backing stores.

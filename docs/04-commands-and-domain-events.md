@@ -69,16 +69,16 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | `SkipDisconnectedTurn` | Room Gameplay policy | `TurnSkipped` | A disconnected player's turn is skipped during the reconnection window with no bot substitution | Idempotent by `(roomId, playerId, turnVersion)` |
 | `ForfeitPlayer` | Room Gameplay or Tournament policy | `PlayerForfeited` | Emitted once when the 60-second reconnect deadline expires; casual rooms continue without the player, tournament rooms mark match loss/elimination | Idempotent by `(roomId, playerId, disconnectVersion)` |
 
-## Spectator View Commands
+## Spectator View Projection Policies
 
-| Command | Issuer | Primary Event(s) | Causality | Idempotency |
+| Projection Handler | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
 | `ProjectRoomEventForSpectators` | Spectator projection policy | `SpectatorRoomProjectionUpdated` | Consumes spectator-safe room events | Idempotent by upstream event id |
 | `DropUnsafeSpectatorEvent` | Spectator visibility policy | `SpectatorEventDropped` | Triggered when an event cannot be safely exposed | Idempotent by upstream event id |
 
-## Analytics and Public Read Model Commands
+## Analytics and Public Read Model Projection Policies
 
-| Command | Issuer | Primary Event(s) | Causality | Idempotency |
+| Projection Handler | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
 | `ProjectGameplayMetric` | Analytics projection policy | `PublicGameplayMetricProjected` | Consumes sanitized gameplay metrics from Room Gameplay; ad-hoc metrics are anonymized before projection | Idempotent by upstream event id |
 | `ProjectTournamentStatistic` | Analytics projection policy | `PublicTournamentStatisticProjected` | Consumes public tournament lifecycle, result, and advancement facts | Idempotent by upstream event id |
