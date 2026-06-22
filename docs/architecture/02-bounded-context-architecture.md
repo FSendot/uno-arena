@@ -25,6 +25,16 @@ Authenticate players, maintain internal session state and ACLs, and expose revoc
 - Asynchronous: `identity.session.invalidated`, produced by Identity and consumed by BFF/gateway instances and service-side invalidation caches.
 - External dependency: external IdP behind an anti-corruption layer that maps provider claims to `PlayerId`, `SessionId`, roles, and eligibility.
 
+**Synchronous interface authorization**
+
+All client-originated calls reach Identity through the BFF or a trusted internal service; Identity is not public.
+
+| Interface | Required principal |
+| --- | --- |
+| `POST /internal/v1/sessions/validate` | BFF service credential plus client session token; returns `PlayerId`, `SessionId`, roles, and session freshness. |
+| `GET /internal/v1/players/{playerId}/eligibility` | BFF, Tournament Orchestration, or Ranking service credential; caller must pass the authenticated player or operator context being checked. |
+| `POST /internal/v1/sessions/{sessionId}/invalidate` | Identity service, signed IdP callback, or operator/admin role; emits `identity.session.invalidated` after the authoritative session write. |
+
 **Dependencies**
 
 - Upstream: external IdP, translated through the Identity anti-corruption layer.
@@ -60,6 +70,19 @@ Own the room lifecycle, Uno rules, turn sequencing, command validation, and oper
 - Asynchronous: room business streams such as `room.game.completed` and `room.match.completed`; high-volume sanitized projection/metrics streams such as `room.player-feed.events`, `room.spectator-safe.events`, and `room.gameplay.metrics`.
 - Internal commands: `ExpireUnoWindow`, `ForfeitPlayer`, `SkipDisconnectedTurn`, and match lifecycle policy commands.
 
+**Synchronous interface authorization**
+
+The BFF validates the external session first, then forwards the internal request with `PlayerId`, `SessionId`, roles, membership facts, and correlation headers.
+
+| Interface | Required principal |
+| --- | --- |
+| `POST /v1/rooms` | Authenticated player; Identity eligibility must allow ad-hoc play or the tournament assignment being requested. |
+| `POST /v1/rooms/{roomId}/commands` | Authenticated player with active room membership; command is rejected if `SessionId`, membership, turn ownership, or `expectedSequenceNumber` is stale. |
+| `GET /v1/rooms/{roomId}/snapshot` | Authenticated player with current or reconnect-eligible membership; response may include only that player's private hand/draw facts. |
+| `GET /v1/rooms/{roomId}/events` | Authenticated player SSE stream through the BFF; membership and last-seen sequence are checked before resume. |
+| `POST /internal/v1/rooms/{roomId}/timer-commands` | Room Timer Worker service credential; Room Gameplay rechecks persisted deadline keys before applying `ExpireUnoWindow` or `ForfeitPlayer`. |
+| `POST /internal/v1/rooms/provision` | Tournament Orchestration/provisioning-worker service credential; idempotent by `(tournamentId, roundNumber, slotId)`. |
+
 **Dependencies**
 
 - Upstream: BFF for authenticated command envelopes; Identity for session and eligibility facts.
@@ -91,6 +114,17 @@ Own technical integrity only: append-only game history, replay, auditability, an
 - Internal synchronous: append log entry, initialize deck, confirm draw/order operations for Room Gameplay.
 - Internal operator/compliance: replay and audit export by `roomId`/`gameId` with strict authorization.
 - Asynchronous: optional append-confirmed integration stream for internal recovery/projection tooling; not used as the public gameplay stream.
+
+**Synchronous interface authorization**
+
+Game Integrity is internal-only; no client, spectator, or public reporting role can call it through the BFF.
+
+| Interface | Required principal |
+| --- | --- |
+| `POST /internal/v1/game-logs/{roomId}/append` | Room Gameplay service credential and expected-revision guard. |
+| `POST /internal/v1/game-logs/{roomId}/deck-operations` | Room Gameplay service credential; confirms draw/order facts before gameplay publication. |
+| `GET /internal/v1/game-logs/{roomId}/replay` | Internal replay/reconciliation service credential or operator/compliance role with audit scope. |
+| `GET /internal/v1/audit/exports/{gameId}` | Compliance/operator role plus internal network access; never exposed to players or spectators. |
 
 **Dependencies**
 
@@ -126,6 +160,20 @@ Own tournament lifecycle, registration, provisioning, room assignment, round clo
 - Asynchronous input: `room.match.completed`.
 - Asynchronous output: `tournament.match.assigned`, `tournament.match.result_recorded`, `tournament.players.advanced`, `tournament.round.completed`, `tournament.completed`.
 
+**Synchronous interface authorization**
+
+Tournament Orchestration receives BFF-forwarded principals for public routes and service credentials for worker-to-service calls.
+
+| Interface | Required principal |
+| --- | --- |
+| `POST /v1/tournaments` | Authenticated tournament operator/admin role. |
+| `POST /v1/tournaments/{tournamentId}/registrations` | Authenticated player; Identity eligibility and tournament registration window must pass. |
+| `POST /v1/tournaments/{tournamentId}/commands` | Operator role for lifecycle commands; registered player role for player-scoped commands such as check-in or withdrawal. |
+| `GET /v1/tournaments/{tournamentId}/bracket` | Anonymous-tolerant for public tournaments; private tournaments require participant or operator role. |
+| `GET /v1/tournaments/{tournamentId}/standings` | Anonymous-tolerant for public standings; private tournaments require participant or operator role. |
+| `POST /internal/v1/tournaments/{tournamentId}/match-results` | Tournament Orchestration consumer/service credential only; fed by deduped `room.match.completed` consumption. |
+| `POST /internal/v1/tournaments/{tournamentId}/rounds/{roundNumber}/provisioning-batches` | Sharded provisioning worker service credential; bounded by worker admission/backpressure. |
+
 **Dependencies**
 
 - Upstream: BFF for tournament commands; Identity for registration eligibility; Room Gameplay for authoritative match facts.
@@ -157,6 +205,16 @@ Maintain persistent ranking state and rating history.
 - Asynchronous input: eligible `room.game.completed` for casual Elo and tournament placement facts from Tournament Orchestration.
 - Asynchronous output: `ranking.player_rating_updated`, `ranking.leaderboard_snapshot_published`.
 
+**Synchronous interface authorization**
+
+Ranking has no synchronous write API for clients; rating changes come from authenticated async consumers only.
+
+| Interface | Required principal |
+| --- | --- |
+| `GET /v1/rankings/leaderboards` | Anonymous-tolerant for public leaderboards; authenticated session may personalize region/friend filters. |
+| `GET /v1/players/{playerId}/rating-history` | Same authenticated player, an operator/admin role, or anonymous access to a public summary without private moderation details. |
+| `GET /internal/v1/rankings/rebuild-status` | Ranking operator/service role only. |
+
 **Dependencies**
 
 - Upstream: Room Gameplay publishes completed, non-abandoned ad-hoc game results; Tournament Orchestration publishes tournament placement facts.
@@ -186,6 +244,16 @@ Serve privacy-filtered room projections to anonymous observers and read-only con
 - Synchronous through BFF: spectator room snapshot query for initial load or reconnect.
 - Asynchronous input: `room.spectator-safe.events`.
 - Asynchronous output: `spectator.room_projection.updated`.
+
+**Synchronous interface authorization**
+
+Spectator View is anonymous-tolerant only because it serves a separate privacy-filtered projection; it never reads player feeds or Game Integrity logs.
+
+| Interface | Required principal |
+| --- | --- |
+| `GET /v1/spectator/rooms/{roomId}/snapshot` | Anonymous-tolerant when the room is public/spectatable; private rooms require an authorized invite, participant, or operator context. |
+| `GET /v1/spectator/rooms/{roomId}/events` | Anonymous-tolerant SSE stream through the BFF for public rooms; rate-limited by IP and optional session. |
+| `GET /internal/v1/spectator/rooms/{roomId}/rebuild-status` | Spectator projection worker or operator/service role only. |
 
 **Dependencies**
 
@@ -217,6 +285,17 @@ Provide non-authoritative analytics, public aggregates, and derived reporting vi
 - Synchronous through BFF: public reporting/statistics queries.
 - Asynchronous input: anonymized ad-hoc gameplay metrics, public tournament gameplay metrics, tournament lifecycle/advancement facts, and public rating facts.
 - Asynchronous output: optional public analytics refresh notifications.
+
+**Synchronous interface authorization**
+
+Analytics exposes only derived, non-authoritative read models through the BFF.
+
+| Interface | Required principal |
+| --- | --- |
+| `GET /v1/analytics/public/tournaments/{tournamentId}` | Anonymous-tolerant for public tournaments; returns public aggregate data only. |
+| `GET /v1/analytics/public/gameplay` | Anonymous-tolerant aggregate metrics; no private hand, deck, session, or raw player feed data. |
+| `GET /v1/analytics/ops/*` | Operator/admin role; still derived from sanitized/public facts and never a gameplay authority. |
+| `GET /internal/v1/analytics/ingestion-lag` | Analytics operator/service role only. |
 
 **Dependencies**
 

@@ -2,6 +2,14 @@
 
 This changelog records design-package updates made while shaping the architecture checkpoint. It is limited to changes that affect traceability between the original design deliverables and the architecture.
 
+## Architecture Evaluation Closure
+
+- `docs/architecture/01-context-and-container-view.md` - Architecture deliverable 6.1, context and container view: annotated the Mermaid container diagram with an explicit `Trust Boundary / External Edge (DMZ)` between untrusted clients and private services/data stores.
+- `docs/architecture/02-bounded-context-architecture.md` - Architecture deliverable 6.1, architecture of every bounded context: added endpoint-level authorization annotations for public BFF-routed APIs, internal service APIs, anonymous-tolerant spectator/public reads, player-only room reads, operator-only actions, and compliance-only audit paths.
+- `docs/architecture/05-capacity-sketch.md` - Architecture deliverable 6.5, capacity sketch: added aggregate command/event rates, concurrent player/spectator connection counts, reconnect-overlap budget, storage growth estimates for EventStoreDB/Postgres/Redis/ClickHouse, and explicit links from those numbers to partitioning, Kafka topic split, async consumers, and projection isolation decisions.
+
+No Design Checkpoint non-negotiable guarantee was weakened or dropped. The edits make the previously intended security boundary, authorization surface, and scale assumptions reviewable without changing bounded-context ownership: Room Gameplay still owns gameplay invariants, Game Integrity still owns immutable logs, Spectator View still owns privacy-filtered projections, and Ranking/Analytics remain downstream asynchronous consumers.
+
 ## Architecture Checkpoint Timer Update
 
 - `docs/04-commands-and-domain-events.md` - Deliverable 4, Commands and domain events catalog: added internal Room Gameplay policy command `ExpireUnoWindow` and domain event `UnoWindowExpired` so the architecture has a named, traceable event for durable 5-second Uno timer expiry.

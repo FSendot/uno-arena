@@ -49,12 +49,15 @@ The platform is split by bounded context, not by transport technology. SSE, Kafk
 
 ```mermaid
 flowchart TB
-    subgraph Edge["External Edge"]
+    subgraph Public["Untrusted Client Zone"]
         Client["Client App"]
+    end
+
+    subgraph Edge["Trust Boundary / External Edge (DMZ)"]
         BFF["Realtime Gateway / BFF"]
     end
 
-    subgraph Core["Core Services"]
+    subgraph Core["Private Network / Core Services"]
         IdentitySvc["Identity Service"]
         RoomSvc["Room Gameplay Service"]
         IntegritySvc["Game Integrity Service"]
@@ -117,6 +120,7 @@ flowchart TB
 
 - `Realtime Gateway / BFF`
   - the only public HTTP and SSE entrypoint
+  - terminates the public trust boundary before any core service or data store is reachable
   - maps compact command envelopes to existing command names
   - emits SSE control events for stream close, session invalidation, and reconnect
 
