@@ -36,6 +36,11 @@ This repository contains the current UnoArena design package and the architectur
 - [ADR-0007. Projections Own Privacy Filtering and BFF Only Routes](./docs/adr/0007-projections-own-privacy-filtering-and-bff-only-routes.md)
 - [ADR-0008. Analytics Public Read Models with ClickHouse](./docs/adr/0008-analytics-public-read-models-with-clickhouse.md)
 - [ADR-0009. No Service Mesh as Required Component](./docs/adr/0009-no-service-mesh-as-required-component.md)
+- [ADR-0010. Helm from Pipeline as Deploy Model](./docs/adr/0010-helm-from-pipeline-as-deploy-model.md)
+- [ADR-0011. Image Versioning: Branch-SHA Tag with Digest Pinning](./docs/adr/0011-image-versioning-branch-sha-with-digest-pinning.md)
+- [ADR-0012. Monorepo Change Detection via rules:changes per Service Fragment](./docs/adr/0012-monorepo-change-detection-via-rules-changes.md)
+- [ADR-0013. Infrastructure Workers Bundled with Their Owning Service](./docs/adr/0013-workers-bundled-with-owning-service.md)
+- [ADR-0014. Async Contract Check: Room Gameplay to Spectator View](./docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md)
 
 ## Change Tracking
 
