@@ -1,0 +1,6 @@
+# Shared pipeline template reference.
+# Each service fragment uses rules:changes scoped to its own path plus this
+# templates directory, so a change here triggers all services.
+#
+# This file is intentionally empty — it serves as the catch-all trigger path.
+# Per-service fragments include their own job definitions directly.

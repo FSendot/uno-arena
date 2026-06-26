@@ -1,0 +1,41 @@
+test:ranking:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/ranking/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/ranking/**
+        - ci/templates/**
+
+build:ranking:
+  stage: build
+  needs: ["test:ranking"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/ranking:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/ranking/
+  rules:
+    - changes:
+        - services/ranking/**
+        - ci/templates/**
+
+deliver:ranking:
+  stage: deliver
+  needs: ["build:ranking"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/ranking:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/ranking/**
+        - ci/templates/**
+
+deploy-staging:ranking:
+  stage: deploy-staging
+  needs: ["deliver:ranking"]
+  when: manual
+  script:
+    - echo "deploy-staging for ranking is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/ranking/**
+        - ci/templates/**

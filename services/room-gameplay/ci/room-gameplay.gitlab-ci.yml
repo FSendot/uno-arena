@@ -1,0 +1,41 @@
+test:room-gameplay:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/room-gameplay/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/room-gameplay/**
+        - ci/templates/**
+
+build:room-gameplay:
+  stage: build
+  needs: ["test:room-gameplay"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/room-gameplay:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/room-gameplay/
+  rules:
+    - changes:
+        - services/room-gameplay/**
+        - ci/templates/**
+
+deliver:room-gameplay:
+  stage: deliver
+  needs: ["build:room-gameplay"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/room-gameplay:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/room-gameplay/**
+        - ci/templates/**
+
+deploy-staging:room-gameplay:
+  stage: deploy-staging
+  needs: ["deliver:room-gameplay"]
+  when: manual
+  script:
+    - echo "deploy-staging for room-gameplay is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/room-gameplay/**
+        - ci/templates/**

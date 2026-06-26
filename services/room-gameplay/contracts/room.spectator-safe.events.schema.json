@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "room.spectator-safe.events",
+  "description": "Privacy-filtered room event published by Room Gameplay and consumed by Spectator View. See ADR-0014.",
+  "type": "object",
+  "required": ["roomId", "eventType", "sequenceNumber", "payload"],
+  "properties": {
+    "roomId": {
+      "type": "string",
+      "description": "Identifier of the room this event belongs to"
+    },
+    "eventType": {
+      "type": "string",
+      "description": "Type of gameplay event (e.g. card.played, turn.started)"
+    },
+    "sequenceNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonically increasing sequence number within the room"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-specific data, privacy-filtered — no private hand or deck information"
+    }
+  },
+  "additionalProperties": false
+}

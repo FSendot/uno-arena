@@ -1,0 +1,41 @@
+test:spectator-view:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/spectator-view/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/spectator-view/**
+        - ci/templates/**
+
+build:spectator-view:
+  stage: build
+  needs: ["test:spectator-view"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/spectator-view:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/spectator-view/
+  rules:
+    - changes:
+        - services/spectator-view/**
+        - ci/templates/**
+
+deliver:spectator-view:
+  stage: deliver
+  needs: ["build:spectator-view"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/spectator-view:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/spectator-view/**
+        - ci/templates/**
+
+deploy-staging:spectator-view:
+  stage: deploy-staging
+  needs: ["deliver:spectator-view"]
+  when: manual
+  script:
+    - echo "deploy-staging for spectator-view is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/spectator-view/**
+        - ci/templates/**

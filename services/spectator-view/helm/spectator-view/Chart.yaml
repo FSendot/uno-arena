@@ -1,0 +1,5 @@
+apiVersion: v2
+name: spectator-view
+description: spectator-view placeholder service
+version: 0.1.0
+appVersion: "0.1.0"

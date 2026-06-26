@@ -1,0 +1,41 @@
+test:game-integrity:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/game-integrity/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/game-integrity/**
+        - ci/templates/**
+
+build:game-integrity:
+  stage: build
+  needs: ["test:game-integrity"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/game-integrity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/game-integrity/
+  rules:
+    - changes:
+        - services/game-integrity/**
+        - ci/templates/**
+
+deliver:game-integrity:
+  stage: deliver
+  needs: ["build:game-integrity"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/game-integrity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/game-integrity/**
+        - ci/templates/**
+
+deploy-staging:game-integrity:
+  stage: deploy-staging
+  needs: ["deliver:game-integrity"]
+  when: manual
+  script:
+    - echo "deploy-staging for game-integrity is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/game-integrity/**
+        - ci/templates/**

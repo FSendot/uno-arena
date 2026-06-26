@@ -1,5 +1,12 @@
 # DevOps Checkpoint — UnoArena
 
+## Pipeline Run
+
+> Link to green pipeline run (to be added after first successful execution on GitLab):
+> `https://gitlab.com/<group>/uno-arena/-/pipelines/<id>`
+
+---
+
 ## Overview
 
 This document covers the pipeline design for the UnoArena DevOps checkpoint. All services from the Architecture Checkpoint are present as placeholders, wired through at least `test → build → deliver`. The Identity Service is the fully-wired service, going all the way through `deploy-staging → integration-staging`.

@@ -1,0 +1,41 @@
+test:tournament-orchestration:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/tournament-orchestration/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/tournament-orchestration/**
+        - ci/templates/**
+
+build:tournament-orchestration:
+  stage: build
+  needs: ["test:tournament-orchestration"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/tournament-orchestration:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/tournament-orchestration/
+  rules:
+    - changes:
+        - services/tournament-orchestration/**
+        - ci/templates/**
+
+deliver:tournament-orchestration:
+  stage: deliver
+  needs: ["build:tournament-orchestration"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/tournament-orchestration:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/tournament-orchestration/**
+        - ci/templates/**
+
+deploy-staging:tournament-orchestration:
+  stage: deploy-staging
+  needs: ["deliver:tournament-orchestration"]
+  when: manual
+  script:
+    - echo "deploy-staging for tournament-orchestration is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/tournament-orchestration/**
+        - ci/templates/**

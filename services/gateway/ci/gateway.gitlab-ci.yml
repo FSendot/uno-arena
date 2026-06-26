@@ -1,0 +1,41 @@
+test:gateway:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/gateway/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/gateway/**
+        - ci/templates/**
+
+build:gateway:
+  stage: build
+  needs: ["test:gateway"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/gateway/
+  rules:
+    - changes:
+        - services/gateway/**
+        - ci/templates/**
+
+deliver:gateway:
+  stage: deliver
+  needs: ["build:gateway"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/gateway/**
+        - ci/templates/**
+
+deploy-staging:gateway:
+  stage: deploy-staging
+  needs: ["deliver:gateway"]
+  when: manual
+  script:
+    - echo "deploy-staging for gateway is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/gateway/**
+        - ci/templates/**

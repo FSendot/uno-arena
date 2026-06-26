@@ -1,0 +1,4 @@
+replicaCount: 1
+
+env:
+  API_URL: https://staging.unoarena.example.com

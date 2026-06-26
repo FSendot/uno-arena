@@ -1,0 +1,17 @@
+replicaCount: 1
+
+image:
+  repository: registry.gitlab.com/group/uno-arena/ranking
+  digest: ""
+
+env:
+  SERVICE_NAME: ranking
+  API_URL: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi

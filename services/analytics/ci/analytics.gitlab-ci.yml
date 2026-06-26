@@ -1,0 +1,41 @@
+test:analytics:
+  stage: test
+  image: golang:1.22-alpine
+  script:
+    - cd services/analytics/src && go vet ./... && go test ./...
+  rules:
+    - changes:
+        - services/analytics/**
+        - ci/templates/**
+
+build:analytics:
+  stage: build
+  needs: ["test:analytics"]
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/analytics:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/analytics/
+  rules:
+    - changes:
+        - services/analytics/**
+        - ci/templates/**
+
+deliver:analytics:
+  stage: deliver
+  needs: ["build:analytics"]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE/analytics:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  rules:
+    - changes:
+        - services/analytics/**
+        - ci/templates/**
+
+deploy-staging:analytics:
+  stage: deploy-staging
+  needs: ["deliver:analytics"]
+  when: manual
+  script:
+    - echo "deploy-staging for analytics is stubbed for this checkpoint"
+  rules:
+    - changes:
+        - services/analytics/**
+        - ci/templates/**

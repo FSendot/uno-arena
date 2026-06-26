@@ -1,0 +1,18 @@
+stages:
+  - test
+  - build
+  - deliver
+  - deploy-staging
+  - integration-staging
+  - deliver-production
+  - deploy-production
+
+include:
+  - local: services/gateway/ci/gateway.gitlab-ci.yml
+  - local: services/identity/ci/identity.gitlab-ci.yml
+  - local: services/room-gameplay/ci/room-gameplay.gitlab-ci.yml
+  - local: services/game-integrity/ci/game-integrity.gitlab-ci.yml
+  - local: services/tournament-orchestration/ci/tournament-orchestration.gitlab-ci.yml
+  - local: services/ranking/ci/ranking.gitlab-ci.yml
+  - local: services/spectator-view/ci/spectator-view.gitlab-ci.yml
+  - local: services/analytics/ci/analytics.gitlab-ci.yml
