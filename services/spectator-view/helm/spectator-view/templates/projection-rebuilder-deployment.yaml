@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-projection-rebuilder
+  labels:
+    app: {{ .Release.Name }}-projection-rebuilder
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-projection-rebuilder
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-projection-rebuilder
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: projection-rebuilder
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: API_URL
+              value: {{ .Values.env.API_URL | quote }}
+            - name: WORKER_ROLE
+              value: "spectator-projection-rebuilder"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

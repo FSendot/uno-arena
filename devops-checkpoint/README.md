@@ -126,7 +126,7 @@ include:
 
 Each stage uses `needs:` to declare an explicit dependency on the previous stage for the same service. If `test:identity` fails, `build:identity` never starts. No cross-service stage can unblock a failed service.
 
-Cross-service contract failures: if the JSON Schema check between Room Gameplay and Spectator View fails, both services' `test` stages report red and neither proceeds to `build`. See [ADR-0014](../docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md).
+Cross-service contract failures: if the schema-backed contract check between Room Gameplay and Spectator View fails, both services' `test` stages report red and neither proceeds to `build`. See [ADR-0014](../docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md).
 
 Retries: no silent retries. If a job is flaky, it reports red. An explicit `retry: 1` may be added to the `integration-staging` job only, and must be documented as such.
 
@@ -263,10 +263,10 @@ An operator can retrieve it via `kubectl logs deployment/identity -n staging`. T
 | Tournament Orchestration Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Provisioning Workers in chart |
 | Ranking Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder |
 | Spectator Projection Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Projection Rebuilders in chart; consumer side of contract check |
-| Analytics Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder |
+| Analytics Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Projection Rebuilders in chart |
 
 ⬜ = job present in `.gitlab-ci.yml` but `when: manual` or skipped via `rules:` for this checkpoint.
 
 ### Contract Check
 
-The async JSON Schema contract check between Room Gameplay (producer) and Spectator View (consumer) on `room.spectator-safe.events` runs in the `test` stage of both services. A schema change by Room Gameplay that breaks Spectator View's consumer stub fails both `test` jobs and blocks both pipelines. See [ADR-0014](../docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md).
+The async schema-backed contract check between Room Gameplay (producer) and Spectator View (consumer) on `room.spectator-safe.events` runs in the `test` stage of both services. Both tests load the producer-owned JSON Schema file and enforce the keywords this contract uses: required fields, field types, `sequenceNumber` minimum, and rejected extra top-level properties. A schema change by Room Gameplay that breaks Spectator View's consumer stub fails both `test` jobs and blocks both pipelines. See [ADR-0014](../docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md).

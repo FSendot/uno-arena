@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-timer-worker
+  labels:
+    app: {{ .Release.Name }}-timer-worker
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-timer-worker
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-timer-worker
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: timer-worker
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: API_URL
+              value: {{ .Values.env.API_URL | quote }}
+            - name: WORKER_ROLE
+              value: "room-timer"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
