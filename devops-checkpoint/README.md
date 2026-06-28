@@ -168,9 +168,12 @@ helm upgrade --install $SERVICE_NAME uno-arena-$CI_COMMIT_REF_SLUG/$SERVICE_NAME
   --namespace staging \
   --values ./services/$SERVICE_NAME/helm/$SERVICE_NAME/values.staging.yaml \
   --set image.repository=$CI_REGISTRY_IMAGE/$SERVICE_NAME \
-  --set image.digest=$IMAGE_DIGEST
+  --set image.digest=$IMAGE_DIGEST \
+  --force-conflicts
 kubectl rollout status deployment/$SERVICE_NAME -n staging --timeout=120s
 ```
+
+`--force-conflicts` is intentional for Helm 4 server-side apply: the pipeline chart is the source of truth for the Deployment image, so CI reclaims fields that were previously changed with tools such as `kubectl set image`.
 
 The kubeconfig is injected as a masked GitLab CI variable (`KUBE_CONFIG`). It is never committed to the repo.
 

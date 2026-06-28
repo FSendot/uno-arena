@@ -51,7 +51,15 @@ deploy-staging:identity:
   script:
     - helm repo add --force-update --username gitlab-ci-token --password $CI_JOB_TOKEN uno-arena-$CI_COMMIT_REF_SLUG ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/${CI_COMMIT_REF_SLUG}
     - helm repo update
-    - helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity --version 0.1.$CI_PIPELINE_IID --namespace staging --create-namespace --values services/identity/helm/identity/values.staging.yaml --set image.repository=$CI_REGISTRY_IMAGE/identity --set image.digest=$IMAGE_DIGEST
+    - >
+      helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity
+      --version 0.1.$CI_PIPELINE_IID
+      --namespace staging
+      --create-namespace
+      --values services/identity/helm/identity/values.staging.yaml
+      --set image.repository=$CI_REGISTRY_IMAGE/identity
+      --set image.digest=$IMAGE_DIGEST
+      --force-conflicts
     - kubectl rollout status deployment/identity -n staging --timeout=120s
   rules:
     - changes:
@@ -101,5 +109,13 @@ deploy-production:identity:
   script:
     - helm repo add --force-update --username gitlab-ci-token --password $CI_JOB_TOKEN uno-arena-$CI_COMMIT_REF_SLUG ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/${CI_COMMIT_REF_SLUG}
     - helm repo update
-    - helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity --version 0.1.$CI_PIPELINE_IID --namespace production --create-namespace --values services/identity/helm/identity/values.production.yaml --set image.repository=$CI_REGISTRY_IMAGE/identity --set image.digest=$IMAGE_DIGEST
+    - >
+      helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity
+      --version 0.1.$CI_PIPELINE_IID
+      --namespace production
+      --create-namespace
+      --values services/identity/helm/identity/values.production.yaml
+      --set image.repository=$CI_REGISTRY_IMAGE/identity
+      --set image.digest=$IMAGE_DIGEST
+      --force-conflicts
     - kubectl rollout status deployment/identity -n production --timeout=120s
