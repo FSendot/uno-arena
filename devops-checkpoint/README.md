@@ -116,7 +116,7 @@ include:
 |---|---|---|
 | `test` | Unit tests, linter, contract check (Room Gameplay + Spectator View only) | Fails the pipeline for that service; `build` does not start |
 | `build` | Compiles the service binary inside Docker build context | Fails the pipeline; `deliver` does not start |
-| `deliver` | Pushes image to GitLab Container Registry; captures digest as CI artifact | Fails the pipeline; no deploy starts |
+| `deliver` | Pushes image to GitLab Container Registry; packages and publishes the Helm chart to GitLab Package Registry; captures digest as CI artifact where downstream deploys need it | Fails the pipeline; no deploy starts |
 | `deploy-staging` | `helm upgrade --install` against staging namespace; waits for `kubectl rollout status` | Fails if pods are not healthy; `integration-staging` does not start |
 | `integration-staging` | CLI smoke test via `devops-checkpoint/smoke-test/run-smoke-test.sh` | Fails if service is unreachable or returns wrong response |
 | `deliver-production` | *(optional, manual gate)* Promotes same digest to production tag | Must pin same digest from `deliver`; no rebuild |
@@ -149,12 +149,25 @@ A change to `ci/templates/**` triggers all services. A change scoped to one serv
 
 **Helm releases applied from the pipeline.** See [ADR-0010](../docs/adr/0010-helm-from-pipeline-as-deploy-model.md).
 
-Each service's `deploy-staging` job runs:
+Each service's `deliver` job publishes two independently versioned artifacts:
+
+- Container image: `$CI_REGISTRY_IMAGE/<service>:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA`
+- Helm chart: GitLab Helm Package Registry channel `$CI_COMMIT_REF_SLUG`, chart version `0.1.$CI_PIPELINE_IID`, app version `$CI_COMMIT_SHORT_SHA`
+
+For the fully-wired Identity service, `deploy-staging` consumes that published chart version and still pins the runtime image by digest:
 
 ```bash
-helm upgrade --install $SERVICE_NAME ./services/$SERVICE_NAME/helm/$SERVICE_NAME \
+helm repo add --force-update \
+  --username gitlab-ci-token \
+  --password $CI_JOB_TOKEN \
+  uno-arena-$CI_COMMIT_REF_SLUG \
+  $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/helm/$CI_COMMIT_REF_SLUG
+
+helm upgrade --install $SERVICE_NAME uno-arena-$CI_COMMIT_REF_SLUG/$SERVICE_NAME \
+  --version 0.1.$CI_PIPELINE_IID \
   --namespace staging \
   --values ./services/$SERVICE_NAME/helm/$SERVICE_NAME/values.staging.yaml \
+  --set image.repository=$CI_REGISTRY_IMAGE/$SERVICE_NAME \
   --set image.digest=$IMAGE_DIGEST
 kubectl rollout status deployment/$SERVICE_NAME -n staging --timeout=120s
 ```
@@ -184,14 +197,25 @@ The deploy job calls `kubectl rollout status` after `helm upgrade --install`. Th
 
 ### Promotion Model
 
-The `deliver` job pushes the image and captures its digest:
+The `deliver` job pushes the image, publishes the chart, and captures the image digest:
 
 ```bash
+CHART_VERSION=0.1.$CI_PIPELINE_IID
+
+helm package services/$SERVICE_NAME/helm/$SERVICE_NAME \
+  --version $CHART_VERSION \
+  --app-version $CI_COMMIT_SHORT_SHA
+
+curl --fail-with-body --request POST \
+  --user gitlab-ci-token:$CI_JOB_TOKEN \
+  --form "chart=@$SERVICE_NAME-$CHART_VERSION.tgz" \
+  "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/helm/api/$CI_COMMIT_REF_SLUG/charts"
+
 IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_TAG | cut -d@ -f2)
 echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> deploy.env
 ```
 
-Both `deploy-staging` and `deploy-production` consume `IMAGE_DIGEST` from the artifact. Production deploys the same digest tested in staging — no rebuild. See [ADR-0011](../docs/adr/0011-image-versioning-branch-sha-with-digest-pinning.md).
+Both `deploy-staging` and `deploy-production` consume `IMAGE_DIGEST` from the artifact. Production deploys the same digest tested in staging and the same packaged chart version for the pipeline — no rebuild. See [ADR-0011](../docs/adr/0011-image-versioning-branch-sha-with-digest-pinning.md).
 
 ---
 

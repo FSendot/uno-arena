@@ -28,6 +28,13 @@ deliver:identity:
       IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
         $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA | cut -d@ -f2)
       echo "IMAGE_DIGEST=$IMAGE_DIGEST" > $CI_PROJECT_DIR/deliver.env
+    - |
+      CHART_VERSION=0.1.$CI_PIPELINE_IID
+      helm package services/identity/helm/identity --version $CHART_VERSION --app-version $CI_COMMIT_SHORT_SHA
+      curl --fail-with-body --request POST \
+        --user gitlab-ci-token:$CI_JOB_TOKEN \
+        --form "chart=@identity-$CHART_VERSION.tgz" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/${CI_COMMIT_REF_SLUG}/charts"
   artifacts:
     reports:
       dotenv: $CI_PROJECT_DIR/deliver.env
@@ -42,7 +49,9 @@ deploy-staging:identity:
     - job: deliver:identity
       artifacts: true
   script:
-    - helm upgrade --install identity services/identity/helm/identity --namespace staging --create-namespace --values services/identity/helm/identity/values.staging.yaml --set image.repository=$CI_REGISTRY_IMAGE/identity --set image.digest=$IMAGE_DIGEST
+    - helm repo add --force-update --username gitlab-ci-token --password $CI_JOB_TOKEN uno-arena-$CI_COMMIT_REF_SLUG ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/${CI_COMMIT_REF_SLUG}
+    - helm repo update
+    - helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity --version 0.1.$CI_PIPELINE_IID --namespace staging --create-namespace --values services/identity/helm/identity/values.staging.yaml --set image.repository=$CI_REGISTRY_IMAGE/identity --set image.digest=$IMAGE_DIGEST
     - kubectl rollout status deployment/identity -n staging --timeout=120s
   rules:
     - changes:
@@ -89,5 +98,7 @@ deploy-production:identity:
   rules:
     - if: $CI_COMMIT_TAG
   script:
-    - helm upgrade --install identity services/identity/helm/identity --namespace production --create-namespace --values services/identity/helm/identity/values.production.yaml --set image.repository=$CI_REGISTRY_IMAGE/identity --set image.digest=$IMAGE_DIGEST
+    - helm repo add --force-update --username gitlab-ci-token --password $CI_JOB_TOKEN uno-arena-$CI_COMMIT_REF_SLUG ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/${CI_COMMIT_REF_SLUG}
+    - helm repo update
+    - helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity --version 0.1.$CI_PIPELINE_IID --namespace production --create-namespace --values services/identity/helm/identity/values.production.yaml --set image.repository=$CI_REGISTRY_IMAGE/identity --set image.digest=$IMAGE_DIGEST
     - kubectl rollout status deployment/identity -n production --timeout=120s
