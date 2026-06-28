@@ -12,6 +12,7 @@ test:tournament-orchestration:
       changes:
         - services/tournament-orchestration/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "tournament-orchestration")'
 
 build:tournament-orchestration:
   stage: build
@@ -38,6 +39,7 @@ deliver:tournament-orchestration:
       changes:
         - services/tournament-orchestration/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "tournament-orchestration")'
 
 deploy-staging:tournament-orchestration:
   stage: deploy-staging

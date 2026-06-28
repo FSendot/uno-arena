@@ -12,6 +12,7 @@ test:gateway:
       changes:
         - services/gateway/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "gateway")'
 
 build:gateway:
   stage: build
@@ -38,6 +39,7 @@ deliver:gateway:
       changes:
         - services/gateway/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "gateway")'
 
 deploy-staging:gateway:
   stage: deploy-staging

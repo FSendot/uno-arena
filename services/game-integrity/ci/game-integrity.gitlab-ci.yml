@@ -12,6 +12,7 @@ test:game-integrity:
       changes:
         - services/game-integrity/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "game-integrity")'
 
 build:game-integrity:
   stage: build
@@ -38,6 +39,7 @@ deliver:game-integrity:
       changes:
         - services/game-integrity/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "game-integrity")'
 
 deploy-staging:game-integrity:
   stage: deploy-staging

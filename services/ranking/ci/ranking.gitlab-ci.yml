@@ -12,6 +12,7 @@ test:ranking:
       changes:
         - services/ranking/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "ranking")'
 
 build:ranking:
   stage: build
@@ -38,6 +39,7 @@ deliver:ranking:
       changes:
         - services/ranking/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "ranking")'
 
 deploy-staging:ranking:
   stage: deploy-staging

@@ -12,6 +12,7 @@ test:analytics:
       changes:
         - services/analytics/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "analytics")'
 
 build:analytics:
   stage: build
@@ -38,6 +39,7 @@ deliver:analytics:
       changes:
         - services/analytics/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "analytics")'
 
 deploy-staging:analytics:
   stage: deploy-staging

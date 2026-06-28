@@ -12,6 +12,7 @@ test:room-gameplay:
       changes:
         - services/room-gameplay/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "room-gameplay")'
 
 build:room-gameplay:
   stage: build
@@ -38,6 +39,7 @@ deliver:room-gameplay:
       changes:
         - services/room-gameplay/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "room-gameplay")'
 
 deploy-staging:room-gameplay:
   stage: deploy-staging

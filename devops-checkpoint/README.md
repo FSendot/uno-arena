@@ -139,6 +139,7 @@ workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
     - when: never
 
@@ -151,9 +152,10 @@ rules:
     changes:
       - services/identity/**
       - ci/templates/**
+  - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
 ```
 
-Validation jobs run for merge requests targeting `main` and pushes to `main`. Delivery and staging deploy jobs run only for pushes to `main`, with the same path filters. The existing Identity production tag path is preserved for the manual production jobs. A change to `ci/templates/**` triggers all services. A change scoped to one service folder triggers only that service. See [ADR-0012](../docs/adr/0012-monorepo-change-detection-via-rules-changes.md).
+Validation jobs run for merge requests targeting `main`, pushes to `main`, and manual web pipelines on `main`. Delivery and staging deploy jobs run for pushes to `main` and manual web pipelines on `main`, with the same service selection rules. A manual web pipeline can set `RUN_SERVICE` to one service name (`identity`, `gateway`, `room-gameplay`, `game-integrity`, `tournament-orchestration`, `ranking`, `spectator-view`, or `analytics`) or `all`; leaving it empty runs all services. The existing Identity production tag path is preserved for the manual production jobs. A change to `ci/templates/**` triggers all services. A change scoped to one service folder triggers only that service. See [ADR-0012](../docs/adr/0012-monorepo-change-detection-via-rules-changes.md).
 
 ---
 

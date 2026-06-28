@@ -12,6 +12,7 @@ test:identity:
       changes:
         - services/identity/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
     - if: '$CI_COMMIT_TAG'
 
 build:identity:
@@ -46,6 +47,7 @@ deliver:identity:
       changes:
         - services/identity/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
     - if: '$CI_COMMIT_TAG'
 
 deploy-staging:identity:
@@ -71,6 +73,7 @@ deploy-staging:identity:
       changes:
         - services/identity/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
 
 integration-staging:identity:
   stage: integration-staging
