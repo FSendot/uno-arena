@@ -3,8 +3,13 @@ test:game-integrity:
   image: golang:1.22-alpine
   script:
     - cd services/game-integrity/src && go vet ./... && go test ./...
-  rules:
-    - changes:
+  rules: &game_integrity_validation_rules
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes:
+        - services/game-integrity/**
+        - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/game-integrity/**
         - ci/templates/**
 
@@ -13,10 +18,7 @@ build:game-integrity:
   needs: ["test:game-integrity"]
   script:
     - docker build -t $CI_REGISTRY_IMAGE/game-integrity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/game-integrity/
-  rules:
-    - changes:
-        - services/game-integrity/**
-        - ci/templates/**
+  rules: *game_integrity_validation_rules
 
 deliver:game-integrity:
   stage: deliver
@@ -31,8 +33,9 @@ deliver:game-integrity:
         --user gitlab-ci-token:$CI_JOB_TOKEN \
         --form "chart=@game-integrity-$CHART_VERSION.tgz" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/${CI_COMMIT_REF_SLUG}/charts"
-  rules:
-    - changes:
+  rules: &game_integrity_main_push_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/game-integrity/**
         - ci/templates/**
 
@@ -42,7 +45,4 @@ deploy-staging:game-integrity:
   when: manual
   script:
     - echo "deploy-staging for game-integrity is stubbed for this checkpoint"
-  rules:
-    - changes:
-        - services/game-integrity/**
-        - ci/templates/**
+  rules: *game_integrity_main_push_rules

@@ -3,8 +3,13 @@ test:ranking:
   image: golang:1.22-alpine
   script:
     - cd services/ranking/src && go vet ./... && go test ./...
-  rules:
-    - changes:
+  rules: &ranking_validation_rules
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes:
+        - services/ranking/**
+        - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/ranking/**
         - ci/templates/**
 
@@ -13,10 +18,7 @@ build:ranking:
   needs: ["test:ranking"]
   script:
     - docker build -t $CI_REGISTRY_IMAGE/ranking:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/ranking/
-  rules:
-    - changes:
-        - services/ranking/**
-        - ci/templates/**
+  rules: *ranking_validation_rules
 
 deliver:ranking:
   stage: deliver
@@ -31,8 +33,9 @@ deliver:ranking:
         --user gitlab-ci-token:$CI_JOB_TOKEN \
         --form "chart=@ranking-$CHART_VERSION.tgz" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/${CI_COMMIT_REF_SLUG}/charts"
-  rules:
-    - changes:
+  rules: &ranking_main_push_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/ranking/**
         - ci/templates/**
 
@@ -42,7 +45,4 @@ deploy-staging:ranking:
   when: manual
   script:
     - echo "deploy-staging for ranking is stubbed for this checkpoint"
-  rules:
-    - changes:
-        - services/ranking/**
-        - ci/templates/**
+  rules: *ranking_main_push_rules

@@ -3,20 +3,23 @@ test:identity:
   image: golang:1.22-alpine
   script:
     - cd services/identity/src && go vet ./... && go test ./...
-  rules:
-    - changes:
+  rules: &identity_validation_rules
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes:
         - services/identity/**
         - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
+        - services/identity/**
+        - ci/templates/**
+    - if: '$CI_COMMIT_TAG'
 
 build:identity:
   stage: build
   needs: ["test:identity"]
   script:
     - docker build -t $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/identity/
-  rules:
-    - changes:
-        - services/identity/**
-        - ci/templates/**
+  rules: *identity_validation_rules
 
 deliver:identity:
   stage: deliver
@@ -38,10 +41,12 @@ deliver:identity:
   artifacts:
     reports:
       dotenv: $CI_PROJECT_DIR/deliver.env
-  rules:
-    - changes:
+  rules: &identity_deliver_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/identity/**
         - ci/templates/**
+    - if: '$CI_COMMIT_TAG'
 
 deploy-staging:identity:
   stage: deploy-staging
@@ -61,8 +66,9 @@ deploy-staging:identity:
       --set image.digest=$IMAGE_DIGEST
       --force-conflicts
     - kubectl rollout status deployment/identity -n staging --timeout=120s
-  rules:
-    - changes:
+  rules: &identity_main_push_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/identity/**
         - ci/templates/**
 
@@ -74,14 +80,11 @@ integration-staging:identity:
   variables:
     UNOARENA_API_URL: $STAGING_IDENTITY_URL
   script:
-    - if command -v apk >/dev/null; then apk add --no-cache jq bash; fi
-    - install -m 0755 "$UNOARENA_CLI_BIN" "$CI_PROJECT_DIR/unoarena"
+    - if command -v apk >/dev/null; then apk add --no-cache bash curl; fi
+    - install -m 0755 devops-checkpoint/smoke-test/unoarena "$CI_PROJECT_DIR/unoarena"
     - export PATH="$CI_PROJECT_DIR:$PATH"
     - bash devops-checkpoint/smoke-test/run-smoke-test.sh
-  rules:
-    - changes:
-        - services/identity/**
-        - ci/templates/**
+  rules: *identity_main_push_rules
 
 deliver-production:identity:
   stage: deliver-production
@@ -90,7 +93,7 @@ deliver-production:identity:
       artifacts: true
   when: manual
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: '$CI_COMMIT_TAG'
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - docker pull $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
@@ -105,7 +108,7 @@ deploy-production:identity:
       artifacts: true
   when: manual
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: '$CI_COMMIT_TAG'
   script:
     - helm repo add --force-update --username gitlab-ci-token --password $CI_JOB_TOKEN uno-arena-$CI_COMMIT_REF_SLUG ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/${CI_COMMIT_REF_SLUG}
     - helm repo update

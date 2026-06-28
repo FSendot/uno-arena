@@ -135,13 +135,25 @@ Retries: no silent retries. If a job is flaky, it reports red. An explicit `retr
 Each service fragment uses `rules: changes:` scoped to its own path and to shared templates:
 
 ```yaml
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+    - when: never
+
 rules:
-  - changes:
-    - services/identity/**
-    - ci/templates/**
+  - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    changes:
+      - services/identity/**
+      - ci/templates/**
+  - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+    changes:
+      - services/identity/**
+      - ci/templates/**
 ```
 
-A change to `ci/templates/**` triggers all services. A change scoped to one service folder triggers only that service. See [ADR-0012](../docs/adr/0012-monorepo-change-detection-via-rules-changes.md).
+Validation jobs run for merge requests targeting `main` and pushes to `main`. Delivery and staging deploy jobs run only for pushes to `main`, with the same path filters. The existing Identity production tag path is preserved for the manual production jobs. A change to `ci/templates/**` triggers all services. A change scoped to one service folder triggers only that service. See [ADR-0012](../docs/adr/0012-monorepo-change-detection-via-rules-changes.md).
 
 ---
 
@@ -224,12 +236,12 @@ Both `deploy-staging` and `deploy-production` consume `IMAGE_DIGEST` from the ar
 
 ## 6.6 Integration Smoke Test — Identity Service
 
-The `integration-staging` stage runs `devops-checkpoint/smoke-test/run-smoke-test.sh` against the Identity placeholder deployed in staging.
+The `integration-staging` stage runs `devops-checkpoint/smoke-test/run-smoke-test.sh` against the Identity placeholder deployed in staging. The job installs the repo-owned `devops-checkpoint/smoke-test/unoarena` CLI shim, so it does not depend on a runner-local `UNOARENA_CLI_BIN` variable.
 
 ### What it does
 
 1. Calls `unoarena register --user smoketest-$CI_JOB_ID --pass testpass --json` and asserts the response contains `"status": "ok"`.
-2. Calls `unoarena whoami --json` and asserts the response contains `"username": "smoketest-$CI_JOB_ID"`.
+2. Calls `unoarena whoami --user smoketest-$CI_JOB_ID --json` and asserts the response contains `"username": "smoketest-$CI_JOB_ID"`.
 3. Cleans up the seeded account on exit (or namespaces it by `CI_JOB_ID` so repeated runs do not collide).
 
 The staging URL is injected as `UNOARENA_API_URL` — never hardcoded.

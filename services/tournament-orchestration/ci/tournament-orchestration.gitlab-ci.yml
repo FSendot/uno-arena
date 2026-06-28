@@ -3,8 +3,13 @@ test:tournament-orchestration:
   image: golang:1.22-alpine
   script:
     - cd services/tournament-orchestration/src && go vet ./... && go test ./...
-  rules:
-    - changes:
+  rules: &tournament_orchestration_validation_rules
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes:
+        - services/tournament-orchestration/**
+        - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/tournament-orchestration/**
         - ci/templates/**
 
@@ -13,10 +18,7 @@ build:tournament-orchestration:
   needs: ["test:tournament-orchestration"]
   script:
     - docker build -t $CI_REGISTRY_IMAGE/tournament-orchestration:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/tournament-orchestration/
-  rules:
-    - changes:
-        - services/tournament-orchestration/**
-        - ci/templates/**
+  rules: *tournament_orchestration_validation_rules
 
 deliver:tournament-orchestration:
   stage: deliver
@@ -31,8 +33,9 @@ deliver:tournament-orchestration:
         --user gitlab-ci-token:$CI_JOB_TOKEN \
         --form "chart=@tournament-orchestration-$CHART_VERSION.tgz" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/${CI_COMMIT_REF_SLUG}/charts"
-  rules:
-    - changes:
+  rules: &tournament_orchestration_main_push_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/tournament-orchestration/**
         - ci/templates/**
 
@@ -42,7 +45,4 @@ deploy-staging:tournament-orchestration:
   when: manual
   script:
     - echo "deploy-staging for tournament-orchestration is stubbed for this checkpoint"
-  rules:
-    - changes:
-        - services/tournament-orchestration/**
-        - ci/templates/**
+  rules: *tournament_orchestration_main_push_rules

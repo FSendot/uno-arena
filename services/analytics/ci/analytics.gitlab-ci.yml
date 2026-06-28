@@ -3,8 +3,13 @@ test:analytics:
   image: golang:1.22-alpine
   script:
     - cd services/analytics/src && go vet ./... && go test ./...
-  rules:
-    - changes:
+  rules: &analytics_validation_rules
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes:
+        - services/analytics/**
+        - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/analytics/**
         - ci/templates/**
 
@@ -13,10 +18,7 @@ build:analytics:
   needs: ["test:analytics"]
   script:
     - docker build -t $CI_REGISTRY_IMAGE/analytics:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/analytics/
-  rules:
-    - changes:
-        - services/analytics/**
-        - ci/templates/**
+  rules: *analytics_validation_rules
 
 deliver:analytics:
   stage: deliver
@@ -31,8 +33,9 @@ deliver:analytics:
         --user gitlab-ci-token:$CI_JOB_TOKEN \
         --form "chart=@analytics-$CHART_VERSION.tgz" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/${CI_COMMIT_REF_SLUG}/charts"
-  rules:
-    - changes:
+  rules: &analytics_main_push_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/analytics/**
         - ci/templates/**
 
@@ -42,7 +45,4 @@ deploy-staging:analytics:
   when: manual
   script:
     - echo "deploy-staging for analytics is stubbed for this checkpoint"
-  rules:
-    - changes:
-        - services/analytics/**
-        - ci/templates/**
+  rules: *analytics_main_push_rules

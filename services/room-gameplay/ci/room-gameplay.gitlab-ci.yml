@@ -3,8 +3,13 @@ test:room-gameplay:
   image: golang:1.22-alpine
   script:
     - cd services/room-gameplay/src && go vet ./... && go test ./...
-  rules:
-    - changes:
+  rules: &room_gameplay_validation_rules
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      changes:
+        - services/room-gameplay/**
+        - ci/templates/**
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/room-gameplay/**
         - ci/templates/**
 
@@ -13,10 +18,7 @@ build:room-gameplay:
   needs: ["test:room-gameplay"]
   script:
     - docker build -t $CI_REGISTRY_IMAGE/room-gameplay:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/room-gameplay/
-  rules:
-    - changes:
-        - services/room-gameplay/**
-        - ci/templates/**
+  rules: *room_gameplay_validation_rules
 
 deliver:room-gameplay:
   stage: deliver
@@ -31,8 +33,9 @@ deliver:room-gameplay:
         --user gitlab-ci-token:$CI_JOB_TOKEN \
         --form "chart=@room-gameplay-$CHART_VERSION.tgz" \
         "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/api/${CI_COMMIT_REF_SLUG}/charts"
-  rules:
-    - changes:
+  rules: &room_gameplay_main_push_rules
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
+      changes:
         - services/room-gameplay/**
         - ci/templates/**
 
@@ -42,7 +45,4 @@ deploy-staging:room-gameplay:
   when: manual
   script:
     - echo "deploy-staging for room-gameplay is stubbed for this checkpoint"
-  rules:
-    - changes:
-        - services/room-gameplay/**
-        - ci/templates/**
+  rules: *room_gameplay_main_push_rules

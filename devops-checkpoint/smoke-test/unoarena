@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_URL="${UNOARENA_API_URL:?UNOARENA_API_URL must be set}"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  unoarena register --user <username> --pass <password> [--json]
+  unoarena whoami --user <username> [--json]
+USAGE
+  exit 2
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "FAIL: required command '$1' is not available" >&2
+    exit 1
+  fi
+}
+
+json_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+urlencode() {
+  local value="$1"
+  local encoded=""
+  local i char
+
+  LC_ALL=C
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      [a-zA-Z0-9.~_-]) encoded+="$char" ;;
+      *) printf -v encoded '%s%%%02X' "$encoded" "'$char" ;;
+    esac
+  done
+
+  printf '%s' "$encoded"
+}
+
+require_command curl
+
+command_name="${1:-}"
+if [ -z "$command_name" ]; then
+  usage
+fi
+shift
+
+username=""
+password=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user)
+      [ "$#" -ge 2 ] || usage
+      username="$2"
+      shift 2
+      ;;
+    --pass)
+      [ "$#" -ge 2 ] || usage
+      password="$2"
+      shift 2
+      ;;
+    --json)
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+base_url="${API_URL%/}"
+
+case "$command_name" in
+  register)
+    [ -n "$username" ] && [ -n "$password" ] || usage
+    curl --fail --show-error --silent \
+      --request POST \
+      --header "Content-Type: application/json" \
+      --data "{\"username\":\"$(json_escape "$username")\",\"password\":\"$(json_escape "$password")\"}" \
+      "$base_url/register"
+    ;;
+  whoami)
+    [ -n "$username" ] || usage
+    curl --fail --show-error --silent \
+      "$base_url/whoami?user=$(urlencode "$username")"
+    ;;
+  *)
+    usage
+    ;;
+esac
