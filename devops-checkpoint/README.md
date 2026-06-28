@@ -11,6 +11,8 @@
 
 This document covers the pipeline design for the UnoArena DevOps checkpoint. All services from the Architecture Checkpoint are present as placeholders, wired through at least `test → build → deliver`. The Identity Service is the fully-wired service, going all the way through `deploy-staging → integration-staging`.
 
+For the local execution steps used to run the checkpoint pipeline with a local GitLab runner and `kind`, see [Local GitLab Runner and Staging Runbook](./local-runbook.md).
+
 ---
 
 ## 6.1 Repository Layout and Service Ownership
@@ -23,6 +25,7 @@ uno-arena/
 │       └── service.gitlab-ci.yml         # Shared stage template (rules:changes catch-all)
 ├── devops-checkpoint/
 │   ├── README.md                         # This document
+│   ├── local-runbook.md                   # Local GitLab runner + kind runbook
 │   └── smoke-test/                       # CLI smoke test harness for Identity staging
 │       └── run-smoke-test.sh
 ├── services/
@@ -189,7 +192,7 @@ kubectl rollout status deployment/$SERVICE_NAME -n staging --timeout=120s
 
 `--force-conflicts` is intentional for Helm 4 server-side apply: the pipeline chart is the source of truth for the Deployment image, so CI reclaims fields that were previously changed with tools such as `kubectl set image`.
 
-The kubeconfig is injected as a masked GitLab CI variable (`KUBE_CONFIG`). It is never committed to the repo.
+For the local checkpoint run, deploy jobs use the shell runner host's active `kubectl` context (`kind-uno-arena`). If the pipeline is moved to a remote runner, inject kubeconfig as a masked GitLab CI variable or file variable (`KUBE_CONFIG`) and materialize it before running `helm` or `kubectl`. Kubeconfig content must never be committed to the repo.
 
 ### Environment Differences
 

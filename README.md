@@ -25,6 +25,11 @@ This repository contains the current UnoArena design package and the architectur
 - [06. Cross-Cutting Concerns](./docs/architecture/06-cross-cutting-concerns.md)
 - [07. Sequence Diagrams](./docs/architecture/07-sequence-diagrams.md)
 
+## DevOps Checkpoint
+
+- [DevOps Checkpoint README](./devops-checkpoint/README.md)
+- [Local GitLab Runner and Staging Runbook](./devops-checkpoint/local-runbook.md)
+
 ## Decision Log
 
 - [ADR-0001. REST Command Envelope and SSE](./docs/adr/0001-rest-command-envelope-and-sse.md)
