@@ -3,7 +3,7 @@
 ## Pipeline Run
 
 > Link to green pipeline run (to be added after first successful execution on GitLab):
-> `https://gitlab.com/<group>/uno-arena/-/pipelines/<id>`
+> `https://gitlab.com/itba-73-40-microservicios/alumnos/2026-s1/grupo-6/uno-arena/-/pipelines/2635764453`
 
 ---
 
