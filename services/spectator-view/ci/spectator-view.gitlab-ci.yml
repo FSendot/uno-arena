@@ -8,10 +8,12 @@ test:spectator-view:
       changes:
         - services/spectator-view/**
         - ci/templates/**
+        - services/room-gameplay/contracts/**
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/spectator-view/**
         - ci/templates/**
+        - services/room-gameplay/contracts/**
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "spectator-view")'
 
 build:spectator-view:
@@ -39,6 +41,7 @@ deliver:spectator-view:
       changes:
         - services/spectator-view/**
         - ci/templates/**
+        - services/room-gameplay/contracts/**
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "spectator-view")'
 
 deploy-staging:spectator-view:

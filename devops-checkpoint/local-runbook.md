@@ -98,7 +98,7 @@ The CI job maps `STAGING_IDENTITY_URL` into `UNOARENA_API_URL` for
 `UNOARENA_API_URL` directly in GitLab for the normal pipeline path.
 
 `UNOARENA_CLI_BIN` is no longer needed. The integration job installs the
-repo-owned CLI shim from `devops-checkpoint/smoke-test/unoarena`.
+Client Checkpoint CLI artifact from `client-checkpoint/bin/unoarena`.
 
 ## Running The Pipeline
 

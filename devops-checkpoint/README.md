@@ -20,13 +20,16 @@ For the local execution steps used to run the checkpoint pipeline with a local G
 ```
 uno-arena/
 ├── .gitlab-ci.yml                        # Root orchestrator — includes all fragments
+├── client-checkpoint/
+│   └── bin/
+│       └── unoarena                       # Client Checkpoint CLI used by staging smoke test
 ├── ci/
 │   └── templates/
 │       └── service.gitlab-ci.yml         # Shared stage template (rules:changes catch-all)
 ├── devops-checkpoint/
 │   ├── README.md                         # This document
 │   ├── local-runbook.md                   # Local GitLab runner + kind runbook
-│   └── smoke-test/                       # CLI smoke test harness for Identity staging
+│   └── smoke-test/                       # Smoke test harness for Identity staging
 │       └── run-smoke-test.sh
 ├── services/
 │   ├── gateway/                          # Realtime Gateway / BFF
@@ -122,8 +125,8 @@ include:
 | `deliver` | Pushes image to GitLab Container Registry; packages and publishes the Helm chart to GitLab Package Registry; captures digest as CI artifact where downstream deploys need it | Fails the pipeline; no deploy starts |
 | `deploy-staging` | `helm upgrade --install` against staging namespace; waits for `kubectl rollout status` | Fails if pods are not healthy; `integration-staging` does not start |
 | `integration-staging` | CLI smoke test via `devops-checkpoint/smoke-test/run-smoke-test.sh` | Fails if service is unreachable or returns wrong response |
-| `deliver-production` | *(optional, manual gate)* Promotes same digest to production tag | Must pin same digest from `deliver`; no rebuild |
-| `deploy-production` | *(optional, manual gate)* `helm upgrade --install` against production namespace | Same chart, different values file |
+| `deliver-production` | Not implemented in CI for this checkpoint; documented promotion model only | Optional stage intentionally skipped |
+| `deploy-production` | Not implemented in CI for this checkpoint; production values file shows the environment shape | Optional stage intentionally skipped |
 
 ### Fail-Fast Wiring
 
@@ -143,7 +146,6 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main"'
-    - if: '$CI_COMMIT_TAG'
     - when: never
 
 rules:
@@ -158,7 +160,7 @@ rules:
   - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
 ```
 
-Validation jobs run for merge requests targeting `main`, pushes to `main`, and manual web pipelines on `main`. Delivery and staging deploy jobs run for pushes to `main` and manual web pipelines on `main`, with the same service selection rules. A manual web pipeline can set `RUN_SERVICE` to one service name (`identity`, `gateway`, `room-gameplay`, `game-integrity`, `tournament-orchestration`, `ranking`, `spectator-view`, or `analytics`) or `all`; leaving it empty runs all services. The existing Identity production tag path is preserved for the manual production jobs. A change to `ci/templates/**` triggers all services. A change scoped to one service folder triggers only that service. See [ADR-0012](../docs/adr/0012-monorepo-change-detection-via-rules-changes.md).
+Validation jobs run for merge requests targeting `main`, pushes to `main`, and manual web pipelines on `main`. Delivery and staging deploy jobs run for pushes to `main` and manual web pipelines on `main`, with the same service selection rules. A manual web pipeline can set `RUN_SERVICE` to one service name (`identity`, `gateway`, `room-gameplay`, `game-integrity`, `tournament-orchestration`, `ranking`, `spectator-view`, or `analytics`) or `all`; leaving it empty runs all services. Production tag pipelines are intentionally not implemented for this checkpoint. A change to `ci/templates/**` triggers all services. A change scoped to one service folder triggers only that service. See [ADR-0012](../docs/adr/0012-monorepo-change-detection-via-rules-changes.md).
 
 ---
 
@@ -235,13 +237,13 @@ IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_TAG | c
 echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> deploy.env
 ```
 
-Both `deploy-staging` and `deploy-production` consume `IMAGE_DIGEST` from the artifact. Production deploys the same digest tested in staging and the same packaged chart version for the pipeline — no rebuild. See [ADR-0011](../docs/adr/0011-image-versioning-branch-sha-with-digest-pinning.md).
+`deploy-staging` consumes `IMAGE_DIGEST` from the artifact so the running workload is pinned to the image built once by `deliver`. Production delivery and deployment are intentionally not implemented in CI for this checkpoint; the documented production promotion path would use the same `IMAGE_DIGEST` and packaged chart version that passed staging, with `values.production.yaml` providing environment-specific configuration and no rebuild. See [ADR-0011](../docs/adr/0011-image-versioning-branch-sha-with-digest-pinning.md).
 
 ---
 
 ## 6.6 Integration Smoke Test — Identity Service
 
-The `integration-staging` stage runs `devops-checkpoint/smoke-test/run-smoke-test.sh` against the Identity placeholder deployed in staging. The job installs the repo-owned `devops-checkpoint/smoke-test/unoarena` CLI shim, so it does not depend on a runner-local `UNOARENA_CLI_BIN` variable.
+The `integration-staging` stage runs `devops-checkpoint/smoke-test/run-smoke-test.sh` against the Identity placeholder deployed in staging. The job installs the Client Checkpoint CLI artifact from `client-checkpoint/bin/unoarena`, so the smoke test uses the same canonical command surface as the client checkpoint and does not depend on a runner-local `UNOARENA_CLI_BIN` variable.
 
 ### What it does
 
@@ -277,7 +279,7 @@ An operator can retrieve it via `kubectl logs deployment/identity -n staging`. T
 | Service | test | build | deliver | deploy-staging | integration-staging | deliver-prod | deploy-prod | Notes |
 |---|---|---|---|---|---|---|---|---|
 | Realtime Gateway / BFF | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; deploy job present but `when: manual` |
-| **Identity Service** | ✅ | ✅ | ✅ | ✅ | ✅ | ⬜ optional | ⬜ optional | **fully wired — end-to-end demonstrator** |
+| **Identity Service** | ✅ | ✅ | ✅ | ✅ | ✅ | ⬜ skipped | ⬜ skipped | **fully wired — end-to-end demonstrator; production stages are documented but not implemented** |
 | Room Gameplay Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Timer Worker in chart |
 | Game Integrity Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder |
 | Tournament Orchestration Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Provisioning Workers in chart |
@@ -285,7 +287,7 @@ An operator can retrieve it via `kubectl logs deployment/identity -n staging`. T
 | Spectator Projection Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Projection Rebuilders in chart; consumer side of contract check |
 | Analytics Service | ✅ | ✅ | ✅ | ⬜ | ⬜ | — | — | placeholder; includes Projection Rebuilders in chart |
 
-⬜ = job present in `.gitlab-ci.yml` but `when: manual` or skipped via `rules:` for this checkpoint.
+⬜ = stubbed, manual, or intentionally skipped for this checkpoint; only Identity implements `integration-staging`.
 
 ### Contract Check
 

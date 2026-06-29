@@ -13,7 +13,6 @@ test:identity:
         - services/identity/**
         - ci/templates/**
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
-    - if: '$CI_COMMIT_TAG'
 
 build:identity:
   stage: build
@@ -48,7 +47,6 @@ deliver:identity:
         - services/identity/**
         - ci/templates/**
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
-    - if: '$CI_COMMIT_TAG'
 
 deploy-staging:identity:
   stage: deploy-staging
@@ -84,44 +82,7 @@ integration-staging:identity:
     UNOARENA_API_URL: $STAGING_IDENTITY_URL
   script:
     - if command -v apk >/dev/null; then apk add --no-cache bash curl; fi
-    - install -m 0755 devops-checkpoint/smoke-test/unoarena "$CI_PROJECT_DIR/unoarena"
+    - install -m 0755 client-checkpoint/bin/unoarena "$CI_PROJECT_DIR/unoarena"
     - export PATH="$CI_PROJECT_DIR:$PATH"
     - bash devops-checkpoint/smoke-test/run-smoke-test.sh
   rules: *identity_main_push_rules
-
-deliver-production:identity:
-  stage: deliver-production
-  needs:
-    - job: deliver:identity
-      artifacts: true
-  when: manual
-  rules:
-    - if: '$CI_COMMIT_TAG'
-  script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker pull $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
-    - docker tag $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_TAG
-    - docker push $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_TAG
-
-deploy-production:identity:
-  stage: deploy-production
-  needs:
-    - job: deliver-production:identity
-    - job: deliver:identity
-      artifacts: true
-  when: manual
-  rules:
-    - if: '$CI_COMMIT_TAG'
-  script:
-    - helm repo add --force-update --username gitlab-ci-token --password $CI_JOB_TOKEN uno-arena-$CI_COMMIT_REF_SLUG ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/helm/${CI_COMMIT_REF_SLUG}
-    - helm repo update
-    - >
-      helm upgrade --install identity uno-arena-$CI_COMMIT_REF_SLUG/identity
-      --version 0.1.$CI_PIPELINE_IID
-      --namespace production
-      --create-namespace
-      --values services/identity/helm/identity/values.production.yaml
-      --set image.repository=$CI_REGISTRY_IMAGE/identity
-      --set image.digest=$IMAGE_DIGEST
-      --force-conflicts
-    - kubectl rollout status deployment/identity -n production --timeout=120s
