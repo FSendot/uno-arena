@@ -69,7 +69,7 @@ func TestReservationRecovery_ConfirmFailureNoLocalCommitThenRetry(t *testing.T) 
 	if res.Err == nil {
 		t.Fatal("confirm failure must surface as error")
 	}
-	live, ok := env.sessions.Get(domain.RoomID("room_rec"))
+	live, ok := env.sessions.Get(context.Background(), domain.RoomID("room_rec"))
 	if !ok {
 		t.Fatal("missing room")
 	}
@@ -92,7 +92,7 @@ func TestReservationRecovery_ConfirmFailureNoLocalCommitThenRetry(t *testing.T) 
 	if retry.Result.Status != envelope.StatusAccepted {
 		t.Fatalf("retry status=%v", retry.Result.Status)
 	}
-	live, _ = env.sessions.Get(domain.RoomID("room_rec"))
+	live, _ = env.sessions.Get(context.Background(), domain.RoomID("room_rec"))
 	if _, prior := live.Room().PriorOutcome("draw-1"); !prior {
 		t.Fatal("PriorOutcome must exist after successful local commit")
 	}
@@ -112,7 +112,7 @@ func TestReservationRecovery_LocalCommitFailureAfterConfirmThenRetry(t *testing.
 	if res.Err == nil {
 		t.Fatal("commit failure must surface")
 	}
-	live, _ := env.sessions.Get(domain.RoomID("room_rec"))
+	live, _ := env.sessions.Get(context.Background(), domain.RoomID("room_rec"))
 	if _, prior := live.Room().PriorOutcome("draw-2"); prior {
 		t.Fatal("PriorOutcome must not exist when local commit failed")
 	}
@@ -294,7 +294,7 @@ func mustAccept(t *testing.T, res CommandResult) {
 
 func currentSeq(t *testing.T, env *reservationEnv, roomID string) int64 {
 	t.Helper()
-	live, ok := env.sessions.Get(domain.RoomID(roomID))
+	live, ok := env.sessions.Get(context.Background(), domain.RoomID(roomID))
 	if !ok {
 		t.Fatal("room missing")
 	}

@@ -13,21 +13,6 @@ import (
 	"unoarena/services/room-gameplay/game"
 )
 
-// HTTPGameIntegrity is a stdlib HTTP adapter for the GameIntegrity port.
-type HTTPGameIntegrity struct {
-	BaseURL    string
-	Credential string
-	Client     *http.Client
-}
-
-// NewHTTPGameIntegrity constructs a Room→GI append adapter.
-func NewHTTPGameIntegrity(baseURL, credential string, client *http.Client) *HTTPGameIntegrity {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return &HTTPGameIntegrity{BaseURL: strings.TrimRight(baseURL, "/"), Credential: credential, Client: client}
-}
-
 // Append implements GameIntegrity.
 func (h *HTTPGameIntegrity) Append(ctx context.Context, req AppendRequest) (AppendResult, error) {
 	body := map[string]any{
@@ -51,12 +36,97 @@ func (h *HTTPGameIntegrity) Append(ctx context.Context, req AppendRequest) (Appe
 	}
 	status, err := h.postJSON(ctx, "/internal/v1/game-logs/"+req.RoomID+"/append", body, &out)
 	if err != nil {
+		// Transport / decode / read / context errors are uncertain (may have written).
 		return AppendResult{}, err
 	}
-	if status >= 400 {
-		return AppendResult{}, fmt.Errorf("game integrity append %d: %s %s", status, out.Code, out.Message)
+	if status >= 400 && status < 500 {
+		// Explicit HTTP 4xx is definitive no-write.
+		return AppendResult{}, fmt.Errorf("%w: game integrity append %d: %s %s",
+			ErrIntegrityAppendDefinitive, status, out.Code, out.Message)
+	}
+	if status >= 500 {
+		// 5xx is uncertain — do not wrap as definitive.
+		return AppendResult{}, fmt.Errorf("game integrity append uncertain %d: %s %s", status, out.Code, out.Message)
 	}
 	return AppendResult{LogOffset: out.LogOffset, Revision: out.Revision}, nil
+}
+
+// Replay implements GameIntegrity (GI audit replay endpoint).
+// Uses AuditCredential when set; otherwise the Room service credential (for test doubles).
+func (h *HTTPGameIntegrity) Replay(ctx context.Context, roomID string, fromOffset int64) (ReplayResult, error) {
+	cred := h.AuditCredential
+	if cred == "" {
+		cred = h.Credential
+	}
+	actor := h.AuditActor
+	if actor == "" {
+		actor = "room-gameplay-reconciliation"
+	}
+	reason := h.AuditReason
+	if reason == "" {
+		reason = "integrity_reconciliation"
+	}
+	url := fmt.Sprintf("%s/internal/v1/game-logs/%s/replay?from=%d", h.BaseURL, roomID, fromOffset)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	if cred != "" {
+		req.Header.Set("X-Service-Credential", cred)
+	}
+	req.Header.Set("X-Audit-Actor", actor)
+	req.Header.Set("X-Audit-Reason", reason)
+	res, err := h.Client.Do(req)
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	if res.StatusCode >= 400 {
+		return ReplayResult{}, fmt.Errorf("game integrity replay %d: %s", res.StatusCode, string(raw))
+	}
+	var out struct {
+		RoomID   string `json:"roomId"`
+		Revision int64  `json:"revision"`
+		Entries  []struct {
+			Offset    int64           `json:"offset"`
+			EventID   string          `json:"eventId"`
+			EventType string          `json:"eventType"`
+			GameID    string          `json:"gameId"`
+			Payload   json.RawMessage `json:"payload"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return ReplayResult{}, fmt.Errorf("decode replay: %w", err)
+	}
+	result := ReplayResult{RoomID: out.RoomID, Revision: out.Revision}
+	for _, e := range out.Entries {
+		result.Entries = append(result.Entries, ReplayEntry{
+			Offset: e.Offset, EventID: e.EventID, EventType: e.EventType, GameID: e.GameID, Payload: e.Payload,
+		})
+	}
+	return result, nil
+}
+
+// HTTPGameIntegrity is a stdlib HTTP adapter for the GameIntegrity port.
+type HTTPGameIntegrity struct {
+	BaseURL         string
+	Credential      string
+	AuditCredential string // optional; used for Replay (GI authorizeAudit)
+	AuditActor      string
+	AuditReason     string
+	Client          *http.Client
+}
+
+// NewHTTPGameIntegrity constructs a Room→GI append/replay adapter.
+func NewHTTPGameIntegrity(baseURL, credential string, client *http.Client) *HTTPGameIntegrity {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return &HTTPGameIntegrity{BaseURL: strings.TrimRight(baseURL, "/"), Credential: credential, Client: client}
 }
 
 // HTTPDealSource is a stdlib HTTP adapter for the DealSource reservation port.
@@ -179,30 +249,16 @@ func (h *HTTPDealSource) ReserveDraw(ctx context.Context, roomID, gameID, operat
 	return MaterialReservation{ID: out.ReservationID, Cards: toGameCards(out.Cards)}, nil
 }
 
-// Confirm implements DealSource.
+// Confirm implements DealSource via in-memory meta (convenience for live callers).
 func (h *HTTPDealSource) Confirm(ctx context.Context, reservationID string) error {
 	meta, err := h.lookup(reservationID)
 	if err != nil {
 		return err
 	}
-	var out struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}
-	status, err := h.postJSON(ctx, h.deckPath(meta.RoomID), map[string]any{
-		"operation": "confirm", "gameId": meta.GameID, "reservationId": reservationID,
-	}, &out)
-	if err != nil {
-		return err
-	}
-	if status >= 400 {
-		return fmt.Errorf("confirm %d: %s %s", status, out.Code, out.Message)
-	}
-	// Retain meta so Confirm(originalID) remains routable after lost response.
-	return nil
+	return h.ConfirmAt(ctx, meta.RoomID, meta.GameID, reservationID)
 }
 
-// Cancel implements DealSource.
+// Cancel implements DealSource via in-memory meta (convenience for live callers).
 func (h *HTTPDealSource) Cancel(ctx context.Context, reservationID string) error {
 	meta, err := h.lookup(reservationID)
 	if err != nil {
@@ -210,12 +266,41 @@ func (h *HTTPDealSource) Cancel(ctx context.Context, reservationID string) error
 		// may still exist after restart/meta loss.
 		return fmt.Errorf("cancel meta missing: %w", err)
 	}
+	if err := h.CancelAt(ctx, meta.RoomID, meta.GameID, reservationID); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	delete(h.meta, reservationID)
+	h.mu.Unlock()
+	return nil
+}
+
+// ConfirmAt confirms a reservation with explicit room+game (no in-memory meta required).
+func (h *HTTPDealSource) ConfirmAt(ctx context.Context, roomID, gameID, reservationID string) error {
 	var out struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
-	status, err := h.postJSON(ctx, h.deckPath(meta.RoomID), map[string]any{
-		"operation": "cancel", "gameId": meta.GameID, "reservationId": reservationID,
+	status, err := h.postJSON(ctx, h.deckPath(roomID), map[string]any{
+		"operation": "confirm", "gameId": gameID, "reservationId": reservationID,
+	}, &out)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		return fmt.Errorf("confirm %d: %s %s", status, out.Code, out.Message)
+	}
+	return nil
+}
+
+// CancelAt cancels a reservation with explicit room+game (no in-memory meta required).
+func (h *HTTPDealSource) CancelAt(ctx context.Context, roomID, gameID, reservationID string) error {
+	var out struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	status, err := h.postJSON(ctx, h.deckPath(roomID), map[string]any{
+		"operation": "cancel", "gameId": gameID, "reservationId": reservationID,
 	}, &out)
 	if err != nil {
 		return err
@@ -223,9 +308,6 @@ func (h *HTTPDealSource) Cancel(ctx context.Context, reservationID string) error
 	if status >= 400 {
 		return fmt.Errorf("cancel %d: %s %s", status, out.Code, out.Message)
 	}
-	h.mu.Lock()
-	delete(h.meta, reservationID)
-	h.mu.Unlock()
 	return nil
 }
 

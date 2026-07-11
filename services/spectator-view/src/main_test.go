@@ -720,7 +720,11 @@ func TestFinding_IngestPublishesUnderRoomLockOrder(t *testing.T) {
 	srv := newTestServer(t)
 	mux := srv.routes()
 	room := "room_ord"
-	_, ch, _, cancel, err := srv.hub.Subscribe(domain.RoomID(room), "")
+	hub, ok := srv.feed.(*StreamHub)
+	if !ok {
+		t.Fatal("test server must use StreamHub feed")
+	}
+	_, ch, _, cancel, err := hub.Subscribe(domain.RoomID(room), "")
 	if err != nil {
 		t.Fatal(err)
 	}

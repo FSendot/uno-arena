@@ -87,10 +87,11 @@ BFF snapshot routes (OpenAPI; used after SSE `409 snapshot_required` or reconnec
 - Request bodies are built with strict JSON encoding (`python3` stdlib).
 - `schemaVersion` must equal `1` (digits only). `expectedSequenceNumber` must be a non-negative integer (digits only).
 - `--payload` must be a JSON **object** (not an array/string); invalid JSON is rejected before send.
-- `expectedSequenceNumber` (`--expected-sequence`) is **required** for mutations of an existing room aggregate (`JoinRoom`, `PlayCard`, …). Documented exception: `CreateRoom`. Tournament commands do not use room sequence.
+- The public command catalog is closed (15 OpenAPI variants). Unknown `--type` values are rejected locally before send.
+- `expectedSequenceNumber` (`--expected-sequence`) is **required** for mutations of an existing room aggregate (`JoinRoom`, `PlayCard`, …). It must be **absent** for `CreateRoom` and the three tournament types; passing `--expected-sequence` for those is rejected locally.
 - Room IDs in paths and stream query params are URL-encoded.
 - Requests send `X-Correlation-Id` (auto-generated or `--correlation-id`) and command submissions also send `X-Command-Id`.
-- Rejected commands return `status=rejected` with a reason; they are audit-only and never domain events.
+- Rejected commands return HTTP `200` with `status=rejected` and a reason (including stale/wrong sequence); they are audit-only and never domain events. Malformed envelopes (unknown type, missing required sequence, prohibited sequence, bad schemaVersion) are HTTP `400` `invalid_envelope`.
 
 ### SSE
 
@@ -145,8 +146,8 @@ Behavior:
   matches the selected nonzero port, up to `CAP_READY_TIMEOUT_S` (default 180s
   in the harness; 60s in the helper alone). On failure it prints `compose ps`
   diagnostics
-- Capability overlay omits EventStore (amd64-only); harness `up` uses resolved
-  `config --services` so EventStore is never selected (GI explicit memory)
+- Capability overlay omits KurrentDB because GI uses explicit memory; harness `up`
+  uses resolved `config --services` so KurrentDB is never selected
 - Polls raw BFF `GET /health` before the first CLI call, then waits for `GET /ready`
 - Covers health/ready, register/login/whoami, session takeover with control SSE
   subscribed first and exact `event: session_invalidated` + `data:` framing

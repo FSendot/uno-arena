@@ -386,7 +386,7 @@ func TestFinding_MemoryGet_DeepCloneCopyOnWrite(t *testing.T) {
 	h := e.auth()
 	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("c", "CreateRoom", nil, "host", "s", "room_clone", map[string]any{"roomId": "room_clone"}), h)
 
-	got, ok := e.sessions.Get("room_clone")
+	got, ok := e.sessions.Get(context.Background(), "room_clone")
 	if !ok {
 		t.Fatal("missing room")
 	}
@@ -396,7 +396,7 @@ func TestFinding_MemoryGet_DeepCloneCopyOnWrite(t *testing.T) {
 		Rejection: &domain.Rejection{Code: domain.RejectStaleSequence},
 		Sequence:  got.Room().Sequence(),
 	})
-	again, ok := e.sessions.Get("room_clone")
+	again, ok := e.sessions.Get(context.Background(), "room_clone")
 	if !ok {
 		t.Fatal("missing room after mutate")
 	}
@@ -409,7 +409,7 @@ func TestFinding_SystemTimer_DoesNotOverwritePlayerSessionBinding(t *testing.T) 
 	e := newTestEnv(t)
 	h := e.auth()
 	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("c", "CreateRoom", nil, "host", "s", "room_bind", map[string]any{"roomId": "room_bind"}), h)
-	sid, ok := e.sessions.PlayerSession("room_bind", "host")
+	sid, ok := e.sessions.PlayerSession(context.Background(), "room_bind", "host")
 	if !ok || sid != "s" {
 		t.Fatalf("host binding=%q ok=%v", sid, ok)
 	}
@@ -420,7 +420,7 @@ func TestFinding_SystemTimer_DoesNotOverwritePlayerSessionBinding(t *testing.T) 
 	if w.Code != http.StatusOK {
 		t.Fatalf("timer cmd: %d %s", w.Code, w.Body.String())
 	}
-	sid, ok = e.sessions.PlayerSession("room_bind", "host")
+	sid, ok = e.sessions.PlayerSession(context.Background(), "room_bind", "host")
 	if !ok || sid != "s" {
 		t.Fatalf("timer must not overwrite host binding, got %q ok=%v", sid, ok)
 	}
@@ -565,7 +565,32 @@ func TestFinding_SystemTimer_FeedAudienceUsesStoredBinding(t *testing.T) {
 	}
 }
 
-func TestWireRuntime_ConfiguredSelectsHTTPGIAndBlocksPostgres(t *testing.T) {
+func TestWireRuntime_ConfiguredWithoutDatabaseIsMisconfigured(t *testing.T) {
+	wired, err := wireRoomRuntime(roomRuntimeConfig{
+		ServiceName:       "room-gameplay",
+		ServiceCredential: "room-cred",
+		TimerCredential:   "timer-cred",
+		IdentityURL:       "http://identity.example",
+		IdentityCred:      "id-cred",
+		GameIntegrityURL:  "http://gi.example",
+		GameIntegrityCred: "gi-cred",
+		AllowFakes:        false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wired.Ready {
+		t.Fatal("misconfigured mode must not claim ready")
+	}
+	if wired.Mode != "misconfigured" || wired.NotReadyReason != "database_unconfigured" {
+		t.Fatalf("mode=%s reason=%q", wired.Mode, wired.NotReadyReason)
+	}
+	if _, ok := wired.Deps.Sessions.(app.BlockedSessionRepository); !ok {
+		t.Fatalf("sessions must be blocked, got %T", wired.Deps.Sessions)
+	}
+}
+
+func TestWireRuntime_DurableMissingRedisStaysNotReady(t *testing.T) {
 	wired, err := wireRoomRuntime(roomRuntimeConfig{
 		ServiceName:       "room-gameplay",
 		ServiceCredential: "room-cred",
@@ -580,26 +605,11 @@ func TestWireRuntime_ConfiguredSelectsHTTPGIAndBlocksPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wired.Ready {
-		t.Fatal("configured mode must not claim ready without postgres adapter")
+	if wired.Ready || wired.Mode != "durable" {
+		t.Fatalf("ready=%v mode=%s", wired.Ready, wired.Mode)
 	}
-	if wired.NotReadyReason != "postgres_adapter_blocked" {
+	if !strings.Contains(wired.NotReadyReason, "REDIS_URL") {
 		t.Fatalf("reason=%q", wired.NotReadyReason)
-	}
-	if _, ok := wired.Deps.Integrity.(*app.HTTPGameIntegrity); !ok {
-		t.Fatalf("integrity=%T", wired.Deps.Integrity)
-	}
-	if _, ok := wired.Deps.Deals.(*app.HTTPDealSource); !ok {
-		t.Fatalf("deals=%T", wired.Deps.Deals)
-	}
-	if _, ok := wired.Deps.SessionsV.(*app.HTTPSessionValidator); !ok {
-		t.Fatalf("sessionsV=%T", wired.Deps.SessionsV)
-	}
-	if _, ok := wired.Deps.Sessions.(app.BlockedSessionRepository); !ok {
-		t.Fatalf("sessions must be blocked, got %T", wired.Deps.Sessions)
-	}
-	if _, ok := wired.Deps.Audit.(*app.JSONLAuditSink); !ok {
-		t.Fatalf("audit=%T", wired.Deps.Audit)
 	}
 }
 
@@ -802,15 +812,15 @@ func TestWireRuntime_CapabilityMode_DistinctFromAllowFakesAndConfigured(t *testi
 		IdentityCred:      "id",
 		GameIntegrityURL:  "http://gi.example",
 		GameIntegrityCred: "gi",
-		DatabaseURL:       "postgres://room/db",
+		// No DATABASE_URL → misconfigured (never silent memory).
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configured.Ready || configured.Mode != "configured" {
+	if configured.Ready || configured.Mode != "misconfigured" {
 		t.Fatalf("configured: ready=%v mode=%s", configured.Ready, configured.Mode)
 	}
-	if configured.NotReadyReason != "postgres_adapter_blocked" {
+	if configured.NotReadyReason != "database_unconfigured" {
 		t.Fatalf("reason=%q", configured.NotReadyReason)
 	}
 	if _, ok := configured.Deps.Sessions.(app.BlockedSessionRepository); !ok {
@@ -834,12 +844,12 @@ func TestWireRuntime_AllowFakesTakesPrecedenceOverCapability(t *testing.T) {
 func TestFinding_SystemClock_WiredInAllRuntimeModes(t *testing.T) {
 	modes := []roomRuntimeConfig{
 		{AllowFakes: true, ServiceCredential: "c"},
-		{CapabilityMode: true, ServiceCredential: "c"},
+		{CapabilityMode: true, ServiceCredential: "c", DeploymentEnv: "development"},
 		{
 			ServiceCredential: "c", TimerCredential: "t",
 			IdentityURL: "http://identity.example", IdentityCred: "id",
 			GameIntegrityURL: "http://gi.example", GameIntegrityCred: "gi",
-			DatabaseURL: "postgres://room/db",
+			// No DATABASE_URL → misconfigured still wires SystemClock.
 		},
 	}
 	for _, cfg := range modes {
@@ -891,7 +901,7 @@ func TestFinding_TransientAuditFailure_RecoveredOnReplay(t *testing.T) {
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("audit failure must surface, got %d %s", w.Code, w.Body.String())
 	}
-	if _, ok := e.sessions.GetPendingAudit("bad"); !ok {
+	if _, ok := e.sessions.GetPendingAudit(context.Background(), "bad"); !ok {
 		t.Fatal("rejection must leave audit-pending record keyed by commandId")
 	}
 	if e.audit.Len() != 0 {
@@ -907,7 +917,7 @@ func TestFinding_TransientAuditFailure_RecoveredOnReplay(t *testing.T) {
 	if e.audit.Len() != 1 {
 		t.Fatalf("pending audit must be delivered exactly once on recovery, got %d", e.audit.Len())
 	}
-	if _, ok := e.sessions.GetPendingAudit("bad"); ok {
+	if _, ok := e.sessions.GetPendingAudit(context.Background(), "bad"); ok {
 		t.Fatal("audit must be marked complete after successful delivery")
 	}
 

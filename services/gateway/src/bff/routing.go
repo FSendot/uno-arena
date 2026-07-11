@@ -60,13 +60,3 @@ func RouteBackend(commandType string) Backend {
 	}
 	return BackendUnknown
 }
-
-// RequiresExpectedSequence reports whether the BFF must require
-// expectedSequenceNumber before dispatch (mutations of an existing room aggregate).
-// CreateRoom is the documented exception.
-func RequiresExpectedSequence(commandType string) bool {
-	if RouteBackend(commandType) != BackendRoom {
-		return false
-	}
-	return commandType != CmdCreateRoom
-}

@@ -235,9 +235,16 @@ func (s *Service) createTournament(req CommandRequest, payload map[string]any, c
 	if !tid.Valid() {
 		return s.reject(req, correlationID, "", string(domain.RejectInvalidIdentity))
 	}
-	if existing, ok := s.repo.Get(tid); ok {
-		_ = existing
-		return s.reject(req, correlationID, string(tid), "tournament_already_exists")
+	uow, err := s.repo.BeginCreate(tid)
+	if err != nil {
+		return envelope.Result{}, err
+	}
+	defer func() { _ = uow.Rollback() }()
+	if prior, ok := uow.LookupOutcome(req.CommandID); ok {
+		return prior, nil
+	}
+	if uow.Exists() {
+		return s.rejectUoW(uow, req, correlationID, string(tid), "tournament_already_exists")
 	}
 	tr, out := domain.CreateTournament(domain.CreateTournamentCommand{
 		CommandID:    domain.CommandID(req.CommandID),
@@ -246,20 +253,32 @@ func (s *Service) createTournament(req CommandRequest, payload map[string]any, c
 		RetryBudget:  intField(payload, "retryBudget"),
 		BatchSize:    intField(payload, "batchSize"),
 	})
-	return s.commitOutcome(req, tr, out, string(tid), correlationID)
+	return s.commitOutcome(uow, req, tr, out, string(tid), correlationID, nil)
 }
 
 func (s *Service) withTournament(req CommandRequest, tournamentID, correlationID string, fn func(*domain.Tournament) domain.CommandOutcome) (envelope.Result, error) {
+	return s.withTournamentSource(req, tournamentID, correlationID, nil, fn)
+}
+
+func (s *Service) withTournamentSource(req CommandRequest, tournamentID, correlationID string, matchSource *MatchResultSource, fn func(*domain.Tournament) domain.CommandOutcome) (envelope.Result, error) {
 	tid := domain.TournamentID(tournamentID)
 	if !tid.Valid() {
 		return s.reject(req, correlationID, "", string(domain.RejectInvalidIdentity))
 	}
-	t, ok := s.repo.Get(tid)
-	if !ok {
-		return s.reject(req, correlationID, tournamentID, "tournament_not_found")
+	uow, err := s.repo.BeginExisting(tid)
+	if err != nil {
+		return envelope.Result{}, err
 	}
+	defer func() { _ = uow.Rollback() }()
+	if prior, ok := uow.LookupOutcome(req.CommandID); ok {
+		return prior, nil
+	}
+	if !uow.Exists() {
+		return s.rejectUoW(uow, req, correlationID, tournamentID, "tournament_not_found")
+	}
+	t := uow.Loaded()
 	out := fn(t)
-	return s.commitOutcome(req, t, out, tournamentID, correlationID)
+	return s.commitOutcome(uow, req, t, out, tournamentID, correlationID, matchSource)
 }
 
 func (s *Service) recordResult(req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
@@ -267,23 +286,34 @@ func (s *Service) recordResult(req CommandRequest, payload map[string]any, tourn
 	if err != nil {
 		return s.reject(req, correlationID, tournamentID, "invalid_standings")
 	}
-	return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
-		roomID := domain.RoomID(stringField(payload, "roomId"))
+	eventID := stringField(payload, "eventId")
+	roomID := stringField(payload, "roomId")
+	completionVersion := uintField(payload, "completionVersion")
+	var matchSource *MatchResultSource
+	if eventID != "" && roomID != "" && completionVersion > 0 {
+		matchSource = &MatchResultSource{
+			EventID:           eventID,
+			RoomID:            roomID,
+			CompletionVersion: completionVersion,
+		}
+	}
+	return s.withTournamentSource(req, tournamentID, correlationID, matchSource, func(t *domain.Tournament) domain.CommandOutcome {
+		rid := domain.RoomID(roomID)
 		roundNumber := intField(payload, "roundNumber")
 		slotID := domain.SlotID(stringField(payload, "slotId"))
 		if roundNumber < 1 || !slotID.Valid() {
-			if rn, sid, ok := t.AssignmentByRoomID(roomID); ok {
+			if rn, sid, ok := t.AssignmentByRoomID(rid); ok {
 				roundNumber = rn
 				slotID = sid
 			}
 		}
 		return t.RecordMatchResult(domain.RecordMatchResultCommand{
 			CommandID:         domain.CommandID(req.CommandID),
-			EventID:           domain.EventID(stringField(payload, "eventId")),
-			RoomID:            roomID,
+			EventID:           domain.EventID(eventID),
+			RoomID:            rid,
 			RoundNumber:       roundNumber,
 			SlotID:            slotID,
-			CompletionVersion: domain.CompletionVersion(uintField(payload, "completionVersion")),
+			CompletionVersion: domain.CompletionVersion(completionVersion),
 			Standings:         standings,
 			IsAbandoned:       boolField(payload, "isAbandoned"),
 		})
@@ -303,7 +333,7 @@ func resolveProvisioningCommandID(work ProvisioningBatchWork) string {
 }
 
 // ProcessProvisioningBatch runs the idempotent worker for one bounded shard.
-// Room Gameplay calls happen outside the service lock.
+// Room Gameplay calls happen outside held database locks.
 // Attempt identity is (batchId, retryAttempt) via commandId; a transient Room failure
 // records retry state under the current attempt and returns nextRetryWork for the next attempt.
 func (s *Service) ProcessProvisioningBatch(ctx context.Context, work ProvisioningBatchWork) (envelope.Result, error) {
@@ -325,31 +355,41 @@ func (s *Service) ProcessProvisioningBatch(ctx context.Context, work Provisionin
 	}
 
 	tid := domain.TournamentID(work.TournamentID)
-	t, ok := s.repo.Get(tid)
-	if !ok {
-		res, err2 := s.reject(req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+	uow, err := s.repo.BeginExisting(tid)
+	if err != nil {
+		s.mu.Unlock()
+		return envelope.Result{}, err
+	}
+	if prior, ok := uow.LookupOutcome(work.CommandID); ok {
+		_ = uow.Rollback()
+		s.mu.Unlock()
+		return prior, nil
+	}
+	if !uow.Exists() {
+		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
 		s.mu.Unlock()
 		return res, err2
 	}
+	t := uow.Loaded()
 	round, ok := t.Round(work.RoundNumber)
 	if !ok {
-		res, err2 := s.reject(req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
+		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
 		s.mu.Unlock()
 		return res, err2
 	}
 	batch, ok := round.FindBatch(domain.BatchID(work.BatchID))
 	if !ok {
-		res, err2 := s.reject(req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
+		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
 		s.mu.Unlock()
 		return res, err2
 	}
 	if batch.Status == domain.BatchQuarantined {
-		res, err2 := s.reject(req, work.CorrelationID, work.TournamentID, string(domain.RejectQuarantined))
+		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectQuarantined))
 		s.mu.Unlock()
 		return res, err2
 	}
 	if err := validateBatchRange(batch, work); err != nil {
-		res, err2 := s.reject(req, work.CorrelationID, work.TournamentID, err.Error())
+		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, err.Error())
 		s.mu.Unlock()
 		return res, err2
 	}
@@ -359,7 +399,7 @@ func (s *Service) ProcessProvisioningBatch(ctx context.Context, work Provisionin
 			RoundNumber: work.RoundNumber,
 			BatchID:     domain.BatchID(work.BatchID),
 		})
-		res, err2 := s.commitOutcome(req, t, out, work.TournamentID, work.CorrelationID)
+		res, err2 := s.commitOutcome(uow, req, t, out, work.TournamentID, work.CorrelationID, nil)
 		s.mu.Unlock()
 		return res, err2
 	}
@@ -384,6 +424,7 @@ func (s *Service) ProcessProvisioningBatch(ctx context.Context, work Provisionin
 			PlayerIDs: players,
 		})
 	}
+	_ = uow.Rollback()
 	s.mu.Unlock()
 
 	for _, slot := range slots {
@@ -403,33 +444,46 @@ func (s *Service) ProcessProvisioningBatch(ctx context.Context, work Provisionin
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prior, ok := s.repo.LookupOutcome(work.CommandID); ok {
+	uow2, err := s.repo.BeginExisting(tid)
+	if err != nil {
+		return envelope.Result{}, err
+	}
+	defer func() { _ = uow2.Rollback() }()
+	if prior, ok := uow2.LookupOutcome(work.CommandID); ok {
 		return prior, nil
 	}
-	t, ok = s.repo.Get(tid)
-	if !ok {
-		return s.reject(req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+	if !uow2.Exists() {
+		return s.rejectUoW(uow2, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
 	}
+	t = uow2.Loaded()
 	out := t.CompleteTournamentProvisioningBatch(domain.CompleteTournamentProvisioningBatchCommand{
 		CommandID:   domain.CommandID(work.CommandID),
 		RoundNumber: work.RoundNumber,
 		BatchID:     domain.BatchID(work.BatchID),
 	})
-	return s.commitOutcome(req, t, out, work.TournamentID, work.CorrelationID)
+	return s.commitOutcome(uow2, req, t, out, work.TournamentID, work.CorrelationID, nil)
 }
 
 func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBatchWork, reason string) (envelope.Result, error) {
-	t, ok := s.repo.Get(domain.TournamentID(work.TournamentID))
-	if !ok {
-		return s.reject(req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+	uow, err := s.repo.BeginExisting(domain.TournamentID(work.TournamentID))
+	if err != nil {
+		return envelope.Result{}, err
 	}
+	defer func() { _ = uow.Rollback() }()
+	if prior, ok := uow.LookupOutcome(work.CommandID); ok {
+		return prior, nil
+	}
+	if !uow.Exists() {
+		return s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+	}
+	t := uow.Loaded()
 	round, ok := t.Round(work.RoundNumber)
 	if !ok {
-		return s.reject(req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
+		return s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
 	}
 	batch, ok := round.FindBatch(domain.BatchID(work.BatchID))
 	if !ok {
-		return s.reject(req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
+		return s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
 	}
 	nextAttempt := batch.RetryAttempt + 1
 	out := t.RetryTournamentProvisioningBatch(domain.RetryTournamentProvisioningBatchCommand{
@@ -443,7 +497,7 @@ func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBa
 	}
 	// Quarantine (budget exhausted) has no further retry work.
 	if b, ok := round.FindBatch(domain.BatchID(work.BatchID)); ok && b.Status == domain.BatchQuarantined {
-		return s.commitOutcome(req, t, out, work.TournamentID, work.CorrelationID)
+		return s.commitOutcome(uow, req, t, out, work.TournamentID, work.CorrelationID, nil)
 	}
 	nextWork := ProvisioningBatchWork{
 		CommandID:     provisioningAttemptCommandID(work.TournamentID, work.RoundNumber, work.BatchID, nextAttempt),
@@ -457,7 +511,7 @@ func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBa
 		CorrelationID: work.CorrelationID,
 	}
 	// Attach nextRetryWork before Commit so exact replay returns byte-stable retry identity.
-	return s.commitOutcome(req, t, out, work.TournamentID, work.CorrelationID, nextRetryWorkPayload(nextWork))
+	return s.commitOutcome(uow, req, t, out, work.TournamentID, work.CorrelationID, nil, nextRetryWorkPayload(nextWork))
 }
 
 func nextRetryWorkPayload(next ProvisioningBatchWork) map[string]any {
@@ -536,10 +590,26 @@ func (s *Service) IngestMatchCompleted(ctx context.Context, evt MatchCompletedEv
 		}, nil
 	}
 
-	t, ok := s.repo.Get(tid)
-	if !ok {
+	uow, err := s.repo.BeginExisting(tid)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = uow.Rollback() }()
+	if prior, ok := uow.LookupOutcome(commandID); ok {
+		return map[string]any{
+			"status":            prior.Status,
+			"commandId":         prior.CommandID,
+			"disposition":       dispositionFromResult(prior),
+			"schemaVersion":     envelope.CurrentSchemaVersion,
+			"tournamentId":      string(tid),
+			"roomId":            evt.RoomID,
+			"completionVersion": evt.CompletionVersion,
+		}, nil
+	}
+	if !uow.Exists() {
 		return nil, fmt.Errorf("tournament_not_found")
 	}
+	t := uow.Loaded()
 
 	standings := make([]domain.PlayerMatchStanding, 0, len(evt.Players))
 	forfeitSet := map[string]struct{}{}
@@ -582,7 +652,12 @@ func (s *Service) IngestMatchCompleted(ctx context.Context, evt MatchCompletedEv
 	})
 
 	req := CommandRequest{CommandID: commandID, Type: CmdRecordMatchResult, SchemaVersion: 1}
-	result, err := s.commitOutcome(req, t, out, string(tid), evt.CorrelationID)
+	matchSource := &MatchResultSource{
+		EventID:           evt.EventID,
+		RoomID:            evt.RoomID,
+		CompletionVersion: evt.CompletionVersion,
+	}
+	result, err := s.commitOutcome(uow, req, t, out, string(tid), evt.CorrelationID, matchSource)
 	if err != nil {
 		return nil, err
 	}
@@ -601,6 +676,10 @@ func (s *Service) IngestMatchCompleted(ctx context.Context, evt MatchCompletedEv
 		for _, f := range out.Facts {
 			if f.Name == domain.FactTournamentResultQuarantined {
 				disposition = "quarantined"
+				break
+			}
+			if f.Name == domain.FactTournamentMatchResultRecorded {
+				disposition = "recorded"
 				break
 			}
 		}
@@ -751,17 +830,18 @@ func (s *Service) Standings(tournamentID string) (map[string]any, bool) {
 	}, true
 }
 
-func (s *Service) commitOutcome(req CommandRequest, t *domain.Tournament, out domain.CommandOutcome, tournamentID, correlationID string, extraPayload ...map[string]any) (envelope.Result, error) {
-	if prior, ok := s.repo.LookupOutcome(req.CommandID); ok {
+func (s *Service) commitOutcome(uow TournamentUnitOfWork, req CommandRequest, t *domain.Tournament, out domain.CommandOutcome, tournamentID, correlationID string, matchSource *MatchResultSource, extraPayload ...map[string]any) (envelope.Result, error) {
+	if prior, ok := uow.LookupOutcome(req.CommandID); ok {
 		return prior, nil
 	}
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
-		if err := s.repo.Commit(CommitRequest{
-			Tournament: t,
-			CommandID:  req.CommandID,
-			Outcome:    res,
+		if err := uow.Commit(CommitRequest{
+			Tournament:        t,
+			CommandID:         req.CommandID,
+			Outcome:           res,
+			MatchResultSource: matchSource,
 		}); err != nil {
 			return envelope.Result{}, err
 		}
@@ -806,12 +886,41 @@ func (s *Service) commitOutcome(req CommandRequest, t *domain.Tournament, out do
 	}
 	payload, _ := json.Marshal(payloadMap)
 	res := envelope.Accepted(req.CommandID, req.Type, nil, payload)
-	if err := s.repo.Commit(CommitRequest{
-		Tournament: t,
-		CommandID:  req.CommandID,
-		Outcome:    res,
-		Events:     events,
+	if err := uow.Commit(CommitRequest{
+		Tournament:        t,
+		CommandID:         req.CommandID,
+		Outcome:           res,
+		Events:            events,
+		MatchResultSource: matchSource,
 	}); err != nil {
+		return envelope.Result{}, err
+	}
+	return res, nil
+}
+
+func (s *Service) rejectUoW(uow TournamentUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
+	if req.CommandID != "" {
+		if prior, ok := uow.LookupOutcome(req.CommandID); ok {
+			return prior, nil
+		}
+	}
+	if correlationID == "" {
+		correlationID = req.CommandID
+	}
+	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	if req.CommandID != "" {
+		if err := uow.Commit(CommitRequest{
+			CommandID: req.CommandID,
+			Outcome:   res,
+		}); err != nil {
+			return envelope.Result{}, err
+		}
+	} else {
+		_ = uow.Rollback()
+	}
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return res, nil

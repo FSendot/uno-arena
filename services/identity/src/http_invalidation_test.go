@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -202,22 +203,22 @@ func TestNewDefaultServiceNeverUsesDroppingNoop(t *testing.T) {
 	if !ready {
 		t.Fatal("expected ready when URL+credential configured")
 	}
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	first, err := svc.Login("alice", "secret")
+	first, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("first login: %v", err)
 	}
 	// Transport will fail (nothing listening); login must still commit outbox.
-	second, err := svc.Login("alice", "secret")
+	second, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("second login: %v", err)
 	}
 	if second.SessionID == first.SessionID {
 		t.Fatal("expected new session")
 	}
-	pending, err := sessions.ListPendingOutbox(10)
+	pending, err := sessions.ListPendingOutbox(context.Background(), 10)
 	if err != nil || len(pending) == 0 {
 		t.Fatalf("expected durable pending outbox after publish failure, pending=%d err=%v", len(pending), err)
 	}

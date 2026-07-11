@@ -6,11 +6,12 @@ image:
 
 env:
   SERVICE_NAME: analytics
+  DEPLOYMENT_ENV: staging
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_DB: analytics
-  KAFKA_BROKERS: kafka:9092
 
-# BLOCKED: binary has no WORKER_ROLE=analytics-projection-rebuilder loop; ClickHouse rebuild absent.
+# BLOCKED: binary has no WORKER_ROLE=analytics-projection-rebuilder loop; Kafka rebuild path absent.
+# HTTP rebuild endpoint exists on the API Deployment; keep worker disabled.
 projectionRebuilder:
   enabled: false
 
@@ -19,6 +20,7 @@ projectionRebuilder:
 #   analytics-ranking-credential    — Ranking→Analytics only
 #   analytics-tournament-credential — Tournament→Analytics only
 #   analytics-ops-credential        — ops/rebuild only (not a gameplay producer)
+# Durable ClickHouse: CLICKHOUSE_USER / CLICKHOUSE_PASSWORD (runtime DML only; no DDL).
 existingSecret: analytics-secrets
 secretEnv:
   ANALYTICS_ROOM_CREDENTIAL: analytics-room-credential

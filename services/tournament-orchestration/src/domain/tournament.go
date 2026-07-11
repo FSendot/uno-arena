@@ -34,8 +34,9 @@ type Tournament struct {
 }
 
 type resultRecord struct {
-	Disposition ResultDisposition
-	Fingerprint string
+	Disposition   ResultDisposition
+	Fingerprint   string
+	SourceEventID string
 }
 
 // CreateTournament starts a tournament in registration phase.
@@ -475,7 +476,11 @@ func (t *Tournament) RecordMatchResult(cmd RecordMatchResultCommand) CommandOutc
 			return t.rememberEvent(cmd.EventID, out)
 		}
 		if prev.Fingerprint == fp {
-			t.resultKeys[key] = resultRecord{Disposition: DispositionDuplicateIgnored, Fingerprint: fp}
+			src := prev.SourceEventID
+			if cmd.EventID.Valid() {
+				src = string(cmd.EventID)
+			}
+			t.resultKeys[key] = resultRecord{Disposition: DispositionDuplicateIgnored, Fingerprint: fp, SourceEventID: src}
 			out := acceptedOutcome(cmd.CommandID, nil)
 			return t.rememberEvent(cmd.EventID, out)
 		}
@@ -497,7 +502,9 @@ func (t *Tournament) RecordMatchResult(cmd RecordMatchResultCommand) CommandOutc
 
 	if slot.HasResult {
 		if slot.CompletionVersion == cmd.CompletionVersion && slot.ResultFingerprint == fp {
-			t.resultKeys[key] = resultRecord{Disposition: DispositionDuplicateIgnored, Fingerprint: fp}
+			t.resultKeys[key] = resultRecord{
+				Disposition: DispositionDuplicateIgnored, Fingerprint: fp, SourceEventID: string(cmd.EventID),
+			}
 			out := acceptedOutcome(cmd.CommandID, nil)
 			return t.rememberEvent(cmd.EventID, out)
 		}
@@ -564,7 +571,9 @@ func (t *Tournament) RecordMatchResult(cmd RecordMatchResultCommand) CommandOutc
 	}
 	facts = append(facts, newFact(FactPlayersAdvanced, advanceData))
 
-	t.resultKeys[key] = resultRecord{Disposition: DispositionRecorded, Fingerprint: fp}
+	t.resultKeys[key] = resultRecord{
+		Disposition: DispositionRecorded, Fingerprint: fp, SourceEventID: string(cmd.EventID),
+	}
 	out := acceptedOutcome(cmd.CommandID, facts)
 	return t.rememberEvent(cmd.EventID, out)
 }
@@ -593,7 +602,9 @@ func (t *Tournament) quarantineResult(cmd RecordMatchResultCommand, fp, reason s
 			fp = computed
 		}
 	}
-	t.resultKeys[key] = resultRecord{Disposition: DispositionQuarantined, Fingerprint: fp}
+	t.resultKeys[key] = resultRecord{
+		Disposition: DispositionQuarantined, Fingerprint: fp, SourceEventID: string(cmd.EventID),
+	}
 	if round, ok := t.rounds[cmd.RoundNumber]; ok {
 		if slot, ok := round.findSlot(cmd.SlotID); ok {
 			// Do not overwrite an already-accepted advancement decision.
@@ -841,7 +852,11 @@ func (t *Tournament) QuarantineTournamentResult(cmd QuarantineTournamentResultCo
 	if reason == "" {
 		reason = "explicit quarantine"
 	}
-	t.resultKeys[key] = resultRecord{Disposition: DispositionQuarantined, Fingerprint: fp}
+	prevSrc := ""
+	if prev, ok := t.resultKeys[key]; ok {
+		prevSrc = prev.SourceEventID
+	}
+	t.resultKeys[key] = resultRecord{Disposition: DispositionQuarantined, Fingerprint: fp, SourceEventID: prevSrc}
 	out := acceptedOutcome(cmd.CommandID, []Fact{
 		newFact(FactTournamentResultQuarantined, map[string]string{
 			"tournamentId":      string(t.id),

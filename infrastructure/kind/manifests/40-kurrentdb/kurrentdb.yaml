@@ -1,0 +1,95 @@
+# KurrentDB 26.0.3 experimental ARM64 — local-only (ADR-0035). No schema Job.
+# Digest-pinned. No PVC/backup/HA claim.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kurrentdb
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: kurrentdb
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/kurrentdb-arm-experimental: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kurrentdb
+  ports:
+    - name: http-grpc
+      port: 2113
+      targetPort: 2113
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kurrentdb
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: kurrentdb
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/kurrentdb-arm-experimental: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kurrentdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kurrentdb
+        app.kubernetes.io/part-of: uno-arena
+    spec:
+      # Kubernetes injects Service-link env vars named after the Service
+      # (KURRENTDB_SERVICE_PORT_HTTP_GRPC, KURRENTDB_PORT_2113_TCP_*, …). Those
+      # collide with Kurrent's KURRENTDB_* configuration and cause FTL unknown
+      # options after an otherwise successful startup.
+      enableServiceLinks: false
+      containers:
+        - name: kurrentdb
+          image: kurrentplatform/kurrentdb:26.0.3-experimental-arm64-10.0-noble@sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2113
+              name: http-grpc
+          env:
+            - name: KURRENTDB_CLUSTER_SIZE
+              value: "1"
+            - name: KURRENTDB_RUN_PROJECTIONS
+              value: None
+            - name: KURRENTDB_START_STANDARD_PROJECTIONS
+              value: "false"
+            - name: KURRENTDB_INSECURE
+              value: "true"
+            - name: KURRENTDB_ENABLE_ATOM_PUB_OVER_HTTP
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kurrentdb
+          readinessProbe:
+            httpGet:
+              # KurrentDB 26 exposes /health/live as its supported node health
+              # endpoint. Game Integrity adds the store capability readiness gate.
+              path: /health/live
+              port: 2113
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 2113
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1536Mi
+      volumes:
+        - name: data
+          emptyDir: {}

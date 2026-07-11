@@ -184,3 +184,69 @@ func TestGameLog_ReplayAndExportDefensiveImmutability(t *testing.T) {
 		t.Fatalf("past offset: %v %v", past, rej)
 	}
 }
+
+func TestRestoreGameLog_ValidatesAndRebuildsIdempotency(t *testing.T) {
+	entries := []GameLogEntry{
+		{Offset: 0, EventID: "e1", EventType: "CardPlayed", GameID: "g1", Payload: []byte(`{"n":1}`)},
+		{Offset: 1, EventID: "e2", EventType: "CardPlayed", GameID: "g1", Payload: []byte(`{"n":2}`)},
+	}
+	g, err := RestoreGameLog("room-restore-1", entries)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if g.RoomID() != "room-restore-1" || g.Revision() != 2 || g.Len() != 2 {
+		t.Fatalf("room=%s rev=%d len=%d", g.RoomID(), g.Revision(), g.Len())
+	}
+
+	dup := g.Append(AppendCommand{
+		EventID: "e1", EventType: "CardPlayed", GameID: "g1", Payload: []byte(`{"n":1}`), ExpectedRevision: 99,
+	})
+	if dup.Kind != OutcomeDuplicate || dup.Offset != 0 || dup.Revision != 1 {
+		t.Fatalf("idempotency not restored: %+v", dup)
+	}
+	if g.Revision() != 2 {
+		t.Fatal("duplicate mutated revision")
+	}
+
+	conflict := g.Append(AppendCommand{
+		EventID: "e1", EventType: "CardPlayed", GameID: "g1", Payload: []byte(`{"n":OTHER}`), ExpectedRevision: 2,
+	})
+	if !conflict.Rejected() || conflict.Rejection.Code != RejectConflictingDuplicate {
+		t.Fatalf("conflict: %+v", conflict)
+	}
+
+	next := g.Append(AppendCommand{
+		EventID: "e3", EventType: "TurnAdvanced", GameID: "g1", Payload: []byte(`{}`), ExpectedRevision: 2,
+	})
+	if !next.Accepted() || next.Offset != 2 || next.Revision != 3 {
+		t.Fatalf("next: %+v", next)
+	}
+}
+
+func TestRestoreGameLog_RejectsInvalidInputs(t *testing.T) {
+	if _, err := RestoreGameLog("", nil); err == nil {
+		t.Fatal("empty roomId must fail")
+	}
+	if _, err := RestoreGameLog("room-1", []GameLogEntry{
+		{Offset: 1, EventID: "e1", EventType: "X", Payload: []byte("a")},
+	}); err == nil {
+		t.Fatal("non-zero first offset must fail")
+	}
+	if _, err := RestoreGameLog("room-1", []GameLogEntry{
+		{Offset: 0, EventID: "e1", EventType: "X", Payload: []byte("a")},
+		{Offset: 2, EventID: "e2", EventType: "X", Payload: []byte("b")},
+	}); err == nil {
+		t.Fatal("gap must fail")
+	}
+	if _, err := RestoreGameLog("room-1", []GameLogEntry{
+		{Offset: 0, EventID: "e1", EventType: "X", Payload: []byte("a")},
+		{Offset: 1, EventID: "e1", EventType: "X", Payload: []byte("b")},
+	}); err == nil {
+		t.Fatal("duplicate eventId must fail")
+	}
+	if _, err := RestoreGameLog("room-1", []GameLogEntry{
+		{Offset: 0, EventID: "", EventType: "X", Payload: []byte("a")},
+	}); err == nil {
+		t.Fatal("empty eventId must fail")
+	}
+}

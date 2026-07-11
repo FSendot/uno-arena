@@ -1,0 +1,28 @@
+# Local kind overlay for Game Integrity (ADR-0024 / ADR-0035).
+# Maps credentials from uno-arena-local-credentials and sets local DEPLOYMENT_ENV.
+# Explicit kind flag: allows image.tag fallback when digest is empty (see game-integrity.image).
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/game-integrity
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: game-integrity
+  DEPLOYMENT_ENV: local
+  KURRENTDB_URL: kurrentdb://kurrentdb.uno-arena.svc.cluster.local:2113?tls=false
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  GAME_INTEGRITY_ENVELOPE_PROVIDER: dev
+  GAME_INTEGRITY_ENVELOPE_KEY_VERSION: "1"
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
+  GAME_INTEGRITY_ENVELOPE_DEV_KEYS: game-integrity-envelope-dev-keys
+  # Clear base chart's single-master-key mapping; local uses versioned keyring.
+  GAME_INTEGRITY_ENVELOPE_DEV_MASTER_KEY: ""

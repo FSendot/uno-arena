@@ -1,25 +1,34 @@
 package domain
 
 import (
+	"context"
 	"sync"
 	"time"
 )
 
 // MemoryPlayerRepository is an in-memory PlayerRepository for offline tests.
 type MemoryPlayerRepository struct {
-	mu     sync.Mutex
-	byID   map[PlayerID]Player
-	byUser map[string]Player
+	mu       sync.Mutex
+	byID     map[PlayerID]Player
+	byUser   map[string]Player
+	roles    map[PlayerID][]string
+	external map[string]PlayerID // issuer\x00subject -> playerID
 }
 
 func NewMemoryPlayerRepository() *MemoryPlayerRepository {
 	return &MemoryPlayerRepository{
-		byID:   make(map[PlayerID]Player),
-		byUser: make(map[string]Player),
+		byID:     make(map[PlayerID]Player),
+		byUser:   make(map[string]Player),
+		roles:    make(map[PlayerID][]string),
+		external: make(map[string]PlayerID),
 	}
 }
 
-func (r *MemoryPlayerRepository) Save(player Player) error {
+func externalKey(issuer, subject string) string {
+	return issuer + "\x00" + subject
+}
+
+func (r *MemoryPlayerRepository) Save(_ context.Context, player Player) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing, ok := r.byUser[player.Username]; ok && existing.ID != player.ID {
@@ -30,23 +39,85 @@ func (r *MemoryPlayerRepository) Save(player Player) error {
 	return nil
 }
 
-func (r *MemoryPlayerRepository) FindByUsername(username string) (Player, bool) {
+func (r *MemoryPlayerRepository) FindByUsername(_ context.Context, username string) (Player, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.byUser[username]
-	return p, ok
+	return p, ok, nil
 }
 
-func (r *MemoryPlayerRepository) FindByID(id PlayerID) (Player, bool) {
+func (r *MemoryPlayerRepository) FindByID(_ context.Context, id PlayerID) (Player, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p, ok := r.byID[id]
-	return p, ok
+	return p, ok, nil
+}
+
+func (r *MemoryPlayerRepository) RegisterWithDefaultACL(_ context.Context, player Player, role string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing, ok := r.byUser[player.Username]; ok && existing.ID != player.ID {
+		return ErrUsernameTaken
+	}
+	if _, exists := r.byID[player.ID]; exists {
+		return ErrUsernameTaken
+	}
+	r.byID[player.ID] = player
+	r.byUser[player.Username] = player
+	if role == "" {
+		role = "player"
+	}
+	r.roles[player.ID] = []string{role}
+	return nil
+}
+
+func (r *MemoryPlayerRepository) ListRoles(_ context.Context, playerID PlayerID) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	roles := r.roles[playerID]
+	out := make([]string, len(roles))
+	copy(out, roles)
+	return out, nil
+}
+
+func (r *MemoryPlayerRepository) LinkOrResolveExternal(_ context.Context, issuer, subject, preferredUsername string, newPlayer Player, acceptedRoles []string) (Player, []string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := externalKey(issuer, subject)
+	roles := NormalizeAcceptedRoles(acceptedRoles, acceptedRoles)
+	if len(roles) == 0 {
+		roles = []string{"player"}
+	}
+	if pid, ok := r.external[key]; ok {
+		p := r.byID[pid]
+		r.roles[pid] = append([]string(nil), roles...)
+		return p, append([]string(nil), roles...), nil
+	}
+
+	username := preferredUsername
+	if username == "" {
+		username = newPlayer.Username
+	}
+	if username == "" {
+		username = string(newPlayer.ID)
+	}
+	if existing, ok := r.byUser[username]; ok && existing.ID != newPlayer.ID {
+		// Prefer stable uniqueness when preferred username is taken.
+		username = username + "-" + string(newPlayer.ID)
+	}
+	player := newPlayer
+	player.Username = username
+	r.byID[player.ID] = player
+	r.byUser[player.Username] = player
+	r.roles[player.ID] = append([]string(nil), roles...)
+	r.external[key] = player.ID
+	return player, append([]string(nil), roles...), nil
 }
 
 // ByUsername is a test helper.
 func (r *MemoryPlayerRepository) ByUsername(username string) (Player, bool) {
-	return r.FindByUsername(username)
+	p, ok, _ := r.FindByUsername(context.Background(), username)
+	return p, ok
 }
 
 // MemorySessionRepository is an in-memory SessionRepository with a durable outbox.
@@ -80,7 +151,7 @@ func (r *MemorySessionRepository) SetInvalidateError(err error) {
 	r.invalidateErr = err
 }
 
-func (r *MemorySessionRepository) Save(session Session) error {
+func (r *MemorySessionRepository) Save(_ context.Context, session Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.saveLocked(session)
@@ -95,24 +166,25 @@ func (r *MemorySessionRepository) saveLocked(session Session) {
 	r.byToken[session.TokenHash] = session
 }
 
-func (r *MemorySessionRepository) FindByID(id SessionID) (Session, bool) {
+func (r *MemorySessionRepository) FindByID(_ context.Context, id SessionID) (Session, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.byID[id]
-	return s, ok
+	return s, ok, nil
 }
 
-func (r *MemorySessionRepository) FindByTokenHash(tokenHash string) (Session, bool) {
+func (r *MemorySessionRepository) FindByTokenHash(_ context.Context, tokenHash string) (Session, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.byToken[tokenHash]
-	return s, ok
+	return s, ok, nil
 }
 
-func (r *MemorySessionRepository) FindActiveByPlayer(playerID PlayerID) (Session, bool) {
+func (r *MemorySessionRepository) FindActiveByPlayer(_ context.Context, playerID PlayerID) (Session, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.findActiveLocked(playerID)
+	s, ok := r.findActiveLocked(playerID)
+	return s, ok, nil
 }
 
 func (r *MemorySessionRepository) findActiveLocked(playerID PlayerID) (Session, bool) {
@@ -125,7 +197,7 @@ func (r *MemorySessionRepository) findActiveLocked(playerID PlayerID) (Session, 
 }
 
 // ReplaceActiveSession applies invalidations + next + outbox under one lock.
-func (r *MemorySessionRepository) ReplaceActiveSession(previous *Session, next Session, eventFor func(Session) SessionInvalidatedEvent) error {
+func (r *MemorySessionRepository) ReplaceActiveSession(_ context.Context, previous *Session, next Session, eventFor func(Session) SessionInvalidatedEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.replaceErr != nil {
@@ -150,7 +222,7 @@ func (r *MemorySessionRepository) ReplaceActiveSession(previous *Session, next S
 		r.byID[id] = inv
 		r.byToken[inv.TokenHash] = inv
 		if eventFor != nil {
-			evt := eventFor(inv)
+			evt := eventFor(inv).Normalize()
 			newOutbox = append(newOutbox, OutboxEntry{
 				Event:     evt,
 				CreatedAt: next.CreatedAt,
@@ -164,7 +236,7 @@ func (r *MemorySessionRepository) ReplaceActiveSession(previous *Session, next S
 
 // InvalidateWithOutbox persists session status change and outbox event atomically
 // only when the stored session is still active (conditional CAS-style write).
-func (r *MemorySessionRepository) InvalidateWithOutbox(session Session, event SessionInvalidatedEvent) error {
+func (r *MemorySessionRepository) InvalidateWithOutbox(_ context.Context, session Session, event SessionInvalidatedEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.invalidateErr != nil {
@@ -180,7 +252,7 @@ func (r *MemorySessionRepository) InvalidateWithOutbox(session Session, event Se
 	}
 	r.saveLocked(session)
 	r.outbox = append(r.outbox, OutboxEntry{
-		Event:     event,
+		Event:     event.Normalize(),
 		CreatedAt: event.OccurredAt,
 	})
 	return nil
@@ -193,7 +265,7 @@ func (r *MemorySessionRepository) OutboxLen() int {
 	return len(r.outbox)
 }
 
-func (r *MemorySessionRepository) ListPendingOutbox(limit int) ([]OutboxEntry, error) {
+func (r *MemorySessionRepository) ListPendingOutbox(_ context.Context, limit int) ([]OutboxEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if limit <= 0 {
@@ -212,7 +284,7 @@ func (r *MemorySessionRepository) ListPendingOutbox(limit int) ([]OutboxEntry, e
 	return out, nil
 }
 
-func (r *MemorySessionRepository) MarkOutboxPublished(eventID string, publishedAt time.Time) error {
+func (r *MemorySessionRepository) MarkOutboxPublished(_ context.Context, eventID string, publishedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.outbox {
@@ -227,7 +299,8 @@ func (r *MemorySessionRepository) MarkOutboxPublished(eventID string, publishedA
 
 // ByID is a test helper.
 func (r *MemorySessionRepository) ByID(id SessionID) (Session, bool) {
-	return r.FindByID(id)
+	s, ok, _ := r.FindByID(context.Background(), id)
+	return s, ok
 }
 
 // All returns a snapshot of all sessions (test helper).

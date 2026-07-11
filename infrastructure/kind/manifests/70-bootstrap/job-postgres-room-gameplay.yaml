@@ -1,0 +1,103 @@
+# Room Gameplay Postgres bootstrap Job (ADR-0027).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-postgres-room-gameplay
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: bootstrap-postgres-room-gameplay
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/context: room-gameplay
+    uno-arena.local/bootstrap: postgres
+    uno-arena.local/non-production: "true"
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootstrap-postgres-room-gameplay
+        uno-arena.local/context: room-gameplay
+        uno-arena.local/bootstrap: postgres
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          image: uno-arena/bootstrap:local
+          imagePullPolicy: IfNotPresent
+          args: ["postgres"]
+          env:
+            - name: CONTEXT_NAME
+              value: room-gameplay
+            - name: PGHOST
+              value: postgres-room-gameplay.uno-arena.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: room_gameplay
+            - name: ADVISORY_LOCK_KEY
+              value: "27002"
+            - name: EXPECTED_VERSION
+              value: "001_init"
+            - name: MIGRATION_FILE
+              value: /bootstrap/migrations/room-gameplay/001_init.sql
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-admin-user
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-admin-password
+            - name: BOOTSTRAP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-bootstrap-user
+            - name: BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-bootstrap-password
+            - name: RUNTIME_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-runtime-user
+            - name: RUNTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-runtime-password
+            - name: CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-cdc-kafka-user
+            - name: CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-cdc-kafka-password
+            - name: CDC_PUBLICATION
+              value: room_cdc_integration_outbox
+            - name: CDC_TABLE
+              value: integration_outbox_events
+            - name: CDC_PEER_TABLE
+              value: realtime_outbox_events
+            - name: CDC_REALTIME_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-cdc-realtime-user
+            - name: CDC_REALTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-cdc-realtime-password
+            - name: CDC_REALTIME_PUBLICATION
+              value: room_cdc_realtime_outbox
+            - name: CDC_REALTIME_TABLE
+              value: realtime_outbox_events

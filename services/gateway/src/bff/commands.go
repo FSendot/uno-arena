@@ -199,7 +199,13 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 	if principal.SessionID != "" {
 		pkey = pkey + ":" + principal.SessionID
 	}
-	if allowed, retry := s.principalLimiter.Allow(r.Context(), pkey); !allowed {
+	allowed, retry, limErr := s.principalLimiter.Allow(r.Context(), pkey)
+	if limErr != nil {
+		s.writeErr(w, r, http.StatusServiceUnavailable, "rate_limiter_unavailable",
+			"distributed rate limiter unavailable", cmd.CommandID)
+		return
+	}
+	if !allowed {
 		if err := s.recordRejection(cmd, corr, principal, roomID, tournamentID, "rate_limited", nil); err != nil {
 			s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
 			return
@@ -213,11 +219,9 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 
 	backend := RouteBackend(cmd.Type)
 	if backend == BackendUnknown {
-		if err := s.recordRejection(cmd, corr, principal, pathRoomID, "", "unknown_command_type", nil); err != nil {
-			s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
-			return
-		}
-		_ = httpx.WriteJSON(w, http.StatusOK, envelope.Rejected(cmd.CommandID, cmd.Type, "unknown_command_type", nil))
+		// Defense in depth: envelope.Decode already rejects non-catalog types as
+		// invalid_envelope before audit. Keep routing coherent if a type slips through.
+		s.writeErr(w, r, http.StatusBadRequest, "invalid_envelope", "unknown command type", cmd.CommandID)
 		return
 	}
 
@@ -230,14 +234,9 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 		return
 	}
 
-	if RequiresExpectedSequence(cmd.Type) && cmd.ExpectedSequenceNumber == nil {
-		if err := s.recordRejection(cmd, corr, principal, roomID, tournamentID, "missing_expected_sequence_number", nil); err != nil {
-			s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
-			return
-		}
-		_ = httpx.WriteJSON(w, http.StatusOK, envelope.Rejected(cmd.CommandID, cmd.Type, "missing_expected_sequence_number", nil))
-		return
-	}
+	// expectedSequenceNumber presence for the 11 existing-room mutations and the
+	// closed 15-type catalog are enforced by envelope.Decode as invalid_envelope
+	// (HTTP 400) before principal rate-limit audit / dispatch.
 
 	if pathRoomID != "" {
 		payloadRoom := extractRoomID(cmd.Payload)
@@ -428,7 +427,7 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, kind StreamKin
 	corr := s.correlation(r)
 	lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
 
-	_, events, replay, cancel, err := s.hub.Subscribe(kind, roomID, sessionID, playerID, lastEventID)
+	sess, err := s.liveFeed.BeginSession(r.Context(), kind, roomID, sessionID, playerID, lastEventID)
 	if err != nil {
 		if errors.Is(err, ErrSnapshotRequired) {
 			s.writeErr(w, r, http.StatusConflict, "snapshot_required",
@@ -448,10 +447,15 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, kind StreamKin
 			s.writeErr(w, r, status, code, msg, "")
 			return
 		}
+		if errors.Is(err, ErrLiveFeedUnavailable) {
+			s.writeErr(w, r, http.StatusServiceUnavailable, "live_feed_unavailable",
+				"live feed temporarily unavailable", "")
+			return
+		}
 		s.writeErr(w, r, http.StatusInternalServerError, "internal_error", "subscribe failed", "")
 		return
 	}
-	defer cancel()
+	defer sess.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -460,16 +464,17 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, kind StreamKin
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	for _, ev := range replay {
+	for _, ev := range sess.Replay() {
 		if err := writeSSE(w, flusher, ev); err != nil {
 			return
 		}
-		if ev.Event == "session_invalidated" || ev.Event == "room_terminal" || ev.Event == "snapshot_required" {
+		if ev.Event == "session_invalidated" || ev.Event == "room_terminal" || ev.Event == "snapshot_required" || ev.Event == "stream_closed" {
 			return
 		}
 	}
 
 	ctx := r.Context()
+	events := sess.Events()
 	for {
 		select {
 		case <-ctx.Done():
@@ -481,7 +486,7 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, kind StreamKin
 			if err := writeSSE(w, flusher, ev); err != nil {
 				return
 			}
-			if ev.Event == "session_invalidated" || ev.Event == "room_terminal" || ev.Event == "snapshot_required" {
+			if ev.Event == "session_invalidated" || ev.Event == "room_terminal" || ev.Event == "snapshot_required" || ev.Event == "stream_closed" {
 				return
 			}
 		}

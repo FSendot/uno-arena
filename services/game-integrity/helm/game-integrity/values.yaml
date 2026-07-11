@@ -1,17 +1,23 @@
 replicaCount: 1
 
+# kind: false (absent) — tag fallback only when values.kind.yaml sets kind: true.
 image:
   repository: registry.gitlab.com/group/uno-arena/game-integrity
+  # Staging/production overlays and CI must supply a digest. Tag alone fails outside kind mode.
   digest: ""
+  tag: ""
 
 env:
   SERVICE_NAME: game-integrity
-  # Base architecture mode: EVENTSTORE_URL set => /ready reports eventstore_adapter_blocked.
-  # Staging/production rollout is intentionally blocked until the durable EventStoreDB
-  # adapter exists. Do not set GAME_INTEGRITY_ALLOW_MEMORY here (capability overlay only)
-  # and do not weaken /ready to fake production readiness.
-  EVENTSTORE_URL: esdb://eventstore:2113?tls=false
+  # Durable KurrentDB adapter (ADR-0035). Master key is never inlined here.
+  KURRENTDB_URL: kurrentdb://kurrentdb:2113?tls=false
   KAFKA_BROKERS: kafka:9092
+  # Local/dev chart default: explicit development envelope provider (ADR-0024).
+  # Staging/production overlays must not silently keep this; they require KMS.
+  # values.kind.yaml is the local kind binding; base remains a non-kind default.
+  DEPLOYMENT_ENV: development
+  GAME_INTEGRITY_ENVELOPE_PROVIDER: dev
+  GAME_INTEGRITY_ENVELOPE_KEY_VERSION: "1"
 
 # Cross-chart: game-integrity-internal-credential == room GAME_INTEGRITY_INTERNAL_CREDENTIAL
 #              secret value (Room→GI). Audit credential is operator/compliance scope only.
@@ -19,6 +25,8 @@ existingSecret: game-integrity-secrets
 secretEnv:
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
   GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
+  GAME_INTEGRITY_ENVELOPE_DEV_KEYS: game-integrity-envelope-dev-keys
+  GAME_INTEGRITY_ENVELOPE_DEV_MASTER_KEY: ""
 
 resources:
   requests:

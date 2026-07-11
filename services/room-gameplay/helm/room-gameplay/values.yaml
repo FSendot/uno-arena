@@ -16,17 +16,17 @@ env:
   GAME_INTEGRITY_URL: http://game-integrity:8080
   REDIS_URL: redis://redis:6379/2
   KAFKA_BROKERS: kafka:9092
-  # Configured mode (no ROOM_ALLOW_FAKES / ROOM_CAPABILITY_MODE): /ready is always
-  # blocked with postgres_adapter_blocked until a durable Postgres session adapter
-  # exists — regardless of whether DATABASE_URL is set. Do not weaken readiness.
+  # Durable mode when DATABASE_URL is set (secret). Capability mode remains
+  # ROOM_CAPABILITY_MODE for offline stacks. Debezium CDC delivery is PENDING.
 
-# BLOCKED: binary has no WORKER_ROLE=room-timer loop; production timer adapters absent.
+# Timer worker enabled in values.kind.yaml; staging/production keep false until
+# Redis timer index + CDC sink ops are fully rolled out.
 timerWorker:
   enabled: false
 
 existingSecret: room-gameplay-secrets
 # Cross-chart equality (secret *values* must match; keys stay chart-local — no hardcoded secrets):
-#   room-service-credential          == gateway gateway-service-credential (Gateway→Room)
+#   room-service-credential          == gateway gateway-room-service-credential (Gateway→Room)
 #   room-to-gateway-credential       == gateway gateway-room-credential (Room→Gateway)
 #   room-identity-credential         == identity identity-internal-credential (Room→Identity)
 #   spectator-view-internal-credential == spectator-view chart (Room→Spectator)

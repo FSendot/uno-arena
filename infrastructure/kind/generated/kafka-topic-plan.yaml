@@ -1,0 +1,293 @@
+---
+apiVersion: uno-arena.local/v1
+kind: KafkaTopicPlan
+metadata:
+  name: kind-local
+  annotations:
+    uno-arena.local/non-production: 'true'
+    uno-arena.local/source: contracts/asyncapi/kafka-v1.yaml
+    uno-arena.local/retention: ADR-0032 kind-short; no production recovery claim
+spec:
+  replicationFactor: 1
+  minInSyncReplicas: 1
+  partitionPolicy:
+    high: 8
+    business: 2
+    note: Reduced kind counts preserving high-vs-low classes; RF1 non-HA
+  retentionPolicy:
+    kindShortMs:
+      spectator-safe: 600000
+      metrics-control: 1800000
+      business: 7200000
+      dlq: 21600000
+    note: Explicit kind-short retention.ms by ADR-0032 class
+  domainTopics:
+  - name: analytics.public_projection.updated
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: identity.session.invalidated
+    class: business
+    retentionClass: metrics-control
+    retentionMs: 1800000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: ranking.leaderboard_snapshot_published
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: ranking.player_rating_updated
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: room.game.completed
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: room.gameplay.metrics
+    class: high
+    retentionClass: metrics-control
+    retentionMs: 1800000
+    partitions: 8
+    replicationFactor: 1
+    productionPlanningPartitions: 256
+    cleanupPolicy: delete
+  - name: room.match.completed
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: room.spectator-safe.events
+    class: high
+    retentionClass: spectator-safe
+    retentionMs: 600000
+    partitions: 8
+    replicationFactor: 1
+    productionPlanningPartitions: 256
+    cleanupPolicy: delete
+  - name: spectator.room_projection.updated
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: tournament.completed
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: tournament.match.assigned
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: tournament.match.result_recorded
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: tournament.players.advanced
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  - name: tournament.round.completed
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
+  dlqTopics:
+  - name: identity.session.invalidated.gateway.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: identity.session.invalidated
+    consumer: gateway
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: ranking.leaderboard_snapshot_published.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: ranking.leaderboard_snapshot_published
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: ranking.player_rating_updated.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: ranking.player_rating_updated
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: room.game.completed.ranking.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: room.game.completed
+    consumer: ranking
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: room.gameplay.metrics.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: room.gameplay.metrics
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: room.match.completed.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: room.match.completed
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: room.match.completed.tournament-orchestration.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: room.match.completed
+    consumer: tournament-orchestration
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: room.spectator-safe.events.spectator-view.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: room.spectator-safe.events
+    consumer: spectator-view
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.completed.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.completed
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.match.assigned.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.match.assigned
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.match.result_recorded.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.match.result_recorded
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.players.advanced.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.players.advanced
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.players.advanced.ranking.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.players.advanced
+    consumer: ranking
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.round.completed.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.round.completed
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  connectInternalTopics:
+  - name: connect-configs
+    partitions: 1
+    replicationFactor: 1
+    cleanupPolicy: compact
+    class: connect-internal
+  - name: connect-offsets
+    partitions: 8
+    replicationFactor: 1
+    cleanupPolicy: compact
+    class: connect-internal
+  - name: connect-status
+    partitions: 3
+    replicationFactor: 1
+    cleanupPolicy: compact
+    class: connect-internal

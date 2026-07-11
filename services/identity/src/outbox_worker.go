@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -89,7 +90,7 @@ func (w *OutboxRetryWorker) loop() {
 		case <-w.stopCh:
 			return
 		case <-timer.C:
-			n, err := w.svc.DrainOutbox(w.cfg.DrainLimit)
+			n, err := w.svc.DrainOutbox(context.Background(), w.cfg.DrainLimit)
 			if w.cfg.OnDrain != nil {
 				w.cfg.OnDrain(n, err)
 			}

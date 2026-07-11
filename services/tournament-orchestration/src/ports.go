@@ -25,18 +25,39 @@ type IDGenerator interface {
 
 // CommitRequest is one atomic persistence unit: aggregate + command outcome + pending outbox facts.
 type CommitRequest struct {
-	Tournament *domain.Tournament
-	CommandID  string
-	Outcome    envelope.Result
-	Events     []OutboxEvent
+	Tournament        *domain.Tournament
+	CommandID         string
+	Outcome           envelope.Result
+	Events            []OutboxEvent
+	MatchResultSource *MatchResultSource
+}
+
+// MatchResultSource carries the inbound MatchCompleted event id for the matching room/version.
+type MatchResultSource struct {
+	EventID           string
+	RoomID            string
+	CompletionVersion uint64
+}
+
+// TournamentUnitOfWork holds one READ COMMITTED transaction with the tournament row locked
+// (FOR UPDATE) or create-path advisory lock across outcome lookup, domain mutation, and commit.
+type TournamentUnitOfWork interface {
+	Loaded() *domain.Tournament
+	Exists() bool
+	LookupOutcome(commandID string) (envelope.Result, bool)
+	Commit(req CommitRequest) error
+	Rollback() error
 }
 
 // TournamentRepository persists Tournament aggregates with transactional outbox + command idempotency.
 type TournamentRepository interface {
-	// Get returns a deep clone (copy-on-write). Mutations must not affect stored state until Commit.
+	// BeginExisting locks the tournament row (FOR UPDATE) then hydrates under that transaction.
+	BeginExisting(id domain.TournamentID) (TournamentUnitOfWork, error)
+	// BeginCreate takes a transaction-scoped advisory lock before checking/inserting.
+	BeginCreate(id domain.TournamentID) (TournamentUnitOfWork, error)
+	// Get returns a deep clone for read projections (unlocked snapshot).
 	Get(id domain.TournamentID) (*domain.Tournament, bool)
-	// Commit persists aggregate (when non-nil), command outcome, and accepted outbox facts under one lock.
-	// On error, prior state (including outcomes and outbox) is unchanged.
+	// Commit persists outcome-only rejects (no aggregate lock) or legacy single-shot writes.
 	Commit(req CommitRequest) error
 	LookupOutcome(commandID string) (envelope.Result, bool)
 	ListPendingOutbox(limit int) ([]OutboxEvent, error)

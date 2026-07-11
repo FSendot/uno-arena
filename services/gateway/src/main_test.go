@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"unoarena/services/gateway/bff"
+	"unoarena/shared/correlation"
+	"unoarena/shared/envelope"
 )
 
 func TestHealthViaBFF(t *testing.T) {
@@ -113,7 +118,7 @@ func TestBuildServer_HTTPClientsWhenURLsSetStillNotReadyWithoutDistributedLimite
 	}
 }
 
-func TestBuildServer_RedisURLBlocksReadiness(t *testing.T) {
+func TestBuildServer_PartialRedisURLStillBlocks(t *testing.T) {
 	cfg := gatewayConfig{
 		IdentityURL:                 "http://identity:8080",
 		RoomURL:                     "http://room:8080",
@@ -125,14 +130,20 @@ func TestBuildServer_RedisURLBlocksReadiness(t *testing.T) {
 		IdentityProducerCredential:  "ident",
 		RoomProducerCredential:      "room",
 		SpectatorProducerCredential: "spec",
-		RedisURL:                    "redis://localhost:6379",
+		RedisURL:                    "redis://localhost:6379/6",
 	}
 	if cfg.StaticReady() {
-		t.Fatal("REDIS_URL must block static ready")
+		t.Fatal("partial REDIS_URL must block static ready")
 	}
-	srv, _, err := buildServer(cfg)
+	if !cfg.redisAdapterBlocked() {
+		t.Fatal("partial redis config must keep adapter blocked")
+	}
+	srv, mode, err := buildServer(cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if mode != "http-backends" {
+		t.Fatalf("mode=%s", mode)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	w := httptest.NewRecorder()
@@ -163,6 +174,62 @@ func TestBuildServer_AbsentRedisAlsoNotReady(t *testing.T) {
 	}
 	if !strings.Contains(cfg.notReadyReason(), "GATEWAY_ALLOW_FAKES") {
 		t.Fatalf("reason=%q", cfg.notReadyReason())
+	}
+}
+
+func TestBuildServer_DurableRedisModeWiresAdapters(t *testing.T) {
+	readyOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ready" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	}))
+	t.Cleanup(readyOK.Close)
+
+	cfg := gatewayConfig{
+		IdentityURL:                 readyOK.URL,
+		RoomURL:                     readyOK.URL,
+		TournamentURL:               readyOK.URL,
+		SpectatorURL:                readyOK.URL,
+		RankingURL:                  readyOK.URL,
+		AnalyticsURL:                readyOK.URL,
+		ServiceCredential:           "svc",
+		IdentityProducerCredential:  "ident",
+		RoomProducerCredential:      "room",
+		SpectatorProducerCredential: "spec",
+		RedisURL:                    "redis://127.0.0.1:1/6",
+		PlayerFeedRedisURL:          "redis://127.0.0.1:1/2",
+		SpectatorRedisURL:           "redis://127.0.0.1:1/5",
+		SpectatorRedisKeyPrefix:     "spectator:",
+		EdgeRateLimit:               1000,
+		EdgeRateWindow:              time.Minute,
+		PrincipalRateLimit:          1000,
+		PrincipalRateWindow:         time.Minute,
+	}
+	if cfg.redisAdapterBlocked() {
+		t.Fatal("full redis URLs must unblock adapter gate")
+	}
+	srv, mode, err := buildServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != "durable-redis" {
+		t.Fatalf("mode=%s", mode)
+	}
+	// Redis on port 1 is unreachable → /ready fails closed with redis_unavailable, not adapter_blocked.
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "redis_unavailable") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "redis_adapter_blocked") {
+		t.Fatal("durable mode must not report redis_adapter_blocked")
 	}
 }
 
@@ -397,4 +464,229 @@ func TestBuildServer_ConfiguredRemainsBlockedWithoutCapability(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "rate_limiter_not_configured") {
 		t.Fatalf("body=%s", w.Body.String())
 	}
+}
+
+func TestRateLimit_AdapterFailureReturns503(t *testing.T) {
+	failing := failingRateLimiter{}
+	srv := bff.NewServer(bff.Dependencies{
+		Identity:    bff.NewFakeIdentity(),
+		Room:        bff.NewFakeRoom(),
+		Tournament:  bff.NewFakeTournament(),
+		Reads:       &bff.FakeReads{},
+		Spectator:   bff.NewFakeSpectatorGate(),
+		Ready:       true,
+		EdgeLimiter: failing,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/v1/streams/control", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "rate_limiter_unavailable") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+}
+
+func TestLoadGatewayConfig_ExplicitOutboundBackendCredentials(t *testing.T) {
+	t.Setenv("GATEWAY_SERVICE_CREDENTIAL", "generic-fallback")
+	t.Setenv("GATEWAY_IDENTITY_SERVICE_CREDENTIAL", "ident-out")
+	t.Setenv("GATEWAY_ROOM_SERVICE_CREDENTIAL", "room-out")
+	t.Setenv("GATEWAY_TOURNAMENT_SERVICE_CREDENTIAL", "tour-out")
+	t.Setenv("GATEWAY_SPECTATOR_SERVICE_CREDENTIAL", "spec-out")
+	t.Setenv("GATEWAY_IDENTITY_CREDENTIAL", "ident-in")
+	t.Setenv("GATEWAY_ROOM_CREDENTIAL", "room-in")
+	t.Setenv("GATEWAY_SPECTATOR_CREDENTIAL", "spec-in")
+
+	cfg := loadGatewayConfig()
+	if cfg.ServiceCredential != "generic-fallback" {
+		t.Fatalf("ServiceCredential=%q", cfg.ServiceCredential)
+	}
+	if cfg.IdentityServiceCredential != "ident-out" {
+		t.Fatalf("IdentityServiceCredential=%q", cfg.IdentityServiceCredential)
+	}
+	if cfg.RoomServiceCredential != "room-out" {
+		t.Fatalf("RoomServiceCredential=%q", cfg.RoomServiceCredential)
+	}
+	if cfg.TournamentServiceCredential != "tour-out" {
+		t.Fatalf("TournamentServiceCredential=%q", cfg.TournamentServiceCredential)
+	}
+	if cfg.SpectatorServiceCredential != "spec-out" {
+		t.Fatalf("SpectatorServiceCredential=%q", cfg.SpectatorServiceCredential)
+	}
+	if cfg.IdentityProducerCredential != "ident-in" {
+		t.Fatalf("IdentityProducerCredential=%q (inbound must stay separate)", cfg.IdentityProducerCredential)
+	}
+	if cfg.RoomProducerCredential != "room-in" {
+		t.Fatalf("RoomProducerCredential=%q", cfg.RoomProducerCredential)
+	}
+	if cfg.SpectatorProducerCredential != "spec-in" {
+		t.Fatalf("SpectatorProducerCredential=%q", cfg.SpectatorProducerCredential)
+	}
+}
+
+func TestLoadGatewayConfig_OutboundFallsBackToServiceCredential(t *testing.T) {
+	t.Setenv("GATEWAY_SERVICE_CREDENTIAL", "generic-fallback")
+	t.Setenv("GATEWAY_IDENTITY_SERVICE_CREDENTIAL", "")
+	t.Setenv("GATEWAY_ROOM_SERVICE_CREDENTIAL", "")
+	t.Setenv("GATEWAY_TOURNAMENT_SERVICE_CREDENTIAL", "")
+	t.Setenv("GATEWAY_SPECTATOR_SERVICE_CREDENTIAL", "")
+	t.Setenv("GATEWAY_IDENTITY_CREDENTIAL", "ident-in")
+	t.Setenv("GATEWAY_ROOM_CREDENTIAL", "room-in")
+	t.Setenv("GATEWAY_SPECTATOR_CREDENTIAL", "spec-in")
+
+	cfg := loadGatewayConfig()
+	for _, got := range []struct {
+		name string
+		val  string
+	}{
+		{"IdentityServiceCredential", cfg.IdentityServiceCredential},
+		{"RoomServiceCredential", cfg.RoomServiceCredential},
+		{"TournamentServiceCredential", cfg.TournamentServiceCredential},
+		{"SpectatorServiceCredential", cfg.SpectatorServiceCredential},
+	} {
+		if got.val != "generic-fallback" {
+			t.Fatalf("%s=%q want generic-fallback", got.name, got.val)
+		}
+	}
+	if cfg.IdentityProducerCredential != "ident-in" || cfg.RoomProducerCredential != "room-in" || cfg.SpectatorProducerCredential != "spec-in" {
+		t.Fatalf("inbound producers must not be overwritten by outbound fallback: %+v", cfg)
+	}
+}
+
+func TestWireGatewayHTTPClients_UsesPerBackendOutboundCredentials(t *testing.T) {
+	var (
+		identityCred   string
+		roomCred       string
+		tournamentCred string
+		spectatorCred  string
+	)
+
+	identity := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/sessions/validate" {
+			http.NotFound(w, r)
+			return
+		}
+		identityCred = r.Header.Get("X-Service-Credential")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"playerId":"p1","sessionId":"s1","username":"alice"}`))
+	}))
+	t.Cleanup(identity.Close)
+
+	room := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/commands" {
+			http.NotFound(w, r)
+			return
+		}
+		roomCred = r.Header.Get("X-Service-Credential")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"Accepted","commandId":"cmd_1","type":"CreateRoom"}`))
+	}))
+	t.Cleanup(room.Close)
+
+	tournament := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/commands" {
+			http.NotFound(w, r)
+			return
+		}
+		tournamentCred = r.Header.Get("X-Service-Credential")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"Accepted","commandId":"cmd_2","type":"CreateTournament"}`))
+	}))
+	t.Cleanup(tournament.Close)
+
+	spectator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/spectator-admission") {
+			http.NotFound(w, r)
+			return
+		}
+		spectatorCred = r.Header.Get("X-Service-Credential")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"allowed":true}`))
+	}))
+	t.Cleanup(spectator.Close)
+
+	cfg := gatewayConfig{
+		IdentityURL:                 identity.URL,
+		RoomURL:                     room.URL,
+		TournamentURL:               tournament.URL,
+		SpectatorURL:                spectator.URL,
+		ServiceCredential:           "generic-must-not-win",
+		IdentityServiceCredential:   "ident-out",
+		RoomServiceCredential:       "room-out",
+		TournamentServiceCredential: "tour-out",
+		SpectatorServiceCredential:  "spec-out",
+		IdentityProducerCredential:  "ident-in-must-not-send",
+		RoomProducerCredential:      "room-in-must-not-send",
+		SpectatorProducerCredential: "spec-in-must-not-send",
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	idClient, roomClient, tourClient, specGate, _ := wireGatewayHTTPClients(cfg, httpClient)
+
+	corr := correlation.Headers{CorrelationID: "c1"}
+	if _, err := idClient.ValidateSession(context.Background(), "tok", corr); err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if _, err := roomClient.SubmitCommand(context.Background(), bff.CommandDispatch{
+		Command: envelope.Command{
+			CommandID:     "cmd_1",
+			Type:          "CreateRoom",
+			SchemaVersion: 1,
+			Payload:       json.RawMessage(`{}`),
+		},
+		Principal:   bff.Principal{PlayerID: "p1", SessionID: "s1"},
+		Correlation: corr,
+	}); err != nil {
+		t.Fatalf("room: %v", err)
+	}
+	if _, err := tourClient.SubmitCommand(context.Background(), bff.CommandDispatch{
+		Command: envelope.Command{
+			CommandID:     "cmd_2",
+			Type:          "CreateTournament",
+			SchemaVersion: 1,
+			Payload:       json.RawMessage(`{}`),
+		},
+		Principal:   bff.Principal{PlayerID: "p1", SessionID: "s1"},
+		Correlation: corr,
+	}); err != nil {
+		t.Fatalf("tournament: %v", err)
+	}
+	if ok, _, err := specGate.Admit(context.Background(), bff.SpectatorAdmitRequest{
+		RoomID:      "r1",
+		Correlation: corr,
+	}); err != nil || !ok {
+		t.Fatalf("spectator: ok=%v err=%v", ok, err)
+	}
+
+	if identityCred != "ident-out" {
+		t.Fatalf("identity X-Service-Credential=%q", identityCred)
+	}
+	if roomCred != "room-out" {
+		t.Fatalf("room X-Service-Credential=%q", roomCred)
+	}
+	if tournamentCred != "tour-out" {
+		t.Fatalf("tournament X-Service-Credential=%q", tournamentCred)
+	}
+	if spectatorCred != "spec-out" {
+		t.Fatalf("spectator X-Service-Credential=%q", spectatorCred)
+	}
+	for _, leaked := range []string{
+		"generic-must-not-win",
+		"ident-in-must-not-send",
+		"room-in-must-not-send",
+		"spec-in-must-not-send",
+	} {
+		for _, got := range []string{identityCred, roomCred, tournamentCred, spectatorCred} {
+			if got == leaked {
+				t.Fatalf("outbound client leaked %q", leaked)
+			}
+		}
+	}
+}
+
+type failingRateLimiter struct{}
+
+func (failingRateLimiter) Allow(context.Context, string) (bool, time.Duration, error) {
+	return false, 0, bff.ErrRateLimiterUnavailable
 }

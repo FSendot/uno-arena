@@ -1,0 +1,22 @@
+# Local kind overlay for Ranking durable Postgres.
+# Debezium CDC delivery and Redis leaderboard projection remain PENDING.
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/ranking
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: ranking
+  DEPLOYMENT_ENV: local
+  # Durable mode: no RANKING_CAPABILITY_MODE; DATABASE_URL from secret.
+  # REDIS_URL / KAFKA_BROKERS intentionally omitted until those slices.
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  RANKING_INTERNAL_CREDENTIAL: ranking-internal-credential
+  DATABASE_URL: ranking-database-url

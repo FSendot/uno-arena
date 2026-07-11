@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -58,18 +59,18 @@ func TestOutboxRetryWorkerRetriesQuietPeriodFailures(t *testing.T) {
 		SessionTTL: time.Hour,
 		Transport:  transport,
 	})
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := svc.Login("alice", "secret"); err != nil {
+	if _, err := svc.Login(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("first login: %v", err)
 	}
 
 	transport.SetError(errors.New("gateway down"))
-	if _, err := svc.Login("alice", "secret"); err != nil {
+	if _, err := svc.Login(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("takeover login: %v", err)
 	}
-	pending, err := sessions.ListPendingOutbox(10)
+	pending, err := sessions.ListPendingOutbox(context.Background(), 10)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("expected 1 pending, got %d err=%v", len(pending), err)
 	}
@@ -90,20 +91,20 @@ func TestOutboxRetryWorkerRetriesQuietPeriodFailures(t *testing.T) {
 	if drains.Load() == 0 {
 		t.Fatal("worker should attempt drain during quiet period")
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 1 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 1 {
 		t.Fatalf("pending should remain while transport fails, got %d", len(pending))
 	}
 
 	transport.SetError(nil)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		pending, _ := sessions.ListPendingOutbox(10)
+		pending, _ := sessions.ListPendingOutbox(context.Background(), 10)
 		if len(pending) == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 0 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("worker should publish pending after transport recovers, got %d", len(pending))
 	}
 	if got := transport.Delivered(); len(got) != 1 {

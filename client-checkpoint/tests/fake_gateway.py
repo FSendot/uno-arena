@@ -25,6 +25,157 @@ ROOM_COMMANDS_REQUIRING_SEQUENCE = {
     "ReconnectToRoom",
 }
 
+SEQUENCE_PROHIBITED = {
+    "CreateRoom",
+    "CreateTournament",
+    "RegisterPlayer",
+    "CloseRegistration",
+}
+
+PUBLIC_COMMAND_TYPES = ROOM_COMMANDS_REQUIRING_SEQUENCE | SEQUENCE_PROHIBITED
+
+ALLOWED_TOP_LEVEL = frozenset(
+    {"commandId", "type", "expectedSequenceNumber", "schemaVersion", "payload"}
+)
+
+# Closed 15-type catalog: allowed payload fields + lightweight type/enum/bound rules.
+# Mirrors shared/envelope + OpenAPI bff-v1 without loading YAML.
+PAYLOAD_SCHEMAS: dict[str, dict[str, dict[str, Any]]] = {
+    "CreateRoom": {
+        "roomId": {"kind": "string"},
+        "visibility": {"kind": "string", "enum": ("public", "private")},
+        "maxSeats": {"kind": "maxSeats"},
+    },
+    "JoinRoom": {"roomId": {"kind": "string"}},
+    "LeaveRoom": {"roomId": {"kind": "string"}},
+    "LockRoom": {"roomId": {"kind": "string"}},
+    "StartMatch": {
+        "roomId": {"kind": "string"},
+        "gameId": {"kind": "string"},
+    },
+    "CancelRoom": {"roomId": {"kind": "string"}},
+    "PlayCard": {
+        "roomId": {"kind": "string"},
+        "cardId": {"kind": "string"},
+    },
+    "DrawCard": {"roomId": {"kind": "string"}},
+    "ChooseColor": {
+        "roomId": {"kind": "string"},
+        "color": {"kind": "string", "enum": ("red", "yellow", "green", "blue")},
+    },
+    "CallUno": {"roomId": {"kind": "string"}},
+    "ReportMissingUno": {
+        "roomId": {"kind": "string"},
+        "targetId": {"kind": "string"},
+    },
+    "ReconnectToRoom": {
+        "roomId": {"kind": "string"},
+        "disconnectVersion": {"kind": "integer", "min": 0},
+    },
+    "CreateTournament": {
+        "tournamentId": {"kind": "string"},
+        "capacity": {"kind": "integer", "min": 1},
+        "retryBudget": {"kind": "integer", "min": 0},
+        "batchSize": {"kind": "integer", "min": 1},
+    },
+    "RegisterPlayer": {
+        "tournamentId": {"kind": "string"},
+        "playerId": {"kind": "string"},
+    },
+    "CloseRegistration": {"tournamentId": {"kind": "string"}},
+}
+
+
+def _exact_int(value: Any) -> bool:
+    # bool is a subclass of int in Python; production JSON rejects bool for integers.
+    return type(value) is int and -(2**63) <= value <= 2**63 - 1
+
+
+def _exact_str(value: Any) -> bool:
+    return type(value) is str
+
+
+def _validate_payload_field(cmd_type: str, key: str, spec: dict[str, Any], value: Any) -> str | None:
+    if value is None:
+        return f'payload field "{key}" for {cmd_type} must not be null'
+    kind = spec["kind"]
+    if kind == "string":
+        if not _exact_str(value):
+            return f'payload field "{key}" for {cmd_type} must be a string'
+        allowed = spec.get("enum")
+        if allowed is not None and value not in allowed:
+            return f'payload field "{key}" for {cmd_type} has invalid value "{value}"'
+        return None
+    if kind == "integer":
+        if not _exact_int(value):
+            return f'payload field "{key}" for {cmd_type} must be an integer'
+        minimum = spec.get("min")
+        if minimum is not None and value < minimum:
+            return f'payload field "{key}" for {cmd_type} must be >= {minimum}'
+        return None
+    if kind == "maxSeats":
+        if not _exact_int(value):
+            return f'payload field "{key}" for {cmd_type} must be an integer'
+        # OpenAPI anyOf: <=0 (domain default) or 2..10; reject 1 and >10.
+        if value <= 0:
+            return None
+        if value < 2 or value > 10:
+            return f'payload field "{key}" for {cmd_type} must be <=0 or between 2 and 10'
+        return None
+    return f'payload field "{key}" for {cmd_type} has unknown validator'
+
+
+def validate_command_envelope(data: Any) -> str | None:
+    """Return an error message if data is not a valid public CommandEnvelope, else None."""
+    if not isinstance(data, dict):
+        return "command envelope must be a JSON object"
+
+    for key in data:
+        if key not in ALLOWED_TOP_LEVEL:
+            return f'unknown field "{key}"'
+
+    if "commandId" not in data or not _exact_str(data["commandId"]) or not data["commandId"].strip():
+        return "commandId is required"
+    if "type" not in data or not _exact_str(data["type"]) or not data["type"].strip():
+        return "type is required"
+    if "schemaVersion" not in data:
+        return "schemaVersion must be 1"
+    if not _exact_int(data["schemaVersion"]) or data["schemaVersion"] != 1:
+        return "schemaVersion must be 1"
+    if "payload" not in data or data["payload"] is None:
+        return "payload is required"
+    if not isinstance(data["payload"], dict):
+        return "payload must be a JSON object"
+
+    cmd_type = data["type"]
+    if cmd_type not in PUBLIC_COMMAND_TYPES:
+        return f'unknown command type "{cmd_type}"'
+
+    has_seq = "expectedSequenceNumber" in data
+    if has_seq and cmd_type in SEQUENCE_PROHIBITED:
+        return f"expectedSequenceNumber is not allowed for {cmd_type}"
+    if cmd_type in ROOM_COMMANDS_REQUIRING_SEQUENCE:
+        if not has_seq:
+            return f"expectedSequenceNumber is required for {cmd_type}"
+        seq = data["expectedSequenceNumber"]
+        if seq is None:
+            return f"expectedSequenceNumber is required for {cmd_type}"
+        if not _exact_int(seq):
+            return "expectedSequenceNumber must be an integer"
+        if seq < 0:
+            return "expectedSequenceNumber must be >= 0"
+
+    schema = PAYLOAD_SCHEMAS[cmd_type]
+    payload = data["payload"]
+    for key, value in payload.items():
+        spec = schema.get(key)
+        if spec is None:
+            return f'unknown payload field "{key}" for {cmd_type}'
+        err = _validate_payload_field(cmd_type, key, spec, value)
+        if err:
+            return err
+    return None
+
 
 class GatewayState:
     def __init__(self) -> None:
@@ -75,6 +226,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _invalid_envelope(self, message: str, command_id: str = "") -> None:
+        body: dict[str, Any] = {
+            "code": "invalid_envelope",
+            "message": message,
+        }
+        if command_id:
+            body["commandId"] = command_id
+        self._json(400, body)
+
+    def _command_envelope_guard(self, data: Any) -> bool:
+        """Return True if a response was already written (caller must return)."""
+        command_id = ""
+        if isinstance(data, dict) and _exact_str(data.get("commandId")):
+            command_id = data["commandId"]
+        err = validate_command_envelope(data)
+        if err:
+            self._invalid_envelope(err, command_id)
+            return True
+        return False
+
     def _record(self, body: bytes) -> tuple[str, dict[str, list[str]]]:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -108,19 +279,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/v1/commands":
             data = json.loads(body or b"{}")
-            cmd_type = data.get("type", "")
-            if cmd_type in ROOM_COMMANDS_REQUIRING_SEQUENCE and "expectedSequenceNumber" not in data:
-                self._json(
-                    200,
-                    {
-                        "commandId": data.get("commandId", ""),
-                        "type": cmd_type,
-                        "status": "rejected",
-                        "schemaVersion": data.get("schemaVersion", 1),
-                        "reason": "missing_expected_sequence_number",
-                    },
-                )
+            if self._command_envelope_guard(data):
                 return
+            cmd_type = data.get("type", "")
             self._json(
                 200,
                 {
@@ -135,19 +296,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/v1/rooms/") and path.endswith("/commands"):
             data = json.loads(body or b"{}")
-            cmd_type = data.get("type", "")
-            if "expectedSequenceNumber" not in data and cmd_type != "CreateRoom":
-                self._json(
-                    200,
-                    {
-                        "commandId": data.get("commandId", ""),
-                        "type": cmd_type,
-                        "status": "rejected",
-                        "schemaVersion": data.get("schemaVersion", 1),
-                        "reason": "missing_expected_sequence_number",
-                    },
-                )
+            if self._command_envelope_guard(data):
                 return
+            cmd_type = data.get("type", "")
             self._json(
                 200,
                 {

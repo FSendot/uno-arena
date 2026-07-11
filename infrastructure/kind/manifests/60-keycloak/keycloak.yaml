@@ -1,0 +1,175 @@
+# Keycloak 26.7.0 local start-dev reference IdP (ADR-0023). Not production.
+# Realm/client/test user are local placeholders — no real secrets.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-unoarena
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+data:
+  unoarena-realm.json: |
+    {
+      "realm": "unoarena",
+      "enabled": true,
+      "displayName": "UnoArena Local",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": false,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": false,
+      "editUsernameAllowed": false,
+      "sslRequired": "external",
+      "roles": {
+        "realm": [
+          {
+            "name": "player",
+            "description": "Local test player role"
+          }
+        ]
+      },
+      "clients": [
+        {
+          "clientId": "unoarena-cli",
+          "name": "UnoArena CLI (local)",
+          "enabled": true,
+          "publicClient": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "redirectUris": [
+            "http://127.0.0.1:*",
+            "http://localhost:*"
+          ],
+          "webOrigins": [
+            "+"
+          ],
+          "attributes": {
+            "post.logout.redirect.uris": "+"
+          },
+          "protocol": "openid-connect"
+        }
+      ],
+      "users": [
+        {
+          "username": "test-player",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Test",
+          "lastName": "Player",
+          "email": "test-player@unoarena.local",
+          "credentials": [
+            {
+              "type": "password",
+              "value": "local-only-test-password",
+              "temporary": false
+            }
+          ],
+          "realmRoles": [
+            "player"
+          ]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: uno-arena
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.7.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - start-dev
+            - --import-realm
+            - --http-port=8080
+            - --hostname-strict=false
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: keycloak-admin-user
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: keycloak-admin-password
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+            - name: data
+              mountPath: /opt/keycloak/data
+          readinessProbe:
+            httpGet:
+              path: /realms/unoarena
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /realms/master
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1536Mi
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm-unoarena
+            items:
+              - key: unoarena-realm.json
+                path: unoarena-realm.json
+        - name: data
+          emptyDir: {}

@@ -1,13 +1,11 @@
 # Capability overlay for CLI / offline testing only.
 # Uses real-service HTTP paths (GATEWAY_CAPABILITY_MODE / ROOM_CAPABILITY_MODE),
 # not GATEWAY_ALLOW_FAKES / ROOM_ALLOW_FAKES backend fakes. Game Integrity stays
-# on explicit memory (EVENTSTORE_URL cleared + GAME_INTEGRITY_ALLOW_MEMORY).
+# on explicit memory (KURRENTDB_URL cleared + GAME_INTEGRITY_ALLOW_MEMORY).
 #
-# EventStore (eventstore/eventstore:24.10.14) is amd64-only. Capability mode does
-# not need it (GI memory), so this overlay puts `eventstore` on profile
-# `architecture-eventstore` and clears game-integrity's depends_on. Default
-# `up` / `config --services` therefore omit EventStore with no amd64 emulation.
-# Base `docker-compose.local.yml` alone keeps EventStore in the default set.
+# Capability mode intentionally does not need KurrentDB because GI uses explicit
+# memory, so this overlay puts `kurrentdb` on a profile and clears game-integrity's
+# dependency. The durable local/kind lane uses the native ARM64 KurrentDB image.
 #
 # Usage (config only / no pull):
 #   docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example config
@@ -18,8 +16,9 @@
 # Flags set here only:
 #   GATEWAY_CAPABILITY_MODE     — real HTTP upstream clients + in-memory edge/principal limiters
 #   ROOM_CAPABILITY_MODE        — memory session repo only; real HTTP Identity/GI/publisher paths
+#   ANALYTICS_CAPABILITY_MODE   — memory Analytics store; durable ClickHouse URL cleared
 #   GAME_INTEGRITY_ALLOW_MEMORY — offline memory stream repo
-#   EVENTSTORE_URL cleared      — required so GI does not report eventstore_adapter_blocked
+#   KURRENTDB_URL cleared       — required so GI uses memory instead of durable adapter
 
 name: uno-arena-local
 
@@ -32,9 +31,9 @@ networks:
     name: ${COMPOSE_PROJECT_NAME:-uno-arena-local}_private
 
 services:
-  # Omit from default capability selection (amd64-only image; GI uses memory).
-  eventstore:
-    profiles: ["architecture-eventstore"]
+  # Omit from default capability selection because GI uses explicit memory.
+  kurrentdb:
+    profiles: ["architecture-kurrentdb"]
 
   gateway:
     environment:
@@ -49,9 +48,23 @@ services:
       # adapters and prevent the CLI from traversing real service HTTP paths.
 
   game-integrity:
-    # Drop EventStore dependency so inactive profile does not break compose config.
+    # Drop KurrentDB dependency so inactive profile does not break compose config.
     depends_on: !reset []
     environment:
-      # Clear EventStore URL so resolveRuntime can select memory when allowed.
-      EVENTSTORE_URL: ""
+      # Clear KurrentDB URL so resolveRuntime can select memory when allowed.
+      KURRENTDB_URL: ""
       GAME_INTEGRITY_ALLOW_MEMORY: "true"
+      # Capability lane is explicit memory; clear durable envelope provider/keyring.
+      GAME_INTEGRITY_ENVELOPE_PROVIDER: ""
+      GAME_INTEGRITY_ENVELOPE_DEV_KEYS: ""
+      GAME_INTEGRITY_ENVELOPE_KEY_VERSION: ""
+      DEPLOYMENT_ENV: test
+
+  analytics:
+    environment:
+      ANALYTICS_CAPABILITY_MODE: "true"
+      DEPLOYMENT_ENV: test
+      # Clear durable ClickHouse so capability keeps the memory store.
+      CLICKHOUSE_URL: ""
+      CLICKHOUSE_USER: ""
+      CLICKHOUSE_PASSWORD: ""

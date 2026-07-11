@@ -1,0 +1,89 @@
+# Identity Postgres bootstrap Job (ADR-0027).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-postgres-identity
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: bootstrap-postgres-identity
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/context: identity
+    uno-arena.local/bootstrap: postgres
+    uno-arena.local/non-production: "true"
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootstrap-postgres-identity
+        uno-arena.local/context: identity
+        uno-arena.local/bootstrap: postgres
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          image: uno-arena/bootstrap:local
+          imagePullPolicy: IfNotPresent
+          args: ["postgres"]
+          env:
+            - name: CONTEXT_NAME
+              value: identity
+            - name: PGHOST
+              value: postgres-identity.uno-arena.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: identity
+            - name: ADVISORY_LOCK_KEY
+              value: "27001"
+            - name: EXPECTED_VERSION
+              value: "001_init"
+            - name: MIGRATION_FILE
+              value: /bootstrap/migrations/identity/001_init.sql
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-admin-user
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-admin-password
+            - name: BOOTSTRAP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-bootstrap-user
+            - name: BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-bootstrap-password
+            - name: RUNTIME_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-runtime-user
+            - name: RUNTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-runtime-password
+            - name: CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-cdc-user
+            - name: CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: identity-cdc-password
+            - name: CDC_PUBLICATION
+              value: identity_cdc_outbox
+            - name: CDC_TABLE
+              value: outbox_events
+            - name: CDC_PEER_TABLE
+              value: ""

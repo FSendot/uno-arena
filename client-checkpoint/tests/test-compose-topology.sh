@@ -139,9 +139,9 @@ check "base topology (edge+private, gateway-only edge, port $SELECTED_PORT)" \
 check "capability topology (project-scoped names, gateway-only edge, port $SELECTED_PORT)" \
   assert_topology "$CAP_CFG" capability "$PROJECT_NAME" "$SELECTED_PORT"
 
-# Capability must omit eventstore from default service set.
-if ! grep -qE '^[[:space:]]*eventstore:' "$CAP_CFG"; then
-  check "capability config omits eventstore service block" true
+# Capability must omit kurrentdb from default service set.
+if ! grep -qE '^[[:space:]]*kurrentdb:' "$CAP_CFG"; then
+  check "capability config omits kurrentdb service block" true
 else
   # Profiled services may still appear in full config; ensure not in --services.
   CAP_SVCS="$(BFF_HOST_PORT="$SELECTED_PORT" COMPOSE_PROJECT_NAME="$PROJECT_NAME" docker compose \
@@ -150,10 +150,10 @@ else
     -f docker-compose.capability.yml \
     --env-file .env.example \
     config --services)"
-  if printf '%s\n' "$CAP_SVCS" | grep -qx eventstore; then
-    check "capability config --services omits eventstore" false
+  if printf '%s\n' "$CAP_SVCS" | grep -qx kurrentdb; then
+    check "capability config --services omits kurrentdb" false
   else
-    check "capability config --services omits eventstore" true
+    check "capability config --services omits kurrentdb" true
   fi
 fi
 

@@ -23,6 +23,10 @@ func (ClosedGameIntegrity) Append(context.Context, AppendRequest) (AppendResult,
 	return AppendResult{}, ErrDependencyClosed
 }
 
+func (ClosedGameIntegrity) Replay(context.Context, string, int64) (ReplayResult, error) {
+	return ReplayResult{}, ErrDependencyClosed
+}
+
 // ClosedDealSource rejects all deal/draw material operations (GI deals unwired).
 type ClosedDealSource struct{}
 
@@ -37,3 +41,11 @@ func (ClosedDealSource) ReserveDraw(context.Context, string, string, string, int
 func (ClosedDealSource) Confirm(context.Context, string) error { return ErrDependencyClosed }
 
 func (ClosedDealSource) Cancel(context.Context, string) error { return ErrDependencyClosed }
+
+func (ClosedDealSource) ConfirmAt(context.Context, string, string, string) error {
+	return ErrDependencyClosed
+}
+
+func (ClosedDealSource) CancelAt(context.Context, string, string, string) error {
+	return ErrDependencyClosed
+}

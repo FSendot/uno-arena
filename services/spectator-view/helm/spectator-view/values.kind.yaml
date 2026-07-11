@@ -1,0 +1,30 @@
+# Local kind overlay for Spectator View durable Redis projection + SSE.
+# Kafka consumer for room.spectator-safe.events remains PENDING.
+# HTTP internal ingest is a test/ops bridge only.
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/spectator-view
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: spectator-view
+  DEPLOYMENT_ENV: local
+  # Dedicated Redis DB 5 — distinct from Room timers (DB 2) and other contexts.
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/5
+  SPECTATOR_REDIS_KEY_PREFIX: "spectator:"
+  # Approximate Redis stream MAXLEN (~) for local proof; snapshot covers trim.
+  SPECTATOR_REDIS_STREAM_MAXLEN: "1024"
+  # Durable mode: no SPECTATOR_CAPABILITY_MODE; credential from secret.
+  # Kafka consumer intentionally omitted until that slice.
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  SPECTATOR_VIEW_INTERNAL_CREDENTIAL: spectator-view-internal-credential
+
+projectionRebuilder:
+  enabled: false

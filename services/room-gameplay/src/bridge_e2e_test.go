@@ -134,14 +134,14 @@ func TestE2E_MultiDestinationBridge_RetryAndTerminal(t *testing.T) {
 	}
 
 	// Partial spectator failure leaves outbox pending; retry reaches Spectator.
-	pending, _ := sessions.ListPendingOutbox(10)
+	pending, _ := sessions.ListPendingOutbox(context.Background(), 10)
 	if len(pending) == 0 && spectatorHits == 0 {
 		// DrainOutbox during command may have already retried after first failure
 		// depending on timing; force another drain.
 	}
 	for i := 0; i < 8; i++ {
 		_, _ = svc.DrainOutbox(context.Background(), 20)
-		pending, _ = sessions.ListPendingOutbox(10)
+		pending, _ = sessions.ListPendingOutbox(context.Background(), 10)
 		mu.Lock()
 		ok := spectatorHits >= 1 && len(pending) == 0
 		mu.Unlock()
@@ -167,7 +167,7 @@ func TestE2E_MultiDestinationBridge_RetryAndTerminal(t *testing.T) {
 	}
 	for i := 0; i < 8; i++ {
 		_, _ = svc.DrainOutbox(context.Background(), 20)
-		pending, _ = sessions.ListPendingOutbox(10)
+		pending, _ = sessions.ListPendingOutbox(context.Background(), 10)
 		if len(pending) == 0 {
 			break
 		}

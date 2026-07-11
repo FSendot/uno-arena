@@ -1,0 +1,62 @@
+{
+  "realm": "unoarena",
+  "enabled": true,
+  "displayName": "UnoArena Local",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "sslRequired": "external",
+  "roles": {
+    "realm": [
+      {
+        "name": "player",
+        "description": "Local test player role"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "unoarena-cli",
+      "name": "UnoArena CLI (local)",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:*",
+        "http://localhost:*"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "+"
+      },
+      "protocol": "openid-connect"
+    }
+  ],
+  "users": [
+    {
+      "username": "test-player",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "Player",
+      "email": "test-player@unoarena.local",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-test-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "player"
+      ]
+    }
+  ]
+}

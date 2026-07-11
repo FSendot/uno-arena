@@ -1,9 +1,13 @@
 replicaCount: 2
 
 env:
-  IDENTITY_INVALIDATION_URL: http://gateway.uno-arena.svc.cluster.local:8080
+  DEPLOYMENT_ENV: production
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/1
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  OIDC_ALLOW_HTTP: "false"
+  IDENTITY_ALLOW_PASSWORD_LOGIN: "false"
+  IDENTITY_OIDC_DIRECT_GRANT: "false"
+  IDENTITY_ALLOW_TEST_PROVISIONING: "false"
 
 existingSecret: identity-secrets
 

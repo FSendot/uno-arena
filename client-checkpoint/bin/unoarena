@@ -36,9 +36,11 @@ Notes:
   - HTTP responses are always JSON; --json is only meaningful for countdown
     (structured JSON vs text line).
   - schemaVersion must equal 1.
-  - expectedSequenceNumber is required for mutations of an existing room aggregate.
-    Documented exception: CreateRoom (no room aggregate yet). Tournament commands
-    do not use room sequence.
+  - The public command catalog is closed (15 OpenAPI types). Unknown --type
+    values are rejected locally before send.
+  - expectedSequenceNumber is required for mutations of an existing room aggregate
+    (JoinRoom, PlayCard, …). It must be absent for CreateRoom and the three
+    tournament types; passing --expected-sequence for those is rejected locally.
   - Countdown is advisory; server expiresAt + openingSequence remain authoritative.
     SSE advisory accepts canonical openingSequence and legacy openingRoomSequence.
   - Graphical UI is deferred; this CLI is the sole current client interface.
@@ -204,19 +206,22 @@ print(int(dt.timestamp()))
 PY
 }
 
-# Documented exception: CreateRoom. Tournament commands are not room mutations.
-requires_expected_sequence() {
+# Closed public catalog (15 OpenAPI variants). Sequence rules:
+# - prohibited: CreateRoom + tournament types
+# - required: existing-room mutations
+# - unknown: reject locally (outside catalog), including room-scoped paths
+command_sequence_policy() {
+  # prints: required | prohibited | unknown
   local cmd_type="$1"
   case "$cmd_type" in
     CreateRoom|CreateTournament|RegisterPlayer|CloseRegistration)
-      return 1
+      echo "prohibited"
       ;;
     JoinRoom|LeaveRoom|LockRoom|StartMatch|CancelRoom|PlayCard|DrawCard|ChooseColor|CallUno|ReportMissingUno|ReconnectToRoom)
-      return 0
+      echo "required"
       ;;
     *)
-      # Unknown types: only room-scoped paths force sequence (checked by caller).
-      return 1
+      echo "unknown"
       ;;
   esac
 }
@@ -288,22 +293,24 @@ submit_command_envelope() {
   require_schema_version "$schema_version"
   payload_json="$(canonicalize_payload_object "$payload_json")"
 
-  if requires_expected_sequence "$cmd_type"; then
-    if [ -z "$expected_sequence" ]; then
-      fail "expectedSequenceNumber is required for room mutation '${cmd_type}' (CreateRoom is the documented exception)"
-    fi
-    require_uint "expectedSequenceNumber" "$expected_sequence"
-  elif [ -n "$expected_sequence" ]; then
-    require_uint "expectedSequenceNumber" "$expected_sequence"
-  fi
-
-  # Room-scoped path without CreateRoom also requires sequence even for unknown types.
-  if [ -n "$room_id" ] && [ "$cmd_type" != "CreateRoom" ]; then
-    if [ -z "$expected_sequence" ]; then
-      fail "expectedSequenceNumber is required for room-scoped command '${cmd_type}'"
-    fi
-    require_uint "expectedSequenceNumber" "$expected_sequence"
-  fi
+  local seq_policy
+  seq_policy="$(command_sequence_policy "$cmd_type")"
+  case "$seq_policy" in
+    unknown)
+      fail "command type '${cmd_type}' is outside the public catalog (15 OpenAPI variants)"
+      ;;
+    required)
+      if [ -z "$expected_sequence" ]; then
+        fail "expectedSequenceNumber is required for room mutation '${cmd_type}'"
+      fi
+      require_uint "expectedSequenceNumber" "$expected_sequence"
+      ;;
+    prohibited)
+      if [ -n "$expected_sequence" ]; then
+        fail "expectedSequenceNumber is not allowed for '${cmd_type}'"
+      fi
+      ;;
+  esac
 
   local body
   if [ -n "$expected_sequence" ]; then
@@ -657,7 +664,7 @@ case "$command_name" in
       create)
         parse_common_flags "$@"
         [ -n "$TOKEN" ] || usage
-        submit_command_envelope "$TOKEN" "CreateRoom" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" ""
+        submit_command_envelope "$TOKEN" "CreateRoom" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
         ;;
       *)
         usage
@@ -674,13 +681,13 @@ case "$command_name" in
     [ -n "$TOKEN" ] || usage
     case "$subcommand" in
       create)
-        submit_command_envelope "$TOKEN" "CreateTournament" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" ""
+        submit_command_envelope "$TOKEN" "CreateTournament" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
         ;;
       register)
-        submit_command_envelope "$TOKEN" "RegisterPlayer" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" ""
+        submit_command_envelope "$TOKEN" "RegisterPlayer" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
         ;;
       close-registration)
-        submit_command_envelope "$TOKEN" "CloseRegistration" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" ""
+        submit_command_envelope "$TOKEN" "CloseRegistration" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
         ;;
       *)
         usage

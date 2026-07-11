@@ -1,8 +1,9 @@
 {{- /*
   BLOCKED: spectator-view binary does not implement a
   WORKER_ROLE=spectator-projection-rebuilder loop, and production Kafka consumer /
-  rebuild adapters are absent. Default/staging/production keep
+  rebuild adapters are absent. Default/staging/production/kind keep
   projectionRebuilder.enabled=false so Helm does not launch a duplicate HTTP server.
+  Kafka ingestion for room.spectator-safe.events remains PENDING.
 */ -}}
 {{- if .Values.projectionRebuilder.enabled }}
 apiVersion: apps/v1
@@ -25,7 +26,8 @@ spec:
     spec:
       containers:
         - name: projection-rebuilder
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          image: {{ include "spectator-view.image" . | quote }}
+          imagePullPolicy: {{ include "spectator-view.imagePullPolicy" . }}
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}

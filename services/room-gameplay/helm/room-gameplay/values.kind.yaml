@@ -1,0 +1,43 @@
+# Local kind overlay for Room Gameplay durable Postgres + Redis timer index.
+# Debezium Kafka + Redis sink delivery remain PENDING (shared CDC infra).
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/room-gameplay
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: room-gameplay
+  DEPLOYMENT_ENV: local
+  GATEWAY_URL: http://gateway.uno-arena.svc.cluster.local:8080
+  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
+  SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
+  RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
+  ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
+  TOURNAMENT_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080
+  GAME_INTEGRITY_URL: http://game-integrity.uno-arena.svc.cluster.local:8080
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
+  # Durable mode: no ROOM_CAPABILITY_MODE; DATABASE_URL from secret.
+  # KAFKA_BROKERS intentionally unused until Debezium CDC delivery lands.
+
+timerWorker:
+  enabled: true
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  SERVICE_CREDENTIAL: room-service-credential
+  ROOM_SERVICE_CREDENTIAL: room-service-credential
+  ROOM_TIMER_SERVICE_CREDENTIAL: room-timer-service-credential
+  GATEWAY_SERVICE_CREDENTIAL: room-to-gateway-credential
+  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
+  ROOM_IDENTITY_CREDENTIAL: room-identity-credential
+  SPECTATOR_VIEW_SERVICE_CREDENTIAL: spectator-view-internal-credential
+  RANKING_SERVICE_CREDENTIAL: ranking-internal-credential
+  ANALYTICS_SERVICE_CREDENTIAL: analytics-room-credential
+  TOURNAMENT_SERVICE_CREDENTIAL: tournament-internal-credential
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  DATABASE_URL: room-database-url

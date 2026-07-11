@@ -2,6 +2,7 @@ package domain
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 )
 
@@ -135,6 +136,55 @@ func TestAuthoritativeDeck_DrawSequentialIdempotentAndConflict(t *testing.T) {
 	if len(insuff.Facts) != 0 {
 		t.Fatal("rejection must not emit facts")
 	}
+}
+
+func TestAuthoritativeDeck_RestorePreservesDrawOutcomeLiterals(t *testing.T) {
+	seed := mustSeed(t, "restore-seed")
+	d, err := NewAuthoritativeDeck("game-restore", seed, sampleCards())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := d.Draw(DrawCommand{OperationID: "op-restore", Count: 2})
+	if !first.Accepted() {
+		t.Fatalf("draw: %+v", first)
+	}
+	snap := d.DrawIdempotencySnapshot()
+	rec, ok := snap["op-restore"]
+	if !ok || rec.FromPointer != 0 || rec.Revision != 2 || rec.Count != 2 {
+		t.Fatalf("snapshot missing original literals: %+v", rec)
+	}
+
+	restored, err := RestoreAuthoritativeDeck(d.GameID(), d.Seed(), d.ShuffledOrder(), d.DrawPointer(), snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup := restored.Draw(DrawCommand{OperationID: "op-restore", Count: 2})
+	if dup.Kind != OutcomeDuplicate {
+		t.Fatalf("dup kind: %+v", dup)
+	}
+	if dup.Revision != first.Revision {
+		t.Fatalf("revision %d vs %d", dup.Revision, first.Revision)
+	}
+	if len(dup.Facts) != 1 || dup.Facts[0].Data["fromPointer"] != "0" {
+		t.Fatalf("fromPointer fact: %+v", dup.Facts)
+	}
+	for i := range first.Cards {
+		if dup.Cards[i] != first.Cards[i] {
+			t.Fatalf("cards mismatch: %v vs %v", dup.Cards, first.Cards)
+		}
+	}
+	if mustJSONFact(t, dup.Facts[0]) != mustJSONFact(t, first.Facts[0]) {
+		t.Fatalf("fact mismatch: %+v vs %+v", dup.Facts[0], first.Facts[0])
+	}
+}
+
+func mustJSONFact(t *testing.T, f Fact) string {
+	t.Helper()
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func TestAuthoritativeDeck_ShuffledOrderDefensiveCopy(t *testing.T) {

@@ -28,6 +28,9 @@ func OpenUnoWindow(playerID PlayerID, openedAtUTC time.Time, openingSequence Seq
 func (w UnoWindow) IsOpen() bool    { return w.open }
 func (w UnoWindow) HasCalled() bool { return w.Called }
 
+// ClosedByNextTurn reports whether the window was closed because the next turn began.
+func (w UnoWindow) ClosedByNextTurn() bool { return w.closedByNextTurn }
+
 func (w UnoWindow) IsTimely(nowUTC time.Time) bool {
 	if !w.open || w.closedByNextTurn {
 		return false

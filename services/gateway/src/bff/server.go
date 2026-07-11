@@ -38,13 +38,15 @@ type Dependencies struct {
 	Hub                         *Hub
 	EdgeLimiter                 RateLimiter
 	PrincipalLimiter            RateLimiter
-	ServiceCredential           string // outbound backend credential
+	LiveFeed                    LiveFeed
+	ServiceCredential           string // legacy/compat; outbound uses per-backend HTTP client credentials
 	IdentityProducerCredential  string // inbound: Identity session-invalidation producer
 	RoomProducerCredential      string // inbound: Room player-private / spectator-safe / room-terminal
 	SpectatorProducerCredential string // inbound: Spectator projection / spectator-stream only
 	Ready                       bool
 	NotReadyReason              string
 	RedisAdapterBlocked         bool
+	RedisReady                  func(context.Context) error // pings every configured Redis client
 	UpstreamProbes              []UpstreamProbe
 	Clock                       func() time.Time
 	NewID                       func(prefix string) string
@@ -61,6 +63,7 @@ type Server struct {
 	hub                         *Hub
 	edgeLimiter                 RateLimiter
 	principalLimiter            RateLimiter
+	liveFeed                    LiveFeed
 	serviceCredential           string
 	identityProducerCredential  string
 	roomProducerCredential      string
@@ -68,6 +71,7 @@ type Server struct {
 	ready                       bool
 	notReadyReason              string
 	redisAdapterBlocked         bool
+	redisReady                  func(context.Context) error
 	upstreamProbes              []UpstreamProbe
 	clock                       func() time.Time
 	newID                       func(prefix string) string
@@ -109,6 +113,9 @@ func NewServer(deps Dependencies) *Server {
 	if deps.Spectator == nil {
 		deps.Spectator = ClosedSpectator{}
 	}
+	if deps.LiveFeed == nil {
+		deps.LiveFeed = NewHubLiveFeed(deps.Hub)
+	}
 	if deps.NotReadyReason == "" && !deps.Ready {
 		deps.NotReadyReason = "required backends not ready"
 	}
@@ -122,6 +129,7 @@ func NewServer(deps Dependencies) *Server {
 		hub:                         deps.Hub,
 		edgeLimiter:                 deps.EdgeLimiter,
 		principalLimiter:            deps.PrincipalLimiter,
+		liveFeed:                    deps.LiveFeed,
 		serviceCredential:           deps.ServiceCredential,
 		identityProducerCredential:  deps.IdentityProducerCredential,
 		roomProducerCredential:      deps.RoomProducerCredential,
@@ -129,6 +137,7 @@ func NewServer(deps Dependencies) *Server {
 		ready:                       deps.Ready,
 		notReadyReason:              deps.NotReadyReason,
 		redisAdapterBlocked:         deps.RedisAdapterBlocked,
+		redisReady:                  deps.RedisReady,
 		upstreamProbes:              append([]UpstreamProbe(nil), deps.UpstreamProbes...),
 		clock:                       deps.Clock,
 		newID:                       deps.NewID,
@@ -229,6 +238,13 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, r, http.StatusServiceUnavailable, code, reason, "")
 		return
 	}
+	if s.redisReady != nil {
+		if err := s.redisReady(r.Context()); err != nil {
+			s.writeErr(w, r, http.StatusServiceUnavailable, "redis_unavailable",
+				"redis readiness ping failed: "+err.Error(), "")
+			return
+		}
+	}
 	for _, probe := range s.upstreamProbes {
 		do := probe.Do
 		if do == nil {
@@ -299,7 +315,12 @@ func (s *Server) authorizeProducer(r *http.Request, expected string) bool {
 }
 
 func (s *Server) allowEdge(w http.ResponseWriter, r *http.Request) bool {
-	ok, retry := s.edgeLimiter.Allow(r.Context(), "edge:"+clientIP(r))
+	ok, retry, err := s.edgeLimiter.Allow(r.Context(), "edge:"+clientIP(r))
+	if err != nil {
+		s.writeErr(w, r, http.StatusServiceUnavailable, "rate_limiter_unavailable",
+			"distributed rate limiter unavailable", "")
+		return false
+	}
 	if ok {
 		return true
 	}

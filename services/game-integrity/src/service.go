@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"unoarena/services/game-integrity/domain"
@@ -44,7 +46,7 @@ type AppendResult struct {
 }
 
 // Append applies expected-revision append with eventId idempotency on the room log.
-func (s *Service) Append(req AppendRequest) (AppendResult, *domain.Rejection, error) {
+func (s *Service) Append(ctx context.Context, req AppendRequest) (AppendResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return AppendResult{}, nil, errors.New("repository unwired")
 	}
@@ -58,7 +60,7 @@ func (s *Service) Append(req AppendRequest) (AppendResult, *domain.Rejection, er
 		result AppendResult
 		rej    *domain.Rejection
 	)
-	err := s.repo.WithRoom(domain.RoomID(req.RoomID), func(st *RoomState) error {
+	err := s.repo.WithRoom(ctx, domain.RoomID(req.RoomID), func(st *RoomState) error {
 		out := st.Log.Append(domain.AppendCommand{
 			EventID:          domain.EventID(req.EventID),
 			ExpectedRevision: domain.Revision(req.ExpectedRevision),
@@ -96,7 +98,7 @@ type InitializeDeckResult struct {
 
 // InitializeDeck creates a deterministic authoritative deck with an internal secure seed.
 // Re-initialize of an existing deck is a conflicting duplicate rejection.
-func (s *Service) InitializeDeck(req InitializeDeckRequest) (InitializeDeckResult, *domain.Rejection, error) {
+func (s *Service) InitializeDeck(ctx context.Context, req InitializeDeckRequest) (InitializeDeckResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return InitializeDeckResult{}, nil, errors.New("repository unwired")
 	}
@@ -109,7 +111,7 @@ func (s *Service) InitializeDeck(req InitializeDeckRequest) (InitializeDeckResul
 		result InitializeDeckResult
 		rej    *domain.Rejection
 	)
-	err := s.repo.WithDeck(domain.RoomID(req.RoomID), domain.GameID(req.GameID), true, func(st *DeckState) error {
+	err := s.repo.WithDeck(ctx, domain.RoomID(req.RoomID), domain.GameID(req.GameID), true, func(st *DeckState) error {
 		if st.Deck != nil {
 			rej = &domain.Rejection{
 				Code:    domain.RejectConflictingDuplicate,
@@ -172,7 +174,7 @@ type ReservationResult struct {
 // ReserveDeal peeks deal material without advancing the draw pointer.
 // Reservation IDs are deterministic across room+game+operation+shape.
 // At most one outstanding unconfirmed reservation is allowed per deck.
-func (s *Service) ReserveDeal(req ReserveDealRequest) (ReservationResult, *domain.Rejection, error) {
+func (s *Service) ReserveDeal(ctx context.Context, req ReserveDealRequest) (ReservationResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return ReservationResult{}, nil, errors.New("repository unwired")
 	}
@@ -181,14 +183,18 @@ func (s *Service) ReserveDeal(req ReserveDealRequest) (ReservationResult, *domai
 			Code: domain.RejectInvalidIdentity, Message: "deal requires operationId",
 		}, nil
 	}
-	if len(req.Seats) < 2 {
-		return ReservationResult{}, &domain.Rejection{
-			Code: domain.RejectInvalidCommand, Message: "deal requires at least 2 seats",
-		}, nil
+	if rej := validateDealSeats(req.Seats); rej != nil {
+		return ReservationResult{}, rej, nil
 	}
 	perHand := req.CardsPerHand
 	if perHand <= 0 {
 		perHand = defaultCardsPerHand
+	}
+	need, ok := checkedDealNeed(len(req.Seats), perHand)
+	if !ok {
+		return ReservationResult{}, &domain.Rejection{
+			Code: domain.RejectInvalidCommand, Message: "deal cardCount overflow",
+		}, nil
 	}
 	shape := dealShape(req.Seats, perHand)
 	opID := domain.DrawOperationID(req.OperationID)
@@ -198,9 +204,23 @@ func (s *Service) ReserveDeal(req ReserveDealRequest) (ReservationResult, *domai
 		result ReservationResult
 		rej    *domain.Rejection
 	)
-	err := s.repo.WithDeck(domain.RoomID(req.RoomID), domain.GameID(req.GameID), false, func(st *DeckState) error {
+	err := s.repo.WithDeck(ctx, domain.RoomID(req.RoomID), domain.GameID(req.GameID), false, func(st *DeckState) error {
 		if st.Deck == nil {
 			rej = &domain.Rejection{Code: domain.RejectInvalidCommand, Message: "deck not initialized"}
+			return nil
+		}
+		if _, cancelled := st.Cancelled[resID]; cancelled {
+			rej = &domain.Rejection{
+				Code:    domain.RejectConflictingDuplicate,
+				Message: "reservationId was cancelled and cannot be reused",
+			}
+			return nil
+		}
+		if _, cancelled := st.CancelledOps[opID]; cancelled {
+			rej = &domain.Rejection{
+				Code:    domain.RejectConflictingDuplicate,
+				Message: "operationId was cancelled and cannot be reused",
+			}
 			return nil
 		}
 		if prior, ok := st.Confirmed[opID]; ok {
@@ -238,7 +258,6 @@ func (s *Service) ReserveDeal(req ReserveDealRequest) (ReservationResult, *domai
 			return nil
 		}
 
-		need := len(req.Seats)*perHand + 1
 		raw, peekRej := st.Deck.Peek(0, need)
 		if peekRej != nil {
 			rej = peekRej
@@ -287,7 +306,7 @@ func (s *Service) ReserveDeal(req ReserveDealRequest) (ReservationResult, *domai
 // ReserveDraw peeks draw cards without advancing the draw pointer.
 // Reservation IDs are deterministic across room+game+operation+shape.
 // At most one outstanding unconfirmed reservation is allowed per deck.
-func (s *Service) ReserveDraw(req ReserveDrawRequest) (ReservationResult, *domain.Rejection, error) {
+func (s *Service) ReserveDraw(ctx context.Context, req ReserveDrawRequest) (ReservationResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return ReservationResult{}, nil, errors.New("repository unwired")
 	}
@@ -309,9 +328,23 @@ func (s *Service) ReserveDraw(req ReserveDrawRequest) (ReservationResult, *domai
 		result ReservationResult
 		rej    *domain.Rejection
 	)
-	err := s.repo.WithDeck(domain.RoomID(req.RoomID), domain.GameID(req.GameID), false, func(st *DeckState) error {
+	err := s.repo.WithDeck(ctx, domain.RoomID(req.RoomID), domain.GameID(req.GameID), false, func(st *DeckState) error {
 		if st.Deck == nil {
 			rej = &domain.Rejection{Code: domain.RejectInvalidCommand, Message: "deck not initialized"}
+			return nil
+		}
+		if _, cancelled := st.Cancelled[resID]; cancelled {
+			rej = &domain.Rejection{
+				Code:    domain.RejectConflictingDuplicate,
+				Message: "reservationId was cancelled and cannot be reused",
+			}
+			return nil
+		}
+		if _, cancelled := st.CancelledOps[opID]; cancelled {
+			rej = &domain.Rejection{
+				Code:    domain.RejectConflictingDuplicate,
+				Message: "operationId was cancelled and cannot be reused",
+			}
 			return nil
 		}
 		if prior, ok := st.Confirmed[opID]; ok {
@@ -378,7 +411,7 @@ func (s *Service) ReserveDraw(req ReserveDrawRequest) (ReservationResult, *domai
 
 // ConfirmReservation atomically advances the deck pointer and records the operation.
 // Confirm of an already-confirmed original reservation ID is idempotent (lost-response safe).
-func (s *Service) ConfirmReservation(roomID, gameID, reservationID string) (domain.OutcomeKind, *domain.Rejection, error) {
+func (s *Service) ConfirmReservation(ctx context.Context, roomID, gameID, reservationID string) (domain.OutcomeKind, *domain.Rejection, error) {
 	if s.repo == nil {
 		return "", nil, errors.New("repository unwired")
 	}
@@ -386,9 +419,16 @@ func (s *Service) ConfirmReservation(roomID, gameID, reservationID string) (doma
 		kind domain.OutcomeKind
 		rej  *domain.Rejection
 	)
-	err := s.repo.WithDeck(domain.RoomID(roomID), domain.GameID(gameID), false, func(st *DeckState) error {
+	err := s.repo.WithDeck(ctx, domain.RoomID(roomID), domain.GameID(gameID), false, func(st *DeckState) error {
 		if st.Deck == nil {
 			rej = &domain.Rejection{Code: domain.RejectInvalidCommand, Message: "deck not initialized"}
+			return nil
+		}
+		if _, cancelled := st.Cancelled[reservationID]; cancelled {
+			rej = &domain.Rejection{
+				Code:    domain.RejectConflictingDuplicate,
+				Message: "reservationId was cancelled",
+			}
 			return nil
 		}
 		if _, ok := st.ConfirmedByID[reservationID]; ok {
@@ -428,28 +468,35 @@ func (s *Service) ConfirmReservation(roomID, gameID, reservationID string) (doma
 
 // CancelReservation releases a pending reservation without consuming cards.
 // Cancellation does not shift or reinterpret any later returned material.
-func (s *Service) CancelReservation(roomID, gameID, reservationID string) *domain.Rejection {
+func (s *Service) CancelReservation(ctx context.Context, roomID, gameID, reservationID string) (*domain.Rejection, error) {
 	if s.repo == nil {
-		return &domain.Rejection{Code: domain.RejectInvalidCommand, Message: "repository unwired"}
+		return &domain.Rejection{Code: domain.RejectInvalidCommand, Message: "repository unwired"}, nil
 	}
 	var rej *domain.Rejection
-	err := s.repo.WithDeck(domain.RoomID(roomID), domain.GameID(gameID), false, func(st *DeckState) error {
+	err := s.repo.WithDeck(ctx, domain.RoomID(roomID), domain.GameID(gameID), false, func(st *DeckState) error {
+		ensureCancelledMaps(st)
+		if _, cancelled := st.Cancelled[reservationID]; cancelled {
+			// Repeated cancel of a tombstoned reservation is an idempotent no-op.
+			return nil
+		}
 		pending, ok := st.Pending[reservationID]
 		if !ok {
 			// Cancel of unknown/already-released is idempotent success.
 			return nil
 		}
+		st.Cancelled[reservationID] = struct{}{}
+		st.CancelledOps[pending.OperationID] = struct{}{}
 		delete(st.Pending, reservationID)
 		delete(st.ByOp, pending.OperationID)
 		return nil
 	})
 	if errors.Is(err, ErrStreamNotFound) {
-		return nil // nothing to cancel
+		return nil, nil // nothing to cancel
 	}
 	if err != nil {
-		return &domain.Rejection{Code: domain.RejectInvalidCommand, Message: err.Error()}
+		return nil, err
 	}
-	return rej
+	return rej, nil
 }
 
 // ResolveReservation looks up room/game for a reservation id across decks (confirm/cancel without gameId).
@@ -476,7 +523,7 @@ type ReplayEntry struct {
 }
 
 // Replay returns room log entries from the given offset.
-func (s *Service) Replay(roomID string, from uint64) (ReplayResult, *domain.Rejection, error) {
+func (s *Service) Replay(ctx context.Context, roomID string, from uint64) (ReplayResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return ReplayResult{}, nil, errors.New("repository unwired")
 	}
@@ -484,7 +531,7 @@ func (s *Service) Replay(roomID string, from uint64) (ReplayResult, *domain.Reje
 		result ReplayResult
 		rej    *domain.Rejection
 	)
-	err := s.repo.WithExistingRoom(domain.RoomID(roomID), func(st *RoomState) error {
+	err := s.repo.WithExistingRoom(ctx, domain.RoomID(roomID), func(st *RoomState) error {
 		entries, r := st.Log.ReplayFrom(domain.LogOffset(from))
 		if r != nil {
 			rej = r
@@ -540,12 +587,12 @@ type ExportResult struct {
 
 // Export returns the full room log export, optionally scoped with deck audit for gameID.
 // includeSeed exposes protected seed material (operator policy).
-func (s *Service) Export(roomID, gameID string, includeSeed bool) (ExportResult, *domain.Rejection, error) {
+func (s *Service) Export(ctx context.Context, roomID, gameID string, includeSeed bool) (ExportResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return ExportResult{}, nil, errors.New("repository unwired")
 	}
 	var result ExportResult
-	err := s.repo.WithExistingRoom(domain.RoomID(roomID), func(st *RoomState) error {
+	err := s.repo.WithExistingRoom(ctx, domain.RoomID(roomID), func(st *RoomState) error {
 		exp := st.Log.ExportStateInput()
 		result = ExportResult{
 			RoomID:   string(exp.RoomID),
@@ -564,10 +611,12 @@ func (s *Service) Export(roomID, gameID string, includeSeed bool) (ExportResult,
 		return ExportResult{}, nil, err
 	}
 	if gameID != "" {
-		_ = s.repo.WithExistingDeck(domain.RoomID(roomID), domain.GameID(gameID), func(st *DeckState) error {
+		deckFound := false
+		err = s.repo.WithExistingDeck(ctx, domain.RoomID(roomID), domain.GameID(gameID), func(st *DeckState) error {
 			if st.Deck == nil {
-				return nil
+				return ErrStreamNotFound
 			}
+			deckFound = true
 			audit := &DeckAudit{
 				GameID:          gameID,
 				SeedCommitment:  st.SeedCommit,
@@ -594,27 +643,81 @@ func (s *Service) Export(roomID, gameID string, includeSeed bool) (ExportResult,
 			result.Deck = audit
 			return nil
 		})
+		if errors.Is(err, ErrStreamNotFound) || (!deckFound && err == nil) {
+			return ExportResult{}, &domain.Rejection{
+				Code: domain.RejectInvalidCommand, Message: "deck not found for gameId",
+			}, nil
+		}
+		if err != nil {
+			return ExportResult{}, nil, err
+		}
 	}
 	return result, nil, nil
 }
 
 // ExportByGameID resolves room via repository and exports.
-func (s *Service) ExportByGameID(gameID string, includeSeed bool) (ExportResult, *domain.Rejection, error) {
+func (s *Service) ExportByGameID(ctx context.Context, gameID string, includeSeed bool) (ExportResult, *domain.Rejection, error) {
 	if s.repo == nil {
 		return ExportResult{}, nil, errors.New("repository unwired")
 	}
-	roomID, ok := s.repo.FindByGameID(domain.GameID(gameID))
+	roomID, ok, err := s.repo.FindByGameID(ctx, domain.GameID(gameID))
+	if err != nil {
+		return ExportResult{}, nil, err
+	}
 	if !ok {
 		return ExportResult{}, &domain.Rejection{
 			Code: domain.RejectInvalidCommand, Message: "stream not found for gameId",
 		}, nil
 	}
-	return s.Export(string(roomID), gameID, includeSeed)
+	return s.Export(ctx, string(roomID), gameID, includeSeed)
+}
+
+func ensureCancelledMaps(st *DeckState) {
+	if st.Cancelled == nil {
+		st.Cancelled = map[string]struct{}{}
+	}
+	if st.CancelledOps == nil {
+		st.CancelledOps = map[domain.DrawOperationID]struct{}{}
+	}
 }
 
 func dealShape(seats []string, perHand int) string {
-	cp := append([]string(nil), seats...)
-	return fmt.Sprintf("deal|%s|%d", strings.Join(cp, ","), perHand)
+	// Injective encoding: length-prefix each seat so commas inside seat IDs cannot collide.
+	var b strings.Builder
+	b.WriteString("deal|")
+	b.WriteString(strconv.Itoa(perHand))
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(len(seats)))
+	for _, seat := range seats {
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(len(seat)))
+		b.WriteByte(':')
+		b.WriteString(seat)
+	}
+	return b.String()
+}
+
+func validateDealSeats(seats []string) *domain.Rejection {
+	if len(seats) < 2 {
+		return &domain.Rejection{
+			Code: domain.RejectInvalidCommand, Message: "deal requires at least 2 seats",
+		}
+	}
+	seen := make(map[string]struct{}, len(seats))
+	for _, seat := range seats {
+		if strings.TrimSpace(seat) == "" {
+			return &domain.Rejection{
+				Code: domain.RejectInvalidCommand, Message: "deal seats must be nonblank",
+			}
+		}
+		if _, ok := seen[seat]; ok {
+			return &domain.Rejection{
+				Code: domain.RejectInvalidCommand, Message: "deal seats must be unique",
+			}
+		}
+		seen[seat] = struct{}{}
+	}
+	return nil
 }
 
 func drawShape(count int) string {

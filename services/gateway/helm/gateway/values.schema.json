@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Gateway Helm values",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "boolean",
+      "description": "When true, allows image.tag fallback if digest is empty. Absent/false requires digest outside kind."
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string" }
+      },
+      "required": ["repository"],
+      "anyOf": [
+        { "properties": { "digest": { "type": "string", "minLength": 1 } }, "required": ["digest"] },
+        { "properties": { "tag": { "type": "string", "minLength": 1 } }, "required": ["tag"] }
+      ]
+    }
+  }
+}

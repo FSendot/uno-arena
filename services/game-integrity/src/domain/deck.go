@@ -1,6 +1,9 @@
 package domain
 
-import "errors"
+import (
+	"errors"
+	"sort"
+)
 
 // AuthoritativeDeck owns the immutable seed, shuffled order, and draw pointer
 // for one game. Pure stdlib; not goroutine-safe — callers serialize access.
@@ -14,8 +17,17 @@ type AuthoritativeDeck struct {
 }
 
 type drawRecord struct {
-	count   int
-	outcome CommandOutcome
+	count       int
+	fromPointer int
+	outcome     CommandOutcome
+}
+
+// DrawRestore is one confirmed draw operation reconstructed from durable state.
+type DrawRestore struct {
+	Count       int
+	Cards       []Card
+	FromPointer int
+	Revision    Revision
 }
 
 // NewAuthoritativeDeck creates one deck for gameID, shuffling cards with seed.
@@ -38,6 +50,136 @@ func NewAuthoritativeDeck(gameID GameID, seed DeckSeed, cards []Card) (*Authorit
 		pointer: 0,
 		draws:   map[DrawOperationID]drawRecord{},
 	}, nil
+}
+
+// RestoreAuthoritativeDeck rebuilds a deck from durable snapshot material without reshuffling.
+// Each restored draw must match the deterministic shuffled order at fromPointer/count/cards,
+// and the pointer must equal the contiguous end of confirmed draws.
+func RestoreAuthoritativeDeck(gameID GameID, seed DeckSeed, order []Card, pointer int, draws map[DrawOperationID]DrawRestore) (*AuthoritativeDeck, error) {
+	if !gameID.Valid() {
+		return nil, errors.New("gameId required")
+	}
+	if !seed.Valid() {
+		return nil, errors.New("deck seed required")
+	}
+	if len(order) == 0 {
+		return nil, errors.New("deck requires at least one card")
+	}
+	if pointer < 0 || pointer > len(order) {
+		return nil, errors.New("deck pointer out of range")
+	}
+	if draws == nil {
+		return nil, errors.New("draws map required")
+	}
+	d := &AuthoritativeDeck{
+		gameID:  gameID,
+		seed:    seed,
+		order:   copyCards(order),
+		pointer: 0,
+		draws:   map[DrawOperationID]drawRecord{},
+	}
+	type span struct {
+		op   DrawOperationID
+		from int
+		to   int
+	}
+	spans := make([]span, 0, len(draws))
+	for opID, rec := range draws {
+		if !opID.Valid() {
+			return nil, errors.New("draw restore requires operationId")
+		}
+		if rec.Count <= 0 || len(rec.Cards) != rec.Count {
+			return nil, errors.New("draw restore count/cards mismatch")
+		}
+		if rec.FromPointer < 0 || rec.FromPointer+rec.Count > len(order) {
+			return nil, errors.New("draw restore range exceeds deck")
+		}
+		want := order[rec.FromPointer : rec.FromPointer+rec.Count]
+		if !cardsEqual(want, rec.Cards) {
+			return nil, errors.New("draw restore cards mismatch shuffled order")
+		}
+		rev := rec.Revision
+		if rev == 0 {
+			rev = Revision(rec.FromPointer + rec.Count)
+		}
+		if int64(rev) != int64(rec.FromPointer+rec.Count) {
+			return nil, errors.New("draw restore revision mismatch")
+		}
+		fact := cardsDrawnFact(opID, rec.FromPointer, rec.Cards)
+		d.draws[opID] = drawRecord{
+			count:       rec.Count,
+			fromPointer: rec.FromPointer,
+			outcome:     acceptedDraw([]Fact{fact}, rec.Cards, rev),
+		}
+		spans = append(spans, span{op: opID, from: rec.FromPointer, to: rec.FromPointer + rec.Count})
+	}
+	// Contiguous coverage from 0 without gaps/overlaps.
+	sort.Slice(spans, func(i, j int) bool { return spans[i].from < spans[j].from })
+	cursor := 0
+	for _, s := range spans {
+		if s.from != cursor {
+			return nil, errors.New("draw restore pointer coverage not contiguous from zero")
+		}
+		cursor = s.to
+	}
+	if pointer != cursor {
+		return nil, errors.New("deck pointer must equal contiguous confirmed draw end")
+	}
+	d.pointer = pointer
+	return d, nil
+}
+
+// EqualOrder reports whether the shuffled order matches other byte-for-byte.
+func (d *AuthoritativeDeck) EqualOrder(other []Card) bool {
+	if len(d.order) != len(other) {
+		return false
+	}
+	for i := range d.order {
+		if d.order[i] != other[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// DrawIdempotencySnapshot returns a defensive copy of recorded draw outcomes for persistence.
+func (d *AuthoritativeDeck) DrawIdempotencySnapshot() map[DrawOperationID]DrawRestore {
+	out := make(map[DrawOperationID]DrawRestore, len(d.draws))
+	for id, rec := range d.draws {
+		out[id] = DrawRestore{
+			Count:       rec.count,
+			Cards:       copyCards(rec.outcome.Cards),
+			FromPointer: rec.fromPointer,
+			Revision:    rec.outcome.Revision,
+		}
+	}
+	return out
+}
+
+// HasSameDrawIdempotency reports whether draw records match the provided snapshot.
+func (d *AuthoritativeDeck) HasSameDrawIdempotency(other map[DrawOperationID]DrawRestore) bool {
+	if len(d.draws) != len(other) {
+		return false
+	}
+	for id, rec := range d.draws {
+		o, ok := other[id]
+		if !ok || o.Count != rec.count || !cardsEqual(o.Cards, rec.outcome.Cards) {
+			return false
+		}
+	}
+	return true
+}
+
+func cardsEqual(a, b []Card) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *AuthoritativeDeck) GameID() GameID { return d.gameID }
@@ -121,8 +263,9 @@ func (d *AuthoritativeDeck) Draw(cmd DrawCommand) CommandOutcome {
 	rev := Revision(d.pointer)
 	// Store and return independent defensive copies.
 	d.draws[cmd.OperationID] = drawRecord{
-		count:   cmd.Count,
-		outcome: acceptedDraw([]Fact{fact}, drawn, rev),
+		count:       cmd.Count,
+		fromPointer: before,
+		outcome:     acceptedDraw([]Fact{fact}, drawn, rev),
 	}
 	return acceptedDraw([]Fact{fact}, drawn, rev)
 }

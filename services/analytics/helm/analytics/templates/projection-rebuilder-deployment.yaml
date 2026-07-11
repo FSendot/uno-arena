@@ -25,7 +25,8 @@ spec:
     spec:
       containers:
         - name: projection-rebuilder
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          image: {{ include "analytics.image" . | quote }}
+          imagePullPolicy: {{ include "analytics.imagePullPolicy" . }}
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}

@@ -2,6 +2,7 @@
 -- Physical ownership: this database only. No cross-context FKs.
 -- Casual Elo and tournament-placement rating are separate streams (docs/03, docs/04).
 -- Invariants: docs/07 idempotency keys; architecture/04 rating history + rebuildable cache.
+-- Append-only outbox for Debezium CDC (ADR-0016/0026): no published_at / app polling.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
@@ -92,10 +93,9 @@ CREATE TABLE IF NOT EXISTS processed_casual_elo_keys (
 );
 
 COMMENT ON TABLE processed_casual_elo_keys IS
-    'ApplyCasualEloUpdate idempotency. Same (playerId, gameId) cannot apply twice.';
-
-CREATE UNIQUE INDEX IF NOT EXISTS processed_casual_elo_event_uidx
-    ON processed_casual_elo_keys (upstream_event_id);
+    'ApplyCasualEloUpdate idempotency. Same (playerId, gameId) cannot apply twice. '
+    'One GameCompleted event may insert multiple participant rows sharing upstream_event_id; '
+    'event-level dedupe is processed_upstream_events only.';
 
 CREATE TABLE IF NOT EXISTS processed_tournament_placement_keys (
     player_id TEXT NOT NULL,
@@ -107,10 +107,8 @@ CREATE TABLE IF NOT EXISTS processed_tournament_placement_keys (
 );
 
 COMMENT ON TABLE processed_tournament_placement_keys IS
-    'ApplyTournamentPlacementUpdate idempotency by (playerId, tournamentId, placementEventId).';
-
-CREATE UNIQUE INDEX IF NOT EXISTS processed_tournament_placement_event_uidx
-    ON processed_tournament_placement_keys (upstream_event_id);
+    'ApplyTournamentPlacementUpdate idempotency by (playerId, tournamentId, placementEventId). '
+    'Event-level dedupe is processed_upstream_events only.';
 
 CREATE TABLE IF NOT EXISTS processed_upstream_events (
     event_id TEXT PRIMARY KEY,
@@ -120,7 +118,19 @@ CREATE TABLE IF NOT EXISTS processed_upstream_events (
 );
 
 COMMENT ON TABLE processed_upstream_events IS
-    'Generic event-id dedupe for ranking consumers; complements business-key tables.';
+    'Single event-id dedupe for ranking consumers; complements business-key tables.';
+
+-- Stable HTTP/command responses for exact eventId / gameId / placement replay.
+CREATE TABLE IF NOT EXISTS ranking_command_responses (
+    dedupe_kind TEXT NOT NULL CHECK (dedupe_kind IN ('event_id', 'game_id', 'tournament_placement')),
+    dedupe_key TEXT NOT NULL,
+    response_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (dedupe_kind, dedupe_key)
+);
+
+COMMENT ON TABLE ranking_command_responses IS
+    'Byte-stable accepted responses for eventId, gameId, and tournament placement replay.';
 
 -- ---------------------------------------------------------------------------
 -- Leaderboard snapshot metadata (authoritative generation record; Redis is cache).
@@ -145,7 +155,8 @@ CREATE INDEX IF NOT EXISTS leaderboard_snapshots_type_generated_idx
     ON leaderboard_snapshots (board_type, generated_at DESC);
 
 -- ---------------------------------------------------------------------------
--- Outbox for PlayerRatingUpdated, TournamentPlacementRatingUpdated, snapshots.
+-- Append-only outbox for PlayerRatingUpdated (casual + tournament placement), snapshots.
+-- Debezium CDC publishes; app never polls or marks published_at (ADR-0016/0026).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
@@ -157,16 +168,14 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ,
     UNIQUE (event_id)
 );
 
 COMMENT ON TABLE outbox_events IS
-    'Reliable publication of public rating facts for Analytics and leaderboard consumers.';
+    'Append-only Debezium CDC input for public rating facts. No published_at / app polling.';
 
-CREATE INDEX IF NOT EXISTS outbox_events_unpublished_idx
-    ON outbox_events (created_at)
-    WHERE published_at IS NULL;
+CREATE INDEX IF NOT EXISTS outbox_events_player_idx
+    ON outbox_events (player_id, outbox_id);
 
 INSERT INTO schema_migrations (version) VALUES ('001_init')
 ON CONFLICT (version) DO NOTHING;

@@ -1,0 +1,29 @@
+# Local kind overlay for Tournament Orchestration durable Postgres.
+# Debezium CDC delivery and Redis bracket projection remain PENDING.
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/tournament-orchestration
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: tournament-orchestration
+  DEPLOYMENT_ENV: local
+  ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+  # Durable mode: no TOURNAMENT_CAPABILITY_MODE; DATABASE_URL from secret.
+  # REDIS_URL / KAFKA_BROKERS intentionally omitted until those slices.
+  # Provisioning worker stays disabled; use synchronous ProcessProvisioningBatch.
+
+provisioningWorker:
+  enabled: false
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  TOURNAMENT_INTERNAL_CREDENTIAL: tournament-internal-credential
+  SERVICE_CREDENTIAL: tournament-internal-credential
+  ROOM_SERVICE_CREDENTIAL: room-service-credential
+  DATABASE_URL: tournament-database-url

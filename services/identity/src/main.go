@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"unoarena/services/identity/domain"
+	"unoarena/services/identity/oidc"
+	"unoarena/services/identity/store"
 )
 
 // internalCredentialHeader authenticates service-to-service callers of internal routes.
@@ -24,14 +26,44 @@ type Server struct {
 	svc                *domain.Service
 	internalCredential string
 	invalidationReady  bool
+	durableReady       func(context.Context) error
+	allowPasswordLogin bool
+	allowRegister      bool
+	oidc               *oidc.Validator
+	mode               string
+	readyReason        string
 }
 
+// NewServer builds a capability-mode HTTP server (tests / checkpoint defaults).
 func NewServer(svc *domain.Service, internalCredential string, invalidationReady bool) *Server {
-	return &Server{
+	return serverFromRuntime(identityRuntime{
 		svc:                svc,
-		internalCredential: internalCredential,
-		invalidationReady:  invalidationReady,
+		mode:               "capability",
+		ready:              invalidationReady,
+		allowPasswordLogin: true,
+		allowRegister:      true,
+	}, internalCredential)
+}
+
+func serverFromRuntime(rt identityRuntime, cred string) *Server {
+	s := &Server{
+		svc:                rt.svc,
+		internalCredential: cred,
+		invalidationReady:  rt.ready,
+		allowPasswordLogin: rt.allowPasswordLogin,
+		allowRegister:      rt.allowRegister,
+		oidc:               rt.oidc,
+		mode:               rt.mode,
+		readyReason:        rt.readyReason,
 	}
+	if rt.mode == "durable" && rt.pool != nil {
+		exp := rt.schemaExp
+		pool := rt.pool
+		s.durableReady = func(ctx context.Context) error {
+			return store.VerifySchema(ctx, pool.Pool, exp)
+		}
+	}
+	return s
 }
 
 func (s *Server) routes() http.Handler {
@@ -39,12 +71,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/health", s.healthHandler)
 	mux.HandleFunc("/ready", s.readyHandler)
 
-	// BFF-aligned auth surface (offline Identity exposes the proxied shapes).
 	mux.HandleFunc("/v1/auth/register", s.registerHandler)
 	mux.HandleFunc("/v1/auth/login", s.loginHandler)
 	mux.HandleFunc("/v1/auth/whoami", s.whoamiHandler)
+	mux.HandleFunc("/v1/auth/oidc/token", s.oidcPublicTokenHandler)
+	mux.HandleFunc("/internal/v1/auth/oidc/exchange", s.oidcInternalExchangeHandler)
 
-	// Checkpoint-era aliases (same handlers / response shapes where applicable).
 	mux.HandleFunc("/register", s.registerHandler)
 	mux.HandleFunc("/login", s.loginHandler)
 	mux.HandleFunc("/whoami", s.whoamiHandler)
@@ -54,8 +86,15 @@ func (s *Server) routes() http.Handler {
 	return mux
 }
 
+func (s *Server) requireService(w http.ResponseWriter, r *http.Request) bool {
+	if s.svc != nil {
+		return true
+	}
+	writeError(w, r, http.StatusServiceUnavailable, "unavailable", "identity unavailable")
+	return false
+}
+
 func (s *Server) authorizeInternal(r *http.Request) bool {
-	// Fail-closed: empty configured credential rejects all internal callers.
 	if s.internalCredential == "" {
 		return false
 	}
@@ -83,12 +122,29 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	// Fail-closed: require configured invalidation transport (IDENTITY_INVALIDATION_URL + credential).
+	if s.durableReady != nil {
+		if err := s.durableReady(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status":  "not_ready",
+				"service": "identity",
+				"reason":  "schema_or_db",
+			})
+			logRequest(r, "/ready")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready", "service": "identity"})
+		logRequest(r, "/ready")
+		return
+	}
 	if !s.invalidationReady {
+		reason := s.readyReason
+		if reason == "" {
+			reason = "invalidation_transport_unconfigured"
+		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status":  "not_ready",
 			"service": "identity",
-			"reason":  "invalidation_transport_unconfigured",
+			"reason":  reason,
 		})
 		logRequest(r, "/ready")
 		return
@@ -102,6 +158,13 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	if !s.requireService(w, r) {
+		return
+	}
+	if !s.allowRegister {
+		writeError(w, r, http.StatusForbidden, "register_disabled", "registration disabled outside capability/test provisioning")
+		return
+	}
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -110,16 +173,13 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json body")
 		return
 	}
-	player, err := s.svc.Register(body.Username, body.Password)
+	player, err := s.svc.Register(r.Context(), body.Username, body.Password)
 	if err != nil {
-		switch {
-		case errors.Is(err, domain.ErrInvalidInput):
-			writeError(w, r, http.StatusBadRequest, "bad_request", "username and password required")
-		case errors.Is(err, domain.ErrUsernameTaken):
-			writeError(w, r, http.StatusBadRequest, "username_taken", "username already registered")
-		default:
-			writeError(w, r, http.StatusInternalServerError, "internal_error", "register failed")
+		status, code, msg := mapDomainHTTP(err)
+		if status == 500 {
+			msg = "register failed"
 		}
+		writeError(w, r, status, code, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -134,6 +194,13 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	if !s.requireService(w, r) {
+		return
+	}
+	if !s.allowPasswordLogin {
+		writeError(w, r, http.StatusForbidden, "password_login_disabled", "password login disabled; use OIDC token exchange")
+		return
+	}
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -142,13 +209,96 @@ func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json body")
 		return
 	}
-	res, err := s.svc.Login(body.Username, body.Password)
-	if err != nil {
-		if errors.Is(err, domain.ErrInvalidCredentials) {
-			writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid credentials")
+
+	if s.oidc != nil && envTruthy("IDENTITY_OIDC_DIRECT_GRANT") {
+		idToken, err := s.oidc.DirectGrant(r.Context(), body.Username, body.Password)
+		if err != nil {
+			status, code, msg := mapDomainHTTP(err)
+			if status == http.StatusUnauthorized {
+				msg = "invalid credentials"
+			}
+			writeError(w, r, status, code, msg)
 			return
 		}
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "login failed")
+		s.completeOIDCLogin(w, r, idToken, "")
+		return
+	}
+
+	res, err := s.svc.Login(r.Context(), body.Username, body.Password)
+	if err != nil {
+		status, code, msg := mapDomainHTTP(err)
+		if status == 500 {
+			msg = "login failed"
+		}
+		writeError(w, r, status, code, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"sessionId": res.SessionID.String(),
+		"playerId":  res.PlayerID.String(),
+		"token":     res.Token,
+	})
+	logRequest(r, r.URL.Path)
+}
+
+func (s *Server) oidcPublicTokenHandler(w http.ResponseWriter, r *http.Request) {
+	s.oidcTokenHandler(w, r, false)
+}
+
+func (s *Server) oidcInternalExchangeHandler(w http.ResponseWriter, r *http.Request) {
+	s.oidcTokenHandler(w, r, true)
+}
+
+func (s *Server) oidcTokenHandler(w http.ResponseWriter, r *http.Request, requireCredential bool) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	if requireCredential && !s.authorizeInternal(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
+		return
+	}
+	if !s.requireService(w, r) {
+		return
+	}
+	if s.oidc == nil {
+		writeError(w, r, http.StatusNotImplemented, "oidc_unconfigured", "OIDC validator not configured")
+		return
+	}
+	var body struct {
+		IDToken     string `json:"idToken"`
+		AccessToken string `json:"accessToken"`
+		Nonce       string `json:"nonce"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json body")
+		return
+	}
+	tok := strings.TrimSpace(body.IDToken)
+	if tok == "" {
+		tok = strings.TrimSpace(body.AccessToken)
+	}
+	if tok == "" {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "idToken required")
+		return
+	}
+	s.completeOIDCLogin(w, r, tok, body.Nonce)
+}
+
+func (s *Server) completeOIDCLogin(w http.ResponseWriter, r *http.Request, idToken, nonce string) {
+	claims, err := s.oidc.ValidateIDToken(r.Context(), idToken, nonce)
+	if err != nil {
+		status, code, msg := mapDomainHTTP(err)
+		writeError(w, r, status, code, msg)
+		return
+	}
+	res, err := s.svc.EstablishOIDCSession(r.Context(), claims.Issuer, claims.Subject, claims.Username, claims.Roles)
+	if err != nil {
+		status, code, msg := mapDomainHTTP(err)
+		if status == 500 {
+			msg = "oidc session failed"
+		}
+		writeError(w, r, status, code, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -164,14 +314,18 @@ func (s *Server) whoamiHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+	if !s.requireService(w, r) {
+		return
+	}
 	token, ok := bearerToken(r)
 	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 		return
 	}
-	who, err := s.svc.Whoami(token)
+	who, err := s.svc.Whoami(r.Context(), token)
 	if err != nil {
-		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid session")
+		status, code, msg := mapDomainHTTP(err)
+		writeError(w, r, status, code, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -191,6 +345,9 @@ func (s *Server) validateSessionHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
 		return
 	}
+	if !s.requireService(w, r) {
+		return
+	}
 	var body struct {
 		Token     string `json:"token"`
 		SessionID string `json:"sessionId"`
@@ -205,9 +362,7 @@ func (s *Server) validateSessionHandler(w http.ResponseWriter, r *http.Request) 
 	var err error
 	switch {
 	case body.SessionID != "" && body.PlayerID != "":
-		// Room forwards durable sessionId+playerId under the service credential.
-		// Do not treat sessionId as an opaque bearer token.
-		principal, err = s.svc.ValidateSessionBinding(domain.SessionID(body.SessionID), domain.PlayerID(body.PlayerID))
+		principal, err = s.svc.ValidateSessionBinding(r.Context(), domain.SessionID(body.SessionID), domain.PlayerID(body.PlayerID))
 	default:
 		token, ok := bearerToken(r)
 		if !ok {
@@ -217,10 +372,11 @@ func (s *Server) validateSessionHandler(w http.ResponseWriter, r *http.Request) 
 			writeError(w, r, http.StatusUnauthorized, "unauthorized", "missing session token")
 			return
 		}
-		principal, err = s.svc.ValidateToken(token)
+		principal, err = s.svc.ValidateToken(r.Context(), token)
 	}
 	if err != nil {
-		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid session")
+		status, code, msg := mapDomainHTTP(err)
+		writeError(w, r, status, code, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -241,19 +397,23 @@ func (s *Server) invalidateSessionHandler(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
 		return
 	}
-	// /internal/v1/sessions/{sessionId}/invalidate
+	if !s.requireService(w, r) {
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/internal/v1/sessions/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) != 2 || parts[1] != "invalidate" || parts[0] == "" {
 		writeError(w, r, http.StatusNotFound, "not_found", "not found")
 		return
 	}
-	if err := s.svc.RevokeSession(domain.SessionID(parts[0]), domain.ReasonAdmin); err != nil {
+	if err := s.svc.RevokeSession(r.Context(), domain.SessionID(parts[0]), domain.ReasonAdmin); err != nil {
+		status, code, msg := mapDomainHTTP(err)
 		if errors.Is(err, domain.ErrSessionNotFound) {
-			writeError(w, r, http.StatusNotFound, "not_found", "session not found")
-			return
+			status, code, msg = http.StatusNotFound, "not_found", "session not found"
+		} else if status == 500 {
+			msg = "invalidate failed"
 		}
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "invalidate failed")
+		writeError(w, r, status, code, msg)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "sessionId": parts[0]})
@@ -295,35 +455,11 @@ func logRequest(r *http.Request, path string) {
 		path, r.Header.Get("X-Correlation-Id"))
 }
 
-// newDefaultService wires durable outbox sessions plus a real invalidation transport.
-// When IDENTITY_INVALIDATION_URL and credential are set, uses stdlib HTTP to the Gateway
-// control endpoint. Otherwise uses a durable in-memory dispatcher (never a dropping Noop)
-// and reports not-ready so production cannot silently lose invalidation fan-out.
+// newDefaultService preserves checkpoint helper used by existing tests.
 func newDefaultService(invalidationURL, credential string) (*domain.Service, *domain.MemorySessionRepository, bool) {
-	ids := domain.RandomIDGenerator{}
-	sessions := domain.NewMemorySessionRepository()
-	var transport domain.InvalidationTransport
-	ready := false
-	if invalidationURL != "" && credential != "" {
-		transport = NewHTTPInvalidationTransport(invalidationURL, credential, nil)
-		ready = true
-	} else {
-		transport = domain.NewMemoryInvalidationTransport()
-	}
-	svc := domain.NewService(domain.ServiceDeps{
-		Players:    domain.NewMemoryPlayerRepository(),
-		Sessions:   sessions,
-		Hasher:     domain.NewCheckpointPasswordHasher(ids),
-		IDs:        ids,
-		Tokens:     ids,
-		Clock:      domain.SystemClock{},
-		SessionTTL: 24 * time.Hour,
-		Transport:  transport,
-	})
-	return svc, sessions, ready
+	return newCapabilityService(invalidationURL, credential)
 }
 
-// defaultOutboxRetryConfig is used when the HTTP publisher is configured.
 func defaultOutboxRetryConfig() OutboxRetryConfig {
 	return OutboxRetryConfig{
 		InitialInterval: time.Second,
@@ -333,22 +469,27 @@ func defaultOutboxRetryConfig() OutboxRetryConfig {
 }
 
 func main() {
-	// Fail-closed when unset: internal routes reject all callers.
 	cred := os.Getenv("IDENTITY_INTERNAL_CREDENTIAL")
-	invalidationURL := os.Getenv("IDENTITY_INVALIDATION_URL")
-	svc, _, ready := newDefaultService(invalidationURL, cred)
-	srv := NewServer(svc, cred, ready)
+	rt, err := wireIdentityRuntime()
+	if err != nil {
+		log.Fatalf("identity runtime: %v", err)
+	}
+	// Never silently convert misconfigured → memory. Memory only via
+	// IDENTITY_CAPABILITY_MODE=true + non-prod inside wireIdentityRuntime.
+	// Misconfigured serves /health and /ready=503 without auth panic.
+
+	srv := serverFromRuntime(rt, cred)
 
 	var worker *OutboxRetryWorker
-	if ready {
-		worker = NewOutboxRetryWorker(svc, defaultOutboxRetryConfig())
+	if rt.mode == "capability" && rt.ready {
+		worker = NewOutboxRetryWorker(rt.svc, defaultOutboxRetryConfig())
 		worker.Start()
 	}
 
 	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"identity","event":"startup","invalidationReady":%t}`, ready)
+		log.Printf(`{"level":"info","service":"identity","event":"startup","mode":%q,"ready":%t}`, rt.mode, rt.ready)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -364,6 +505,9 @@ func main() {
 
 	if worker != nil {
 		worker.Stop()
+	}
+	if rt.pool != nil {
+		rt.pool.Close()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

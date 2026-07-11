@@ -242,27 +242,26 @@ COMMENT ON TABLE command_idempotency IS
 
 -- ---------------------------------------------------------------------------
 -- Outbox for tournament lifecycle, advancement, provisioning, and quarantine events.
+-- Append-only Debezium CDC input (ADR-0016/0026): no published_at / app polling.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
-    event_id TEXT NOT NULL,
+    event_id TEXT NOT NULL UNIQUE,
     event_type TEXT NOT NULL,
     tournament_id TEXT,
     topic TEXT NOT NULL,
     partition_key TEXT NOT NULL,
     schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
     payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ,
-    UNIQUE (event_id)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 COMMENT ON TABLE outbox_events IS
-    'Reliable publication of tournament facts. No cross-context transactional coupling.';
-
-CREATE INDEX IF NOT EXISTS outbox_events_unpublished_idx
-    ON outbox_events (created_at)
-    WHERE published_at IS NULL;
+    'Append-only tournament facts for Debezium CDC. Never polled or marked published by the app.';
+COMMENT ON COLUMN outbox_events.event_type IS
+    'Logical event type for Outbox Event Router (tournament.* topics).';
+COMMENT ON COLUMN outbox_events.schema_version IS
+    'Explicit AsyncAPI schema version; must equal 1.';
 
 CREATE INDEX IF NOT EXISTS outbox_events_tournament_idx
     ON outbox_events (tournament_id, outbox_id);

@@ -180,9 +180,17 @@ assert_contains "raw: username still string in response" '"username": "raw:true"
 RAW_LOGIN="$("$CLI" login --user 'raw:true' --pass 'raw:true' --correlation-id corr-raw-login)"
 assert_eq "raw: username login token" "tok-raw:true" "$(json_field "$RAW_LOGIN" token)"
 
-RAW_CMD="$("$CLI" command --token "$TOKEN" --type 'raw:true' --command-id 'raw:true' --correlation-id corr-raw-cmd --schema-version 1)"
-assert_eq "raw: command type echoed as string" "raw:true" "$(json_field "$RAW_CMD" type)"
+RAW_CMD="$("$CLI" command --token "$TOKEN" --type CreateRoom --command-id 'raw:true' --correlation-id corr-raw-cmd --schema-version 1)"
+assert_eq "raw: CreateRoom status" "accepted" "$(json_field "$RAW_CMD" status)"
 assert_eq "raw: commandId echoed as string" "raw:true" "$(json_field "$RAW_CMD" commandId)"
+
+assert_exit "unknown command type rejected locally" 1 \
+  "$CLI" command --token "$TOKEN" --type 'raw:true' --command-id cmd-unknown --schema-version 1
+assert_contains "unknown type mentions catalog" "public catalog" "$(cat /tmp/unoarena-test-err.$$)"
+
+assert_exit "unknown room-scoped type rejected locally" 1 \
+  "$CLI" command --token "$TOKEN" --type NotARealCommand --room-id room-1 --command-id cmd-unknown-room --expected-sequence 1 --schema-version 1
+assert_contains "unknown room-scoped mentions catalog" "public catalog" "$(cat /tmp/unoarena-test-err.$$)"
 
 WHO="$("$CLI" whoami --token "$TOKEN" --correlation-id corr-who)"
 assert_eq "whoami username" "alice" "$(json_field "$WHO" username)"
@@ -190,6 +198,14 @@ assert_eq "whoami username" "alice" "$(json_field "$WHO" username)"
 ROOM="$("$CLI" room create --token "$TOKEN" --command-id cmd-room-1 --correlation-id corr-room --schema-version 1)"
 assert_eq "room create status" "accepted" "$(json_field "$ROOM" status)"
 assert_eq "room create type" "CreateRoom" "$(json_field "$ROOM" type)"
+
+assert_exit "CreateRoom rejects expected-sequence locally" 1 \
+  "$CLI" command --token "$TOKEN" --type CreateRoom --command-id cmd-cr-seq --expected-sequence 0 --schema-version 1
+assert_contains "CreateRoom sequence prohibited message" "expectedSequenceNumber is not allowed" "$(cat /tmp/unoarena-test-err.$$)"
+
+assert_exit "tournament create rejects expected-sequence locally" 1 \
+  "$CLI" tournament create --token "$TOKEN" --command-id cmd-tour-seq --expected-sequence 1 --payload '{"tournamentId":"t1"}'
+assert_contains "tournament sequence prohibited message" "expectedSequenceNumber is not allowed" "$(cat /tmp/unoarena-test-err.$$)"
 
 CMD="$("$CLI" command --token "$TOKEN" --type PlayCard --room-id 'room/1 x' --command-id cmd-play-1 --expected-sequence 3 --payload '{"cardId":"c1"}' --correlation-id corr-play --schema-version 1)"
 assert_eq "room command status" "accepted" "$(json_field "$CMD" status)"
@@ -214,8 +230,9 @@ assert_exit "non-object payload rejected" 1 \
 assert_exit "malformed payload JSON rejected" 1 \
   "$CLI" command --token "$TOKEN" --type PlayCard --room-id room-1 --command-id cmd-inject --expected-sequence 1 --payload '{"x":1},{"y":2}'
 
-TOUR="$("$CLI" tournament create --token "$TOKEN" --command-id cmd-tour-1 --payload '{"name":"Open"}' --correlation-id corr-tour)"
+TOUR="$("$CLI" tournament create --token "$TOKEN" --command-id cmd-tour-1 --payload '{"tournamentId":"t1","capacity":8}' --correlation-id corr-tour)"
 assert_eq "tournament create type" "CreateTournament" "$(json_field "$TOUR" type)"
+assert_eq "tournament create status" "accepted" "$(json_field "$TOUR" status)"
 
 TREG="$("$CLI" tournament register --token "$TOKEN" --command-id cmd-treg-1 --payload '{"tournamentId":"t1"}' --correlation-id corr-treg)"
 assert_eq "tournament register type" "RegisterPlayer" "$(json_field "$TREG" type)"
@@ -258,6 +275,85 @@ curl --silent --show-error -X POST "${UNOARENA_API_URL}/__fail-next-stream" >/de
 assert_exit "control SSE HTTP failure exits nonzero" 1 \
   "$CLI" stream control --token "$TOKEN" --correlation-id corr-fail-c
 
+echo "==> fake gateway public envelope validation (raw POST)"
+# Bypass CLI local checks so the fake BFF contract guard is exercised directly.
+post_envelope() {
+  local path="$1" body="$2"
+  curl --silent --show-error -w '\n%{http_code}' \
+    -X POST "${UNOARENA_API_URL}${path}" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${TOKEN}" \
+    --data "$body"
+}
+
+assert_envelope_invalid() {
+  local label="$1" path="$2" body="$3" needle="$4"
+  local resp code out
+  resp="$(post_envelope "$path" "$body")"
+  code="$(printf '%s\n' "$resp" | tail -n 1)"
+  out="$(printf '%s\n' "$resp" | sed '$d')"
+  assert_eq "$label http" "400" "$code"
+  assert_contains "$label code" '"invalid_envelope"' "$out"
+  assert_contains "$label message" "$needle" "$out"
+}
+
+assert_envelope_accepted() {
+  local label="$1" path="$2" body="$3"
+  local resp code out
+  resp="$(post_envelope "$path" "$body")"
+  code="$(printf '%s\n' "$resp" | tail -n 1)"
+  out="$(printf '%s\n' "$resp" | sed '$d')"
+  assert_eq "$label http" "200" "$code"
+  assert_eq "$label status" "accepted" "$(json_field "$out" status)"
+}
+
+assert_envelope_invalid "unknown top-level field" "/v1/commands" \
+  '{"commandId":"c-extra","type":"CreateRoom","schemaVersion":1,"payload":{},"extra":true}' \
+  'unknown field'
+assert_envelope_invalid "schemaVersion bool true rejected" "/v1/commands" \
+  '{"commandId":"c-sv-bool","type":"CreateRoom","schemaVersion":true,"payload":{}}' \
+  'schemaVersion must be 1'
+assert_envelope_invalid "schemaVersion 2 rejected" "/v1/commands" \
+  '{"commandId":"c-sv2","type":"CreateRoom","schemaVersion":2,"payload":{}}' \
+  'schemaVersion must be 1'
+assert_envelope_invalid "unknown payload field" "/v1/commands" \
+  '{"commandId":"c-pay-extra","type":"CreateTournament","schemaVersion":1,"payload":{"name":"Open"}}' \
+  'unknown payload field'
+assert_envelope_invalid "non-string roomId type" "/v1/rooms/room-1/commands" \
+  '{"commandId":"c-roomid","type":"JoinRoom","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"roomId":1}}' \
+  'must be a string'
+assert_envelope_invalid "invalid visibility enum" "/v1/commands" \
+  '{"commandId":"c-vis","type":"CreateRoom","schemaVersion":1,"payload":{"visibility":"friends"}}' \
+  'invalid value'
+assert_envelope_invalid "invalid ChooseColor enum" "/v1/rooms/room-1/commands" \
+  '{"commandId":"c-color","type":"ChooseColor","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"color":"purple"}}' \
+  'invalid value'
+assert_envelope_invalid "maxSeats bound 1" "/v1/commands" \
+  '{"commandId":"c-ms1","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":1}}' \
+  'maxSeats'
+assert_envelope_invalid "capacity below minimum" "/v1/commands" \
+  '{"commandId":"c-cap0","type":"CreateTournament","schemaVersion":1,"payload":{"capacity":0}}' \
+  'must be >= 1'
+assert_envelope_invalid "negative disconnectVersion" "/v1/rooms/room-1/commands" \
+  '{"commandId":"c-dv","type":"ReconnectToRoom","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"disconnectVersion":-1}}' \
+  'must be >= 0'
+assert_envelope_invalid "expectedSequenceNumber bool rejected" "/v1/rooms/room-1/commands" \
+  '{"commandId":"c-seq-bool","type":"PlayCard","expectedSequenceNumber":true,"schemaVersion":1,"payload":{}}' \
+  'expectedSequenceNumber must be an integer'
+
+assert_envelope_accepted "maxSeats 0 edge" "/v1/commands" \
+  '{"commandId":"c-ms0","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":0}}'
+assert_envelope_accepted "maxSeats 2 edge" "/v1/commands" \
+  '{"commandId":"c-ms2","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":2}}'
+assert_envelope_accepted "maxSeats 10 edge" "/v1/commands" \
+  '{"commandId":"c-ms10","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":10,"visibility":"private"}}'
+assert_envelope_accepted "disconnectVersion 0 edge" "/v1/rooms/room-1/commands" \
+  '{"commandId":"c-dv0","type":"ReconnectToRoom","expectedSequenceNumber":0,"schemaVersion":1,"payload":{"disconnectVersion":0}}'
+assert_envelope_accepted "tournament bound edges" "/v1/commands" \
+  '{"commandId":"c-tour-edge","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1","capacity":1,"retryBudget":0,"batchSize":1}}'
+assert_envelope_accepted "ChooseColor blue edge" "/v1/rooms/room-1/commands" \
+  '{"commandId":"c-blue","type":"ChooseColor","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"color":"blue"}}'
+
 echo "==> request body / header assertions"
 py_assert_request "register body + correlation" '
 regs = [r for r in requests if r["path"] == "/v1/auth/register"]
@@ -283,13 +379,14 @@ assert body == {"username": "raw:true", "password": "raw:true"}, body
 assert isinstance(body["username"], str) and isinstance(body["password"], str)
 '
 
-py_assert_request "raw: commandId and type stay JSON strings" '
+py_assert_request "raw: commandId stays JSON string on CreateRoom" '
 cmds = [r for r in requests if r["path"] == "/v1/commands" and r["headers"].get("x-correlation-id") == "corr-raw-cmd"]
 assert cmds, "missing raw: command"
 body = json.loads(cmds[0]["body"])
 assert body["commandId"] == "raw:true", body
-assert body["type"] == "raw:true", body
+assert body["type"] == "CreateRoom", body
 assert isinstance(body["commandId"], str) and isinstance(body["type"], str)
+assert "expectedSequenceNumber" not in body
 assert cmds[0]["headers"].get("x-command-id") == "raw:true"
 '
 
@@ -309,7 +406,7 @@ assert whos[0]["headers"].get("x-correlation-id") == "corr-who"
 '
 
 py_assert_request "CreateRoom complete body + command-id header" '
-cmds = [r for r in requests if r["path"] == "/v1/commands" and "CreateRoom" in r.get("body","")]
+cmds = [r for r in requests if r["path"] == "/v1/commands" and r["headers"].get("x-correlation-id") == "corr-room"]
 assert cmds, "missing CreateRoom"
 body = json.loads(cmds[0]["body"])
 assert body == {

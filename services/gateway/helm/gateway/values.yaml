@@ -16,24 +16,31 @@ env:
   ANALYTICS_URL: http://analytics:8080
   REDIS_URL: redis://redis:6379/0
   # Base architecture mode: do not set GATEWAY_ALLOW_FAKES / GATEWAY_CAPABILITY_MODE.
-  # With REDIS_URL set and no Redis rate-limit adapter, /ready reports
-  # redis_adapter_blocked (or equivalent) — intentional; staging/production rollout
-  # stays blocked until the durable Redis rate-limit adapter exists. Do not weaken /ready.
+  # Durable Redis requires REDIS_URL (rate-limit DB) plus GATEWAY_PLAYER_FEED_REDIS_URL
+  # and GATEWAY_SPECTATOR_REDIS_URL. Kind overlay uses DB 6 / 2 / 5. Staging/production
+  # must set those URLs (and digests) for /ready to pass; Kafka SessionInvalidated and
+  # Debezium player-feed sink remain PENDING.
 
 # Credentials via existingSecret + secretKeyRef (never inline secrets).
 # Cross-chart equality (secret *values* must match; keys stay chart-local):
-#   gateway-service-credential   == identity identity-internal-credential
-#                                == room room-service-credential
-#                                == tournament tournament-internal-credential
-#                                == spectator-view spectator-view-internal-credential
-#     (Gateway outbound producer scope to those backends; Identity also accepts this
-#      for SessionInvalidated fan-in / invalidation URL auth with current binary.)
-#   gateway-identity-credential  == identity identity-internal-credential (same value today)
-#   gateway-room-credential      == room room-to-gateway-credential (Room→Gateway producer)
-#   gateway-spectator-credential == spectator producer into Gateway (when used)
+#   Outbound Gateway→backend (context-scoped; do not share one value across peers):
+#     gateway-identity-service-credential   == identity identity-internal-credential
+#     gateway-room-service-credential       == room room-service-credential
+#     gateway-tournament-service-credential == tournament tournament-internal-credential
+#     gateway-spectator-service-credential  == spectator-view spectator-view-internal-credential
+#   GATEWAY_SERVICE_CREDENTIAL remains a backward-compat fallback when an explicit
+#   GATEWAY_*_SERVICE_CREDENTIAL is unset; durable kind maps each explicit env.
+#   Inbound producers (never reused for outbound HTTP):
+#     gateway-identity-credential  == Identity SessionInvalidated / invalidation producer
+#     gateway-room-credential      == room room-to-gateway-credential (Room→Gateway)
+#     gateway-spectator-credential == Spectator producer into Gateway (when used)
 existingSecret: gateway-secrets
 secretEnv:
   GATEWAY_SERVICE_CREDENTIAL: gateway-service-credential
+  GATEWAY_IDENTITY_SERVICE_CREDENTIAL: gateway-identity-service-credential
+  GATEWAY_ROOM_SERVICE_CREDENTIAL: gateway-room-service-credential
+  GATEWAY_TOURNAMENT_SERVICE_CREDENTIAL: gateway-tournament-service-credential
+  GATEWAY_SPECTATOR_SERVICE_CREDENTIAL: gateway-spectator-service-credential
   GATEWAY_IDENTITY_CREDENTIAL: gateway-identity-credential
   GATEWAY_ROOM_CREDENTIAL: gateway-room-credential
   GATEWAY_SPECTATOR_CREDENTIAL: gateway-spectator-credential

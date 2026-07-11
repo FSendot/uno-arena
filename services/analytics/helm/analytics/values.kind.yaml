@@ -1,0 +1,31 @@
+# Local kind overlay for Analytics durable ClickHouse HTTP store.
+# Kafka ingestion / Debezium remain PENDING.
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/analytics
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: analytics
+  DEPLOYMENT_ENV: local
+  CLICKHOUSE_URL: http://clickhouse.uno-arena.svc.cluster.local:8123
+  CLICKHOUSE_DB: analytics
+  # Durable mode: no ANALYTICS_CAPABILITY_MODE; ClickHouse credentials from secret.
+  # KAFKA_BROKERS intentionally omitted until Kafka ingestion slice.
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  ANALYTICS_ROOM_CREDENTIAL: analytics-room-credential
+  ANALYTICS_RANKING_CREDENTIAL: analytics-ranking-credential
+  ANALYTICS_TOURNAMENT_CREDENTIAL: analytics-tournament-credential
+  ANALYTICS_OPS_CREDENTIAL: analytics-ops-credential
+  CLICKHOUSE_USER: analytics-runtime-user
+  CLICKHOUSE_PASSWORD: analytics-runtime-password
+
+projectionRebuilder:
+  enabled: false

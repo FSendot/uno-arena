@@ -8,19 +8,19 @@ image:
 env:
   SERVICE_NAME: tournament-orchestration
   ROOM_GAMEPLAY_URL: http://room-gameplay:8080
-  REDIS_URL: redis://redis:6379/3
-  KAFKA_BROKERS: kafka:9092
+  # REDIS_URL / KAFKA_BROKERS omitted until projection/CDC slices land.
 
-# BLOCKED: binary has no WORKER_ROLE=tournament-provisioning loop; production adapters absent.
+# No safe WORKER_ROLE loop; keep disabled. Provision via ProcessProvisioningBatch.
 provisioningWorker:
   enabled: false
 
-# Cross-chart: tournament-internal-credential == gateway gateway-service-credential
+# Cross-chart: tournament-internal-credential == gateway gateway-tournament-service-credential
 #              == room tournament-internal-credential secret value (Room→Tournament).
 existingSecret: tournament-orchestration-secrets
 secretEnv:
   TOURNAMENT_INTERNAL_CREDENTIAL: tournament-internal-credential
   SERVICE_CREDENTIAL: tournament-internal-credential
+  ROOM_SERVICE_CREDENTIAL: room-service-credential
   DATABASE_URL: database-url
 
 resources:

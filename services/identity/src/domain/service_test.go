@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -74,7 +75,7 @@ func itoa(n int) string {
 func TestRegisterCreatesPlayer(t *testing.T) {
 	svc, players, _, _, _, _ := newTestService(t)
 
-	p, err := svc.Register("alice", "secret")
+	p, err := svc.Register(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -92,10 +93,10 @@ func TestRegisterCreatesPlayer(t *testing.T) {
 
 func TestRegisterRejectsDuplicateUsername(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
-	_, err := svc.Register("alice", "other")
+	_, err := svc.Register(context.Background(), "alice", "other")
 	if !errors.Is(err, domain.ErrUsernameTaken) {
 		t.Fatalf("expected ErrUsernameTaken, got %v", err)
 	}
@@ -103,12 +104,12 @@ func TestRegisterRejectsDuplicateUsername(t *testing.T) {
 
 func TestLoginCreatesActiveSession(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	p, err := svc.Register("alice", "secret")
+	p, err := svc.Register(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestLoginCreatesActiveSession(t *testing.T) {
 		t.Fatalf("unexpected login result: %+v", res)
 	}
 
-	principal, err := svc.ValidateToken(res.Token)
+	principal, err := svc.ValidateToken(context.Background(), res.Token)
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -127,15 +128,15 @@ func TestLoginCreatesActiveSession(t *testing.T) {
 
 func TestLoginInvalidatesPriorActiveSession(t *testing.T) {
 	svc, _, sessions, _, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	first, err := svc.Login("alice", "secret")
+	first, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("first login: %v", err)
 	}
-	second, err := svc.Login("alice", "secret")
+	second, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("second login: %v", err)
 	}
@@ -146,10 +147,10 @@ func TestLoginInvalidatesPriorActiveSession(t *testing.T) {
 		t.Fatal("expected distinct tokens")
 	}
 
-	if _, err := svc.ValidateToken(first.Token); !errors.Is(err, domain.ErrSessionInvalid) {
+	if _, err := svc.ValidateToken(context.Background(), first.Token); !errors.Is(err, domain.ErrSessionInvalid) {
 		t.Fatalf("old token should be invalid, got %v", err)
 	}
-	if _, err := svc.ValidateToken(second.Token); err != nil {
+	if _, err := svc.ValidateToken(context.Background(), second.Token); err != nil {
 		t.Fatalf("new token should be valid: %v", err)
 	}
 
@@ -167,10 +168,10 @@ func TestLoginInvalidatesPriorActiveSession(t *testing.T) {
 
 func TestLoginRejectsBadPassword(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	_, err := svc.Login("alice", "wrong")
+	_, err := svc.Login(context.Background(), "alice", "wrong")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
@@ -178,47 +179,47 @@ func TestLoginRejectsBadPassword(t *testing.T) {
 
 func TestRevokeRejectsValidation(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if err := svc.RevokeSession(res.SessionID, domain.ReasonLogout); err != nil {
+	if err := svc.RevokeSession(context.Background(), res.SessionID, domain.ReasonLogout); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if _, err := svc.ValidateToken(res.Token); !errors.Is(err, domain.ErrSessionInvalid) {
+	if _, err := svc.ValidateToken(context.Background(), res.Token); !errors.Is(err, domain.ErrSessionInvalid) {
 		t.Fatalf("expected ErrSessionInvalid, got %v", err)
 	}
 }
 
 func TestValidateRejectsExpiredSession(t *testing.T) {
 	svc, _, _, clock, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	clock.now = clock.now.Add(2 * time.Hour)
-	if _, err := svc.ValidateToken(res.Token); !errors.Is(err, domain.ErrSessionExpired) {
+	if _, err := svc.ValidateToken(context.Background(), res.Token); !errors.Is(err, domain.ErrSessionExpired) {
 		t.Fatalf("expected ErrSessionExpired, got %v", err)
 	}
 }
 
 func TestWhoamiReturnsPrincipal(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	p, err := svc.Register("alice", "secret")
+	p, err := svc.Register(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	who, err := svc.Whoami(res.Token)
+	who, err := svc.Whoami(context.Background(), res.Token)
 	if err != nil {
 		t.Fatalf("whoami: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestWhoamiReturnsPrincipal(t *testing.T) {
 
 func TestLoginConcurrentSingleActiveSession(t *testing.T) {
 	svc, _, sessions, _, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
@@ -240,7 +241,7 @@ func TestLoginConcurrentSingleActiveSession(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := svc.Login("alice", "secret"); err == nil {
+			if _, err := svc.Login(context.Background(), "alice", "secret"); err == nil {
 				successes.Add(1)
 			}
 		}()
@@ -263,23 +264,23 @@ func TestLoginConcurrentSingleActiveSession(t *testing.T) {
 
 func TestReplaceActiveSessionFailureLeavesPriorValid(t *testing.T) {
 	svc, _, sessions, _, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	first, err := svc.Login("alice", "secret")
+	first, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("first login: %v", err)
 	}
 
 	boom := errors.New("replace failed")
 	sessions.SetReplaceError(boom)
-	_, err = svc.Login("alice", "secret")
+	_, err = svc.Login(context.Background(), "alice", "secret")
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected replace error, got %v", err)
 	}
 	sessions.SetReplaceError(nil)
 
-	if _, err := svc.ValidateToken(first.Token); err != nil {
+	if _, err := svc.ValidateToken(context.Background(), first.Token); err != nil {
 		t.Fatalf("prior session must remain valid after failed replace: %v", err)
 	}
 	active := 0
@@ -295,10 +296,10 @@ func TestReplaceActiveSessionFailureLeavesPriorValid(t *testing.T) {
 
 func TestLoginTakeoverPublishesSessionInvalidated(t *testing.T) {
 	svc, _, sessions, _, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	first, err := svc.Login("alice", "secret")
+	first, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("first login: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestLoginTakeoverPublishesSessionInvalidated(t *testing.T) {
 		t.Fatalf("no invalidate on first login, got %+v", got)
 	}
 
-	second, err := svc.Login("alice", "secret")
+	second, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("second login: %v", err)
 	}
@@ -324,22 +325,22 @@ func TestLoginTakeoverPublishesSessionInvalidated(t *testing.T) {
 	if evt.EventID == "" || evt.OccurredAt.IsZero() {
 		t.Fatalf("event metadata incomplete: %+v", evt)
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 0 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("outbox should be drained after successful publish, got %d", len(pending))
 	}
 }
 
 func TestRevokePublishesSessionInvalidated(t *testing.T) {
 	svc, _, sessions, _, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	transport.Reset()
-	if err := svc.RevokeSession(res.SessionID, domain.ReasonLogout); err != nil {
+	if err := svc.RevokeSession(context.Background(), res.SessionID, domain.ReasonLogout); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	events := transport.Delivered()
@@ -349,34 +350,34 @@ func TestRevokePublishesSessionInvalidated(t *testing.T) {
 	if events[0].SessionID != res.SessionID || events[0].Reason != domain.ReasonLogout {
 		t.Fatalf("unexpected event: %+v", events[0])
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 0 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("outbox should be drained, got %d", len(pending))
 	}
 }
 
 func TestPublisherFailureLeavesOutboxPendingKeepsNewSession(t *testing.T) {
 	svc, _, sessions, _, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	first, err := svc.Login("alice", "secret")
+	first, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("first login: %v", err)
 	}
 
 	boom := errors.New("transport unavailable")
 	transport.SetError(boom)
-	second, err := svc.Login("alice", "secret")
+	second, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login must succeed after durable outbox commit even if publish fails: %v", err)
 	}
-	if _, err := svc.ValidateToken(first.Token); !errors.Is(err, domain.ErrSessionInvalid) {
+	if _, err := svc.ValidateToken(context.Background(), first.Token); !errors.Is(err, domain.ErrSessionInvalid) {
 		t.Fatalf("prior session must stay invalidated, got %v", err)
 	}
-	if _, err := svc.ValidateToken(second.Token); err != nil {
+	if _, err := svc.ValidateToken(context.Background(), second.Token); err != nil {
 		t.Fatalf("new session must remain active: %v", err)
 	}
-	pending, err := sessions.ListPendingOutbox(10)
+	pending, err := sessions.ListPendingOutbox(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
@@ -388,14 +389,14 @@ func TestPublisherFailureLeavesOutboxPendingKeepsNewSession(t *testing.T) {
 	}
 
 	transport.SetError(nil)
-	n, err := svc.DrainOutbox(10)
+	n, err := svc.DrainOutbox(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("drain retry: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 published on retry, got %d", n)
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 0 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("outbox should be empty after retry, got %d", len(pending))
 	}
 	delivered := transport.Delivered()
@@ -406,10 +407,10 @@ func TestPublisherFailureLeavesOutboxPendingKeepsNewSession(t *testing.T) {
 
 func TestConcurrentLoginPublisherFailureKeepsSingleActive(t *testing.T) {
 	svc, _, sessions, _, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := svc.Login("alice", "secret"); err != nil {
+	if _, err := svc.Login(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("seed login: %v", err)
 	}
 
@@ -421,7 +422,7 @@ func TestConcurrentLoginPublisherFailureKeepsSingleActive(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := svc.Login("alice", "secret"); err == nil {
+			if _, err := svc.Login(context.Background(), "alice", "secret"); err == nil {
 				successes.Add(1)
 			}
 		}()
@@ -440,7 +441,7 @@ func TestConcurrentLoginPublisherFailureKeepsSingleActive(t *testing.T) {
 	if active != 1 {
 		t.Fatalf("publisher failures must not violate single-active-session, got %d active", active)
 	}
-	pending, err := sessions.ListPendingOutbox(100)
+	pending, err := sessions.ListPendingOutbox(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
@@ -449,26 +450,26 @@ func TestConcurrentLoginPublisherFailureKeepsSingleActive(t *testing.T) {
 	}
 
 	transport.SetError(nil)
-	if _, err := svc.DrainOutbox(100); err != nil {
+	if _, err := svc.DrainOutbox(context.Background(), 100); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 0 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("expected empty outbox after drain, got %d", len(pending))
 	}
 }
 
 func TestExpiryPersistsOutboxAndPublishes(t *testing.T) {
 	svc, _, sessions, clock, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	transport.Reset()
 	clock.now = clock.now.Add(2 * time.Hour)
-	if _, err := svc.ValidateToken(res.Token); !errors.Is(err, domain.ErrSessionExpired) {
+	if _, err := svc.ValidateToken(context.Background(), res.Token); !errors.Is(err, domain.ErrSessionExpired) {
 		t.Fatalf("expected ErrSessionExpired, got %v", err)
 	}
 	stored, ok := sessions.ByID(res.SessionID)
@@ -479,32 +480,32 @@ func TestExpiryPersistsOutboxAndPublishes(t *testing.T) {
 	if len(events) != 1 || events[0].Reason != domain.ReasonExpired || events[0].SessionID != res.SessionID {
 		t.Fatalf("expected expiry SessionInvalidated, got %+v", events)
 	}
-	if pending, _ := sessions.ListPendingOutbox(10); len(pending) != 0 {
+	if pending, _ := sessions.ListPendingOutbox(context.Background(), 10); len(pending) != 0 {
 		t.Fatalf("outbox should be drained, got %d", len(pending))
 	}
 }
 
 func TestExpiryPublishFailureLeavesPendingAndRetries(t *testing.T) {
 	svc, _, sessions, clock, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	transport.Reset()
 	transport.SetError(errors.New("gateway down"))
 	clock.now = clock.now.Add(2 * time.Hour)
-	if _, err := svc.ValidateToken(res.Token); !errors.Is(err, domain.ErrSessionExpired) {
+	if _, err := svc.ValidateToken(context.Background(), res.Token); !errors.Is(err, domain.ErrSessionExpired) {
 		t.Fatalf("expected ErrSessionExpired after durable expiry commit, got %v", err)
 	}
-	pending, err := sessions.ListPendingOutbox(10)
+	pending, err := sessions.ListPendingOutbox(context.Background(), 10)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("expected 1 pending expiry event, pending=%d err=%v", len(pending), err)
 	}
 	transport.SetError(nil)
-	n, err := svc.DrainOutbox(10)
+	n, err := svc.DrainOutbox(context.Background(), 10)
 	if err != nil || n != 1 {
 		t.Fatalf("drain retry: n=%d err=%v", n, err)
 	}
@@ -515,17 +516,17 @@ func TestExpiryPublishFailureLeavesPendingAndRetries(t *testing.T) {
 
 func TestExpiryPersistenceFailureReturnsSafeError(t *testing.T) {
 	svc, _, sessions, clock, _, _ := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	clock.now = clock.now.Add(2 * time.Hour)
 	boom := errors.New("persist failed")
 	sessions.SetInvalidateError(boom)
-	_, err = svc.ValidateToken(res.Token)
+	_, err = svc.ValidateToken(context.Background(), res.Token)
 	if err == nil || errors.Is(err, domain.ErrSessionExpired) {
 		t.Fatalf("persistence failure must not report expired; got %v", err)
 	}
@@ -541,7 +542,7 @@ func TestExpiryPersistenceFailureReturnsSafeError(t *testing.T) {
 
 func TestLoginMissingUserUsesDummyHashCompare(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	_, err := svc.Login("nobody", "secret")
+	_, err := svc.Login(context.Background(), "nobody", "secret")
 	if !errors.Is(err, domain.ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
@@ -566,7 +567,7 @@ func TestInvalidateWithOutboxIdempotentWhenAlreadyInactive(t *testing.T) {
 		CreatedAt: now,
 		ExpiresAt: now.Add(time.Hour),
 	}
-	if err := sessions.Save(sess); err != nil {
+	if err := sessions.Save(context.Background(), sess); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	inv := sess
@@ -581,7 +582,7 @@ func TestInvalidateWithOutboxIdempotentWhenAlreadyInactive(t *testing.T) {
 		Reason:     domain.ReasonLogout,
 		OccurredAt: now,
 	}
-	if err := sessions.InvalidateWithOutbox(inv, evt); err != nil {
+	if err := sessions.InvalidateWithOutbox(context.Background(), inv, evt); err != nil {
 		t.Fatalf("first invalidate: %v", err)
 	}
 	expired := sess
@@ -591,7 +592,7 @@ func TestInvalidateWithOutboxIdempotentWhenAlreadyInactive(t *testing.T) {
 	evt2 := evt
 	evt2.EventID = "evt-2"
 	evt2.Reason = domain.ReasonExpired
-	if err := sessions.InvalidateWithOutbox(expired, evt2); err != nil {
+	if err := sessions.InvalidateWithOutbox(context.Background(), expired, evt2); err != nil {
 		t.Fatalf("second invalidate must be idempotent: %v", err)
 	}
 	if n := sessions.OutboxLen(); n != 1 {
@@ -605,10 +606,10 @@ func TestInvalidateWithOutboxIdempotentWhenAlreadyInactive(t *testing.T) {
 
 func TestConcurrentRevokeAndExpiryOneOutbox(t *testing.T) {
 	svc, _, sessions, clock, _, transport := newTestService(t)
-	if _, err := svc.Register("alice", "secret"); err != nil {
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	res, err := svc.Login("alice", "secret")
+	res, err := svc.Login(context.Background(), "alice", "secret")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -622,11 +623,11 @@ func TestConcurrentRevokeAndExpiryOneOutbox(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			_ = svc.RevokeSession(res.SessionID, domain.ReasonAdmin)
+			_ = svc.RevokeSession(context.Background(), res.SessionID, domain.ReasonAdmin)
 		}()
 		go func() {
 			defer wg.Done()
-			_, _ = svc.ValidateToken(res.Token)
+			_, _ = svc.ValidateToken(context.Background(), res.Token)
 		}()
 	}
 	wg.Wait()
@@ -634,7 +635,7 @@ func TestConcurrentRevokeAndExpiryOneOutbox(t *testing.T) {
 	if n := sessions.OutboxLen(); n != 1 {
 		t.Fatalf("concurrent revoke/expiry must produce exactly 1 outbox record, got %d", n)
 	}
-	pending, err := sessions.ListPendingOutbox(10)
+	pending, err := sessions.ListPendingOutbox(context.Background(), 10)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("expected 1 pending, got %d err=%v", len(pending), err)
 	}
@@ -655,7 +656,7 @@ func TestConcurrentInvalidateWithOutboxRace(t *testing.T) {
 		CreatedAt: now,
 		ExpiresAt: now.Add(time.Hour),
 	}
-	if err := sessions.Save(sess); err != nil {
+	if err := sessions.Save(context.Background(), sess); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -676,7 +677,7 @@ func TestConcurrentInvalidateWithOutboxRace(t *testing.T) {
 				inv.InvalidationReason = domain.ReasonExpired
 			}
 			inv.InvalidatedAt = &ts
-			_ = sessions.InvalidateWithOutbox(inv, domain.SessionInvalidatedEvent{
+			_ = sessions.InvalidateWithOutbox(context.Background(), inv, domain.SessionInvalidatedEvent{
 				EventID:    "evt-" + itoa(i+1),
 				PlayerID:   sess.PlayerID,
 				SessionID:  sess.ID,
@@ -693,17 +694,17 @@ func TestConcurrentInvalidateWithOutboxRace(t *testing.T) {
 
 func TestValidateSessionBinding_ActiveMatchingSession(t *testing.T) {
 	svc, _, _, _, _, _ := newTestService(t)
-	_, err := svc.Register("bind-user", "secret")
+	_, err := svc.Register(context.Background(), "bind-user", "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	login, err := svc.Login("bind-user", "secret")
+	login, err := svc.Login(context.Background(), "bind-user", "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// sessionId is not a bearer token — binding lookup must succeed without the token.
-	principal, err := svc.ValidateSessionBinding(login.SessionID, login.PlayerID)
+	principal, err := svc.ValidateSessionBinding(context.Background(), login.SessionID, login.PlayerID)
 	if err != nil {
 		t.Fatalf("ValidateSessionBinding: %v", err)
 	}
@@ -711,23 +712,23 @@ func TestValidateSessionBinding_ActiveMatchingSession(t *testing.T) {
 		t.Fatalf("principal=%+v", principal)
 	}
 
-	if _, err := svc.ValidateSessionBinding(login.SessionID, "wrong-player"); !errors.Is(err, domain.ErrSessionInvalid) {
+	if _, err := svc.ValidateSessionBinding(context.Background(), login.SessionID, "wrong-player"); !errors.Is(err, domain.ErrSessionInvalid) {
 		t.Fatalf("mismatch want ErrSessionInvalid, got %v", err)
 	}
-	if _, err := svc.ValidateSessionBinding(domain.SessionID(login.Token), login.PlayerID); !errors.Is(err, domain.ErrSessionNotFound) {
+	if _, err := svc.ValidateSessionBinding(context.Background(), domain.SessionID(login.Token), login.PlayerID); !errors.Is(err, domain.ErrSessionNotFound) {
 		t.Fatalf("token-as-sessionId must not authorize, got %v", err)
 	}
 }
 
 func TestValidateSessionBinding_RejectsExpired(t *testing.T) {
 	svc, _, _, clock, _, _ := newTestService(t)
-	_, _ = svc.Register("exp-user", "secret")
-	login, err := svc.Login("exp-user", "secret")
+	_, _ = svc.Register(context.Background(), "exp-user", "secret")
+	login, err := svc.Login(context.Background(), "exp-user", "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock.now = clock.now.Add(2 * time.Hour)
-	if _, err := svc.ValidateSessionBinding(login.SessionID, login.PlayerID); !errors.Is(err, domain.ErrSessionExpired) {
+	if _, err := svc.ValidateSessionBinding(context.Background(), login.SessionID, login.PlayerID); !errors.Is(err, domain.ErrSessionExpired) {
 		t.Fatalf("want expired, got %v", err)
 	}
 }
@@ -743,7 +744,7 @@ func TestFinding_DrainOutboxNilTransportOrRepoErrors(t *testing.T) {
 		Clock:    &fixedClock{now: time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)},
 		// Transport nil
 	})
-	if _, err := svc.DrainOutbox(10); err == nil {
+	if _, err := svc.DrainOutbox(context.Background(), 10); err == nil {
 		t.Fatal("nil transport must error")
 	}
 	svcNilRepo := domain.NewService(domain.ServiceDeps{
@@ -755,7 +756,7 @@ func TestFinding_DrainOutboxNilTransportOrRepoErrors(t *testing.T) {
 		Clock:     &fixedClock{now: time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)},
 		Transport: domain.NewFakeInvalidationTransport(),
 	})
-	if _, err := svcNilRepo.DrainOutbox(10); err == nil {
+	if _, err := svcNilRepo.DrainOutbox(context.Background(), 10); err == nil {
 		t.Fatal("nil sessions repo must error")
 	}
 }

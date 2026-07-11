@@ -35,6 +35,38 @@ func (t *Tournament) RegisteredPlayers() []PlayerID {
 	return out
 }
 
+// ResultKeysSnapshot returns durable (roomId:completionVersion) disposition records.
+func (t *Tournament) ResultKeysSnapshot() map[string]ResultRecord {
+	if t == nil || len(t.resultKeys) == 0 {
+		return nil
+	}
+	out := make(map[string]ResultRecord, len(t.resultKeys))
+	for k, v := range t.resultKeys {
+		out[k] = ResultRecord{
+			Disposition:   v.Disposition,
+			Fingerprint:   v.Fingerprint,
+			SourceEventID: v.SourceEventID,
+		}
+	}
+	return out
+}
+
+// ProcessedEventsSnapshot returns event-id idempotency outcomes (copy).
+func (t *Tournament) ProcessedEventsSnapshot() map[EventID]CommandOutcome {
+	if t == nil || len(t.processedEvents) == 0 {
+		return nil
+	}
+	return cloneOutcomesByEvent(t.processedEvents)
+}
+
+// RoomOwnersSnapshot returns roomId -> "round:slot" ownership map (copy).
+func (t *Tournament) RoomOwnersSnapshot() map[RoomID]string {
+	if t == nil || len(t.roomOwners) == 0 {
+		return nil
+	}
+	return cloneRoomOwners(t.roomOwners)
+}
+
 // RoundsSnapshot returns a copy of known rounds sorted by number ascending.
 func (t *Tournament) RoundsSnapshot() []Round {
 	if t == nil || len(t.rounds) == 0 {

@@ -1,38 +1,26 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 
 	"unoarena/services/spectator-view/domain"
 )
 
-// ProjectionStore is the injectable room projection backing store.
-// Implementations must not hand out mutable projection pointers for concurrent use;
-// all Apply/admission/snapshot/rebuild work runs under a per-room lock.
-type ProjectionStore interface {
-	WithRoom(roomID domain.RoomID, fn func(*domain.SpectatorRoomProjection))
-	WithRoomCreate(roomID domain.RoomID, fn func(*domain.SpectatorRoomProjection))
-	EventCount(roomID domain.RoomID) int
-	SetEventCount(roomID domain.RoomID, n int)
-	IncrEventCount(roomID domain.RoomID)
-	// RoomMeta reads projection status fields and event count under one lock
-	// (avoids nested-lock deadlock from EventCount inside WithRoom).
-	RoomMeta(roomID domain.RoomID) (sequence uint64, status string, streamClosed bool, eventCount int, ok bool)
-	RegisterInvite(roomID domain.RoomID, token string) bool
-	HasInvite(roomID domain.RoomID, token string) bool
+// MemoryProjectionStore is the capability-mode in-memory SpectatorApplication.
+// Explicit non-production SPECTATOR_CAPABILITY_MODE only — not production durable state.
+type MemoryProjectionStore struct {
+	mu    sync.Mutex
+	rooms map[domain.RoomID]*roomActor
 }
 
 type roomActor struct {
 	mu         sync.Mutex
 	proj       *domain.SpectatorRoomProjection
 	eventCount int
-	invites    map[string]struct{}
-}
-
-// MemoryProjectionStore is a per-room locked in-memory ProjectionStore.
-type MemoryProjectionStore struct {
-	mu    sync.Mutex
-	rooms map[domain.RoomID]*roomActor
+	invites    map[string]struct{} // SHA-256 digests only
 }
 
 // NewMemoryProjectionStore creates an empty in-memory store.
@@ -60,71 +48,82 @@ func (s *MemoryProjectionStore) actor(roomID domain.RoomID, create bool) *roomAc
 	return a
 }
 
-// WithRoom runs fn under the per-room lock when the room exists.
-// If the room is absent, fn receives a fresh ephemeral projection (not stored).
-func (s *MemoryProjectionStore) WithRoom(roomID domain.RoomID, fn func(*domain.SpectatorRoomProjection)) {
-	a := s.actor(roomID, false)
-	if a == nil {
-		fn(domain.NewSpectatorRoomProjection(roomID))
-		return
+// Ready always succeeds for in-memory capability mode.
+func (s *MemoryProjectionStore) Ready(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+// Apply runs domain policy under the per-room lock.
+func (s *MemoryProjectionStore) Apply(ctx context.Context, roomID domain.RoomID, events []domain.SpectatorSafeEvent) (domain.ApplyOutcome, error) {
+	_ = ctx
+	if !roomID.Valid() {
+		return domain.ApplyOutcome{}, errInvalidRoom
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	fn(a.proj)
-}
-
-// WithRoomCreate ensures the room actor exists, then runs fn under its lock.
-func (s *MemoryProjectionStore) WithRoomCreate(roomID domain.RoomID, fn func(*domain.SpectatorRoomProjection)) {
 	a := s.actor(roomID, true)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	fn(a.proj)
-}
-
-// EventCount returns the tracked applied-event count for roomID.
-func (s *MemoryProjectionStore) EventCount(roomID domain.RoomID) int {
-	a := s.actor(roomID, false)
-	if a == nil {
-		return 0
+	var out domain.ApplyOutcome
+	if len(events) == 1 {
+		out = a.proj.Apply(events[0])
+	} else {
+		out = a.proj.ApplyBatch(events)
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.eventCount
+	if out.Kind == domain.OutcomeAccepted {
+		a.eventCount++
+	}
+	return out, nil
 }
 
-// SetEventCount sets the tracked event count after a rebuild.
-func (s *MemoryProjectionStore) SetEventCount(roomID domain.RoomID, n int) {
+// Rebuild validates/replays then atomically replaces the room projection.
+func (s *MemoryProjectionStore) Rebuild(ctx context.Context, roomID domain.RoomID, events []domain.SpectatorSafeEvent) (RebuildResult, error) {
+	_ = ctx
+	if !roomID.Valid() {
+		return RebuildResult{}, errInvalidRoom
+	}
+	proj, outcomes := domain.RebuildFrom(roomID, events)
 	a := s.actor(roomID, true)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.eventCount = n
+	a.proj = proj
+	a.eventCount = len(events)
+	return RebuildResult{
+		Outcomes:     outcomes,
+		Sequence:     uint64(proj.Sequence()),
+		Status:       string(proj.Status()),
+		StreamClosed: proj.StreamClosed(),
+		EventCount:   a.eventCount,
+	}, nil
 }
 
-// IncrEventCount increments the tracked event count after a non-duplicate apply.
-func (s *MemoryProjectionStore) IncrEventCount(roomID domain.RoomID) {
-	a := s.actor(roomID, true)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.eventCount++
-}
-
-// RoomMeta returns status fields and event count under a single per-room lock.
-func (s *MemoryProjectionStore) RoomMeta(roomID domain.RoomID) (sequence uint64, status string, streamClosed bool, eventCount int, ok bool) {
+// Admission evaluates spectator admission against durable/memory projection state.
+func (s *MemoryProjectionStore) Admission(ctx context.Context, roomID domain.RoomID, auth domain.SpectatorAuth) (domain.SpectatorAdmissionDecision, error) {
+	_ = ctx
 	a := s.actor(roomID, false)
 	if a == nil {
 		proj := domain.NewSpectatorRoomProjection(roomID)
-		return uint64(proj.Sequence()), string(proj.Status()), proj.StreamClosed(), 0, false
+		return proj.Admission(auth), nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return uint64(a.proj.Sequence()), string(a.proj.Status()), a.proj.StreamClosed(), a.eventCount, true
+	return a.proj.Admission(auth), nil
 }
 
-// RegisterInvite registers an opaque room invite capability token.
-func (s *MemoryProjectionStore) RegisterInvite(roomID domain.RoomID, token string) bool {
+// SnapshotJSON returns the sanitized public snapshot JSON.
+func (s *MemoryProjectionStore) SnapshotJSON(ctx context.Context, roomID domain.RoomID) ([]byte, error) {
+	_ = ctx
+	a := s.actor(roomID, true)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.proj.SnapshotJSON()
+}
+
+// RegisterInvite stores the SHA-256 digest of the invite token (never plaintext).
+func (s *MemoryProjectionStore) RegisterInvite(ctx context.Context, roomID domain.RoomID, token string) (bool, error) {
+	_ = ctx
 	token = trimInvite(token)
 	if !roomID.Valid() || token == "" {
-		return false
+		return false, nil
 	}
 	a := s.actor(roomID, true)
 	a.mu.Lock()
@@ -132,33 +131,66 @@ func (s *MemoryProjectionStore) RegisterInvite(roomID domain.RoomID, token strin
 	if a.invites == nil {
 		a.invites = make(map[string]struct{})
 	}
-	a.invites[token] = struct{}{}
-	return true
+	a.invites[inviteDigest(token)] = struct{}{}
+	return true, nil
 }
 
-// HasInvite reports whether token is a registered invite for roomID.
-func (s *MemoryProjectionStore) HasInvite(roomID domain.RoomID, token string) bool {
+// HasInvite reports whether token matches a registered invite digest.
+func (s *MemoryProjectionStore) HasInvite(ctx context.Context, roomID domain.RoomID, token string) (bool, error) {
+	_ = ctx
 	token = trimInvite(token)
 	if token == "" {
-		return false
+		return false, nil
 	}
 	a := s.actor(roomID, false)
 	if a == nil {
-		return false
+		return false, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	_, ok := a.invites[token]
-	return ok
+	_, ok := a.invites[inviteDigest(token)]
+	return ok, nil
 }
 
-// ReplaceProjection atomically replaces the room projection (used by rebuild).
-func (s *MemoryProjectionStore) ReplaceProjection(roomID domain.RoomID, p *domain.SpectatorRoomProjection, eventCount int) {
-	a := s.actor(roomID, true)
+// RoomMeta returns status fields and event count under one lock.
+func (s *MemoryProjectionStore) RoomMeta(ctx context.Context, roomID domain.RoomID) (RoomMeta, error) {
+	_ = ctx
+	a := s.actor(roomID, false)
+	if a == nil {
+		proj := domain.NewSpectatorRoomProjection(roomID)
+		return RoomMeta{
+			Sequence:     uint64(proj.Sequence()),
+			Status:       string(proj.Status()),
+			StreamClosed: proj.StreamClosed(),
+			EventCount:   0,
+			Exists:       false,
+		}, nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.proj = p
-	a.eventCount = eventCount
+	return RoomMeta{
+		Sequence:     uint64(a.proj.Sequence()),
+		Status:       string(a.proj.Status()),
+		StreamClosed: a.proj.StreamClosed(),
+		EventCount:   a.eventCount,
+		Exists:       true,
+	}, nil
+}
+
+// ProjectionForTest returns a copy export for tests (capability only).
+func (s *MemoryProjectionStore) ProjectionForTest(roomID domain.RoomID) domain.ProjectionExport {
+	a := s.actor(roomID, false)
+	if a == nil {
+		return domain.NewSpectatorRoomProjection(roomID).ExportState()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.proj.ExportState()
+}
+
+func inviteDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func trimInvite(s string) string {
@@ -170,3 +202,9 @@ func trimInvite(s string) string {
 	}
 	return s
 }
+
+var errInvalidRoom = errString("invalid roomId")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }

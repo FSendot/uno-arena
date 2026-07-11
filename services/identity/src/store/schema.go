@@ -1,0 +1,111 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	ExpectedMigrationVersion = "001_init"
+	ExpectedBootstrapVersion = "001_init"
+	// ExpectedSchemaChecksum is SHA-256 of services/identity/migrations/001_init.sql bytes.
+	// Override via IDENTITY_SCHEMA_CHECKSUM when operators fingerprint a different artifact.
+	ExpectedSchemaChecksum = "4c1d0df7c7e09122ab7bc00c1f54f0784e4e196da76d8c2feace8da1bb966719"
+)
+
+// SchemaExpectation holds the exact version/checksum VerifySchema requires.
+type SchemaExpectation struct {
+	MigrationVersion string
+	BootstrapVersion string
+	Checksum         string
+}
+
+// DefaultSchemaExpectation returns embedded fingerprint constants, optionally
+// overridden by IDENTITY_SCHEMA_CHECKSUM / IDENTITY_SCHEMA_VERSION env.
+func DefaultSchemaExpectation() SchemaExpectation {
+	exp := SchemaExpectation{
+		MigrationVersion: ExpectedMigrationVersion,
+		BootstrapVersion: ExpectedBootstrapVersion,
+		Checksum:         ExpectedSchemaChecksum,
+	}
+	if v := strings.TrimSpace(os.Getenv("IDENTITY_SCHEMA_VERSION")); v != "" {
+		exp.MigrationVersion = v
+		exp.BootstrapVersion = v
+	}
+	if c := strings.TrimSpace(os.Getenv("IDENTITY_SCHEMA_CHECKSUM")); c != "" {
+		exp.Checksum = strings.ToLower(c)
+	}
+	return exp
+}
+
+// ChecksumBytes returns the hex SHA-256 of migration SQL (unit-test helper).
+func ChecksumBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifySchema pings the writer and fail-closes on schema drift.
+// Requires exactly one schema_migrations row at the expected version and exactly
+// one schema_bootstrap_meta row matching version+checksum.
+func VerifySchema(ctx context.Context, pool *pgxpool.Pool, exp SchemaExpectation) error {
+	if pool == nil {
+		return fmt.Errorf("nil pool")
+	}
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+	if exp.MigrationVersion == "" {
+		exp.MigrationVersion = ExpectedMigrationVersion
+	}
+	if exp.BootstrapVersion == "" {
+		exp.BootstrapVersion = ExpectedBootstrapVersion
+	}
+	if exp.Checksum == "" {
+		exp.Checksum = ExpectedSchemaChecksum
+	}
+	exp.Checksum = strings.ToLower(exp.Checksum)
+
+	var migCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&migCount); err != nil {
+		return fmt.Errorf("schema_migrations count: %w", err)
+	}
+	if migCount != 1 {
+		return fmt.Errorf("schema drift: expected exactly 1 schema_migrations row, got %d", migCount)
+	}
+	var migVersion string
+	if err := pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migVersion); err != nil {
+		return fmt.Errorf("schema_migrations version: %w", err)
+	}
+	if migVersion != exp.MigrationVersion {
+		return fmt.Errorf("schema drift: migration version %q want %q", migVersion, exp.MigrationVersion)
+	}
+
+	var metaCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_bootstrap_meta`).Scan(&metaCount); err != nil {
+		return fmt.Errorf("schema_bootstrap_meta count: %w", err)
+	}
+	if metaCount != 1 {
+		return fmt.Errorf("schema drift: expected exactly 1 schema_bootstrap_meta row, got %d", metaCount)
+	}
+	var metaVersion, metaChecksum string
+	if err := pool.QueryRow(ctx, `SELECT version, checksum FROM schema_bootstrap_meta`).Scan(&metaVersion, &metaChecksum); err != nil {
+		return fmt.Errorf("schema_bootstrap_meta read: %w", err)
+	}
+	if metaVersion != exp.BootstrapVersion {
+		return fmt.Errorf("schema drift: bootstrap version %q want %q", metaVersion, exp.BootstrapVersion)
+	}
+	if strings.ToLower(metaChecksum) != exp.Checksum {
+		return fmt.Errorf("schema drift: bootstrap checksum mismatch")
+	}
+	return nil
+}
+
+// ErrSchemaDrift is returned when VerifySchema detects an unexpected catalog state.
+var ErrSchemaDrift = errors.New("schema drift")

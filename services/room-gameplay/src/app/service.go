@@ -39,6 +39,7 @@ const (
 // ServiceDeps wires application ports.
 type ServiceDeps struct {
 	Sessions  SessionRepository
+	Commands  RoomCommandStore // durable only; nil keeps capability Memory + Service.mu path
 	Integrity GameIntegrity
 	Publisher EventPublisher
 	Audit     AuditSink
@@ -53,6 +54,9 @@ type Service struct {
 	mu       sync.Mutex // serialize per-process command handling for in-memory repo
 	outboxMu sync.Mutex // serialize DrainOutbox across worker + post-commit paths
 }
+
+// durable returns true when RoomCommandStore drives FOR UPDATE command transactions.
+func (s *Service) durable() bool { return s.deps.Commands != nil }
 
 // NewService constructs the application service.
 func NewService(deps ServiceDeps) *Service {
@@ -87,6 +91,10 @@ type CommandResult struct {
 
 // HandleCommand maps a catalog command onto Session/Room with GI append-before-commit.
 func (s *Service) HandleCommand(ctx context.Context, in CommandInput) CommandResult {
+	if s.durable() {
+		return s.handleCommandDurable(ctx, in)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -98,7 +106,7 @@ func (s *Service) HandleCommand(ctx context.Context, in CommandInput) CommandRes
 	}
 
 	// Stable replay of pre-room / global rejections — retry pending audit first.
-	if prior, ok := s.deps.Sessions.GetGlobalOutcome(in.CommandID); ok {
+	if prior, ok := s.deps.Sessions.GetGlobalOutcome(ctx, in.CommandID); ok {
 		return s.replayPrior(ctx, in, prior)
 	}
 
@@ -131,6 +139,9 @@ type ProvisionInput struct {
 
 // Provision handles POST /internal/v1/rooms/provision (idempotent by tournament/round/slot).
 func (s *Service) Provision(ctx context.Context, in ProvisionInput) CommandResult {
+	if s.durable() {
+		return s.provisionDurable(ctx, in)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -159,9 +170,9 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) CommandResul
 		RoundNumber:  in.RoundNumber,
 		SlotID:       in.SlotID,
 	}
-	if existing, ok := s.deps.Sessions.GetProvision(key); ok {
+	if existing, ok := s.deps.Sessions.GetProvision(ctx, key); ok {
 		seq := int64(0)
-		if sess, found := s.deps.Sessions.Get(domain.RoomID(existing)); found {
+		if sess, found := s.deps.Sessions.Get(ctx, domain.RoomID(existing)); found {
 			n := int64(sess.Room().Sequence())
 			seq = n
 		}
@@ -218,10 +229,10 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) CommandResul
 }
 
 // PlayerSnapshot builds a player-private reconnect snapshot.
-func (s *Service) PlayerSnapshot(roomID, playerID string) (map[string]any, error) {
+func (s *Service) PlayerSnapshot(ctx context.Context, roomID, playerID string) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.deps.Sessions.Get(domain.RoomID(roomID))
+	sess, ok := s.deps.Sessions.Get(ctx, domain.RoomID(roomID))
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -299,7 +310,7 @@ func (s *Service) DrainOutbox(ctx context.Context, limit int) (int, error) {
 	}
 	s.outboxMu.Lock()
 	defer s.outboxMu.Unlock()
-	pending, err := s.deps.Sessions.ListPendingOutbox(limit)
+	pending, err := s.deps.Sessions.ListPendingOutbox(ctx, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -315,7 +326,7 @@ func (s *Service) DrainOutbox(ctx context.Context, limit int) (int, error) {
 				return published, err
 			}
 		}
-		if err := s.deps.Sessions.MarkOutboxEntryPublished(entry.CommandID, now); err != nil {
+		if err := s.deps.Sessions.MarkOutboxEntryPublished(ctx, entry.CommandID, now); err != nil {
 			return published, err
 		}
 		published++
@@ -350,7 +361,7 @@ func (s *Service) handleCreateRoom(ctx context.Context, in CommandInput) Command
 	if in.PlayerID == "" {
 		return s.reject(ctx, in, "missing_player_id", nil, nil)
 	}
-	if live, exists := s.deps.Sessions.Get(domain.RoomID(roomID)); exists {
+	if live, exists := s.deps.Sessions.Get(ctx, domain.RoomID(roomID)); exists {
 		if prior, ok := live.Room().PriorOutcome(domain.CommandID(in.CommandID)); ok {
 			return s.replayPrior(ctx, in, prior)
 		}
@@ -392,7 +403,7 @@ func (s *Service) handleExisting(ctx context.Context, in CommandInput) CommandRe
 		}
 		in.RoomID = roomID
 		if roomID != "" {
-			if live, ok := s.deps.Sessions.Get(domain.RoomID(roomID)); ok {
+			if live, ok := s.deps.Sessions.Get(ctx, domain.RoomID(roomID)); ok {
 				if prior, ok := live.Room().PriorOutcome(domain.CommandID(in.CommandID)); ok {
 					return s.replayPrior(ctx, in, prior)
 				}
@@ -414,7 +425,7 @@ func (s *Service) handleExisting(ctx context.Context, in CommandInput) CommandRe
 	}
 	in.RoomID = roomID
 
-	live, ok := s.deps.Sessions.Get(domain.RoomID(roomID))
+	live, ok := s.deps.Sessions.Get(ctx, domain.RoomID(roomID))
 	if !ok {
 		return s.reject(ctx, in, "room_not_found", nil, nil)
 	}
@@ -689,7 +700,7 @@ func (s *Service) commitAccepted(
 	reservation MaterialReservation,
 ) CommandResult {
 	roomID := string(stage.Room().ID())
-	expectedRev := s.deps.Sessions.IntegrityRevision(roomID)
+	expectedRev := s.deps.Sessions.IntegrityRevision(ctx, roomID)
 	payloadBody := map[string]any{
 		"commandId": in.CommandID,
 		"type":      in.Type,
@@ -737,8 +748,8 @@ func (s *Service) commitAccepted(
 		}
 	}
 
-	audiences := s.feedAudiences(roomID, stage.Room(), in)
-	playerStart := s.deps.Sessions.PeekStreamSeq(roomID) + 1
+	audiences := s.feedAudiences(ctx, roomID, stage.Room(), in)
+	playerStart := s.deps.Sessions.PeekStreamSeq(ctx, roomID) + 1
 	feedEvents, playerHighWater := BuildFeedEvents(stage, seq, playerStart, in.CorrelationID, in.CommandID, out.Facts, audiences, prevSeq)
 	completion := BuildCompletionEvents(stage.Room(), stage.Game(), gameID, seq, in.CorrelationID, in.CommandID, out.Facts, s.deps.Clock.Now())
 	all := append(feedEvents, completion...)
@@ -771,7 +782,7 @@ func (s *Service) commitAccepted(
 		}
 		req.ProvisionRoomID = roomID
 	}
-	if err := s.deps.Sessions.Commit(req); err != nil {
+	if err := s.deps.Sessions.Commit(ctx, req); err != nil {
 		// Reservation already confirmed; do not cancel. Retry gets confirmed material and commits locally.
 		return CommandResult{Err: err}
 	}
@@ -784,7 +795,7 @@ func (s *Service) commitAccepted(
 	}))}
 }
 
-func (s *Service) feedAudiences(roomID string, room *domain.Room, in CommandInput) []FeedAudience {
+func (s *Service) feedAudiences(ctx context.Context, roomID string, room *domain.Room, in CommandInput) []FeedAudience {
 	seen := map[string]struct{}{}
 	var out []FeedAudience
 	add := func(playerID, sessionID string) {
@@ -808,7 +819,7 @@ func (s *Service) feedAudiences(roomID string, room *domain.Room, in CommandInpu
 				continue
 			}
 			pid := string(seat.PlayerID)
-			if sid, ok := s.deps.Sessions.PlayerSession(roomID, pid); ok {
+			if sid, ok := s.deps.Sessions.PlayerSession(ctx, roomID, pid); ok {
 				add(pid, sid)
 			}
 		}
@@ -857,7 +868,7 @@ func (s *Service) replayPrior(ctx context.Context, in CommandInput, prior domain
 }
 
 func (s *Service) deliverPendingAudit(ctx context.Context, commandID string) error {
-	rec, ok := s.deps.Sessions.GetPendingAudit(commandID)
+	rec, ok := s.deps.Sessions.GetPendingAudit(ctx, commandID)
 	if !ok {
 		return nil
 	}
@@ -867,7 +878,7 @@ func (s *Service) deliverPendingAudit(ctx context.Context, commandID string) err
 	if err := s.deps.Audit.Record(ctx, rec); err != nil {
 		return err
 	}
-	return s.deps.Sessions.MarkAuditComplete(commandID)
+	return s.deps.Sessions.MarkAuditComplete(ctx, commandID)
 }
 
 func (s *Service) reject(
@@ -924,7 +935,7 @@ func (s *Service) reject(
 		if prior, ok := room.PriorOutcome(domain.CommandID(in.CommandID)); ok {
 			return s.replayPrior(ctx, in, prior)
 		}
-	} else if prior, ok := s.deps.Sessions.GetGlobalOutcome(in.CommandID); ok {
+	} else if prior, ok := s.deps.Sessions.GetGlobalOutcome(ctx, in.CommandID); ok {
 		return s.replayPrior(ctx, in, prior)
 	}
 
@@ -943,7 +954,7 @@ func (s *Service) reject(
 	} else {
 		commitReq.GlobalOutcome = &out
 	}
-	if err := s.deps.Sessions.Commit(commitReq); err != nil {
+	if err := s.deps.Sessions.Commit(ctx, commitReq); err != nil {
 		return CommandResult{Err: err}
 	}
 
@@ -953,7 +964,7 @@ func (s *Service) reject(
 	if err := s.deps.Audit.Record(ctx, rec); err != nil {
 		return CommandResult{Err: err}
 	}
-	if err := s.deps.Sessions.MarkAuditComplete(in.CommandID); err != nil {
+	if err := s.deps.Sessions.MarkAuditComplete(ctx, in.CommandID); err != nil {
 		return CommandResult{Err: err}
 	}
 

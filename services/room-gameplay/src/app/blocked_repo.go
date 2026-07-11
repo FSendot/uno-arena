@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -8,54 +9,54 @@ import (
 	"unoarena/shared/audit"
 )
 
-// ErrPostgresAdapterBlocked is returned by configured-mode session storage when
-// the durable Postgres adapter is not implemented.
+// ErrPostgresAdapterBlocked is returned by misconfigured mode when DATABASE_URL
+// is absent and capability mode is not enabled.
 var ErrPostgresAdapterBlocked = errors.New("postgres_adapter_blocked")
 
-// BlockedSessionRepository refuses all persistence. Used in configured mode so
-// Room never silently falls back to an in-memory repository.
+// BlockedSessionRepository refuses all persistence. Used when Room is
+// misconfigured so it never silently falls back to an in-memory repository.
 type BlockedSessionRepository struct{}
 
-func (BlockedSessionRepository) Get(domain.RoomID) (*domain.Session, bool) {
+func (BlockedSessionRepository) Get(context.Context, domain.RoomID) (*domain.Session, bool) {
 	return nil, false
 }
 
-func (BlockedSessionRepository) Commit(CommitRequest) error {
+func (BlockedSessionRepository) Commit(context.Context, CommitRequest) error {
 	return ErrPostgresAdapterBlocked
 }
 
-func (BlockedSessionRepository) Delete(domain.RoomID) error {
+func (BlockedSessionRepository) Delete(context.Context, domain.RoomID) error {
 	return ErrPostgresAdapterBlocked
 }
 
-func (BlockedSessionRepository) ListPendingOutbox(int) ([]OutboxEntry, error) {
+func (BlockedSessionRepository) ListPendingOutbox(context.Context, int) ([]OutboxEntry, error) {
 	return nil, ErrPostgresAdapterBlocked
 }
 
-func (BlockedSessionRepository) MarkOutboxEntryPublished(string, time.Time) error {
+func (BlockedSessionRepository) MarkOutboxEntryPublished(context.Context, string, time.Time) error {
 	return ErrPostgresAdapterBlocked
 }
 
-func (BlockedSessionRepository) PlayerSession(string, string) (string, bool) {
+func (BlockedSessionRepository) PlayerSession(context.Context, string, string) (string, bool) {
 	return "", false
 }
 
-func (BlockedSessionRepository) GetProvision(ProvisionKey) (string, bool) {
+func (BlockedSessionRepository) GetProvision(context.Context, ProvisionKey) (string, bool) {
 	return "", false
 }
 
-func (BlockedSessionRepository) IntegrityRevision(string) int64 { return 0 }
+func (BlockedSessionRepository) IntegrityRevision(context.Context, string) int64 { return 0 }
 
-func (BlockedSessionRepository) PeekStreamSeq(string) int64 { return 0 }
+func (BlockedSessionRepository) PeekStreamSeq(context.Context, string) int64 { return 0 }
 
-func (BlockedSessionRepository) GetGlobalOutcome(string) (domain.CommandOutcome, bool) {
+func (BlockedSessionRepository) GetGlobalOutcome(context.Context, string) (domain.CommandOutcome, bool) {
 	return domain.CommandOutcome{}, false
 }
 
-func (BlockedSessionRepository) GetPendingAudit(string) (audit.RejectionRecord, bool) {
+func (BlockedSessionRepository) GetPendingAudit(context.Context, string) (audit.RejectionRecord, bool) {
 	return audit.RejectionRecord{}, false
 }
 
-func (BlockedSessionRepository) MarkAuditComplete(string) error {
+func (BlockedSessionRepository) MarkAuditComplete(context.Context, string) error {
 	return ErrPostgresAdapterBlocked
 }

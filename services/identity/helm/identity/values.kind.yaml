@@ -1,0 +1,32 @@
+# Local kind overlay for Identity durable + OIDC (ADR-0021/0023/0027).
+# Maps credentials from uno-arena-local-credentials; tag fallback only when kind=true + DEPLOYMENT_ENV=local.
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/identity
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: identity
+  DEPLOYMENT_ENV: local
+  # Writer DSN is secret-mapped; OIDC issuer uses in-cluster service DNS.
+  OIDC_ISSUER_URL: http://keycloak.uno-arena.svc.cluster.local:8080/realms/unoarena
+  # Token endpoint reachable from Identity pods (same cluster DNS).
+  OIDC_TOKEN_ENDPOINT: http://keycloak.uno-arena.svc.cluster.local:8080/realms/unoarena/protocol/openid-connect/token
+  OIDC_AUDIENCE: unoarena-cli
+  OIDC_CLIENT_ID: unoarena-cli
+  OIDC_ALLOW_HTTP: "true"
+  IDENTITY_ALLOW_PASSWORD_LOGIN: "true"
+  IDENTITY_OIDC_DIRECT_GRANT: "true"
+  IDENTITY_ALLOW_TEST_PROVISIONING: "true"
+  # Durable mode: no checkpoint HTTP invalidation worker.
+  # REDIS_URL / KAFKA_BROKERS intentionally omitted until those slices.
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  IDENTITY_INTERNAL_CREDENTIAL: identity-internal-credential
+  DATABASE_URL: identity-database-url

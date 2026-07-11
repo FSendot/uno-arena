@@ -30,6 +30,8 @@ var (
 	ErrStreamDenied = errors.New("stream subscription denied")
 	// ErrSnapshotRequired is returned when Last-Event-ID is unknown or evicted from the bound.
 	ErrSnapshotRequired = errors.New("snapshot_required")
+	// ErrLiveFeedUnavailable is returned when Redis fails during BeginSession (HTTP 503).
+	ErrLiveFeedUnavailable = errors.New("live_feed_unavailable")
 	// ErrSequenceConflict is returned when an ingest eventId conflicts with a prior sequence.
 	ErrSequenceConflict = errors.New("sequence_conflict")
 	// ErrSequenceNotIncreasing is returned when an ingest sequence is not strictly increasing.

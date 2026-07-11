@@ -8,6 +8,10 @@ env:
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/0
-  # Staging rollout blocked: Redis rate-limit adapter absent → /ready stays not-ready.
+  # Staging: set GATEWAY_PLAYER_FEED_REDIS_URL + GATEWAY_SPECTATOR_REDIS_URL for durable Redis;
+  # Kafka SessionInvalidated consumer remains PENDING.
 
 existingSecret: gateway-secrets
+# Inherits secretEnv from values.yaml (explicit GATEWAY_*_SERVICE_CREDENTIAL outbound
+# keys plus inbound producer credentials). Operators must provision matching values
+# in gateway-secrets for each peer audience.

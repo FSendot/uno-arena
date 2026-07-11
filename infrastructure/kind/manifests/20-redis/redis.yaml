@@ -1,0 +1,91 @@
+# Disposable Redis. No schema bootstrap Job (ADR-0028). No PVC/backup claim.
+# Local AOF (appendonly yes, appendfsync everysec) under emptyDir /data/appendonlydir
+# survives same-pod Redis container restart only. Pod replacement or kind reset may
+# lose emptyDir data; rebuild from Kafka. Redis is not authoritative.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/part-of: uno-arena
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: redis
+          image: redis:8.8.0-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - redis-server
+            - --dir
+            - /data
+            - --save
+            - ""
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --appenddirname
+            - appendonlydir
+            - --shutdown-on-sigterm
+            - default
+          ports:
+            - containerPort: 6379
+              name: redis
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              # PONG required: LOADING during AOF replay must fail readiness.
+              command: ["/bin/sh", "-c", "redis-cli ping | grep -q PONG"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "redis-cli ping | grep -q PONG"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: data
+          emptyDir: {}

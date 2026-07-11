@@ -1,13 +1,13 @@
 # No Service Mesh as Required Component
 
 ## Status
-Accepted
+Superseded by ADR-0025
 
 ## Context
 The platform can meet its current checkpoint needs without introducing the operational and cognitive overhead of a mandatory service mesh.
 
 ## Decision
-A service mesh is not a required component. It remains an optional future hardening choice. Private networking, service credentials, service-level auth, and correlation headers are sufficient at the checkpoint level.
+For the original checkpoint scope, a service mesh was not required. Private networking, service credentials, service-level auth, and correlation headers were sufficient for that checkpoint.
 
 ## Consequences
-The deployment model stays simpler and easier to operate. Mesh-specific platform work is deferred until there is a clear need. Basic identity, routing, and traceability still remain covered.
+The production architecture and threat model later introduced mandatory in-cluster mTLS at a workload scale where per-pod sidecars are undesirable. ADR-0025 supersedes this checkpoint decision with Istio Ambient.

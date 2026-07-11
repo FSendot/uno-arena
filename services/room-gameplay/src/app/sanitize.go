@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	TopicPlayerFeed      = "room.player-feed.events"
 	TopicSpectatorSafe   = "room.spectator-safe.events"
 	TopicGameplayMetrics = "room.gameplay.metrics"
 	TopicGameCompleted   = "room.game.completed"
@@ -72,7 +71,7 @@ func BuildFeedEvents(
 				continue
 			}
 			out = append(out, PublishedEvent{
-				Topic:          TopicPlayerFeed,
+				Topic:          "",
 				Stream:         StreamPlayer,
 				RoomID:         roomID,
 				EventID:        commandID + "-pf-" + strconv.Itoa(i) + "-" + strconv.Itoa(j),

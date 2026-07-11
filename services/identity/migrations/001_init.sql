@@ -1,5 +1,6 @@
 -- Identity authoritative schema (Postgres).
--- No cross-context tables.
+-- Empty-db baseline 001_init. No cross-context tables.
+-- Outbox is append-only for Debezium CDC (no published_at / polling index).
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
@@ -20,6 +21,18 @@ CREATE TABLE IF NOT EXISTS player_acls (
     granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (player_id, role)
 );
+
+-- Provider-neutral OIDC mapping: unique (issuer, subject) -> player (ADR-0023).
+CREATE TABLE IF NOT EXISTS external_identities (
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    player_id TEXT NOT NULL REFERENCES players (player_id),
+    linked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (issuer, subject)
+);
+
+CREATE INDEX IF NOT EXISTS external_identities_player_idx
+    ON external_identities (player_id);
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
@@ -45,19 +58,26 @@ CREATE TABLE IF NOT EXISTS command_idempotency (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Transactional outbox: same commit as session mutation; Debezium publishes (ADR-0016).
+-- Handlers append only — no published_at marking / app polling (ADR-0026).
 CREATE TABLE IF NOT EXISTS outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
     topic TEXT NOT NULL,
     partition_key TEXT NOT NULL,
+    schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
+    player_id TEXT,
     payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS outbox_events_unpublished_idx
-    ON outbox_events (created_at)
-    WHERE published_at IS NULL;
+COMMENT ON TABLE outbox_events IS
+    'Append-only SessionInvalidated bridge. Captured by Identity Debezium connector; never polled by the app.';
+COMMENT ON COLUMN outbox_events.event_type IS
+    'Logical event type for Outbox Event Router (SessionInvalidated).';
+COMMENT ON COLUMN outbox_events.schema_version IS
+    'Explicit AsyncAPI schema version; must equal 1.';
 
 INSERT INTO schema_migrations (version) VALUES ('001_init')
 ON CONFLICT (version) DO NOTHING;

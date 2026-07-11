@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -75,6 +76,54 @@ func (h *StreamHub) ActiveCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs)
+}
+
+// BeginSession implements SpectatorLiveFeed for capability mode.
+func (h *StreamHub) BeginSession(ctx context.Context, roomID domain.RoomID, lastEventID string) (LiveSession, error) {
+	_ = ctx
+	id, events, replay, cancel, err := h.Subscribe(roomID, lastEventID)
+	if err != nil && !errorsIsSnapshotRequired(err) && !errorsIsTerminal(err) {
+		return nil, err
+	}
+	if errorsIsTerminal(err) {
+		return nil, errTerminalRoom
+	}
+	sess := &hubLiveSession{
+		id:               id,
+		ch:               events,
+		replay:           replay,
+		cancel:           cancel,
+		snapshotRequired: errorsIsSnapshotRequired(err),
+	}
+	if errorsIsSnapshotRequired(err) {
+		return sess, errSnapshotRequired
+	}
+	return sess, nil
+}
+
+func errorsIsSnapshotRequired(err error) bool {
+	return err != nil && err.Error() == errSnapshotRequired.Error()
+}
+
+func errorsIsTerminal(err error) bool {
+	return err != nil && err.Error() == errTerminalRoom.Error()
+}
+
+type hubLiveSession struct {
+	id               string
+	ch               <-chan StreamEvent
+	replay           []StreamEvent
+	cancel           func()
+	snapshotRequired bool
+}
+
+func (s *hubLiveSession) Events() <-chan StreamEvent { return s.ch }
+func (s *hubLiveSession) Replay() []StreamEvent      { return s.replay }
+func (s *hubLiveSession) SnapshotRequired() bool     { return s.snapshotRequired }
+func (s *hubLiveSession) Close() {
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 // Subscribe registers an SSE subscriber. lastEventID enables bounded resume.

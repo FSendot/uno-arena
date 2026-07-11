@@ -31,6 +31,83 @@ func NewMemoryTournamentRepository() *MemoryTournamentRepository {
 	}
 }
 
+func (r *MemoryTournamentRepository) BeginExisting(id domain.TournamentID) (TournamentUnitOfWork, error) {
+	if !id.Valid() {
+		return nil, fmt.Errorf("tournamentId required")
+	}
+	r.mu.Lock()
+	uow := &memoryUoW{repo: r, tid: id}
+	if t, ok := r.byID[id]; ok {
+		uow.exists = true
+		uow.loaded = t.Clone()
+	}
+	return uow, nil
+}
+
+func (r *MemoryTournamentRepository) BeginCreate(id domain.TournamentID) (TournamentUnitOfWork, error) {
+	if !id.Valid() {
+		return nil, fmt.Errorf("tournamentId required")
+	}
+	r.mu.Lock()
+	uow := &memoryUoW{repo: r, tid: id, createPath: true}
+	if t, ok := r.byID[id]; ok {
+		uow.exists = true
+		uow.loaded = t.Clone()
+	}
+	return uow, nil
+}
+
+type memoryUoW struct {
+	repo       *MemoryTournamentRepository
+	tid        domain.TournamentID
+	loaded     *domain.Tournament
+	exists     bool
+	createPath bool
+	done       bool
+}
+
+func (u *memoryUoW) Loaded() *domain.Tournament { return u.loaded }
+func (u *memoryUoW) Exists() bool               { return u.exists }
+
+func (u *memoryUoW) LookupOutcome(commandID string) (envelope.Result, bool) {
+	if u == nil || u.done || commandID == "" {
+		return envelope.Result{}, false
+	}
+	out, ok := u.repo.outcomes[commandID]
+	return out, ok
+}
+
+func (u *memoryUoW) Commit(req CommitRequest) error {
+	if u == nil || u.done {
+		return fmt.Errorf("unit of work already finished")
+	}
+	defer u.unlock()
+	if u.repo.CommitErr != nil {
+		return u.repo.CommitErr
+	}
+	if u.repo.FailNextCommits > 0 {
+		u.repo.FailNextCommits--
+		return fmt.Errorf("injected commit failure")
+	}
+	return u.repo.applyCommitLocked(req)
+}
+
+func (u *memoryUoW) Rollback() error {
+	if u == nil || u.done {
+		return nil
+	}
+	u.unlock()
+	return nil
+}
+
+func (u *memoryUoW) unlock() {
+	if u.done {
+		return
+	}
+	u.done = true
+	u.repo.mu.Unlock()
+}
+
 func (r *MemoryTournamentRepository) Get(id domain.TournamentID) (*domain.Tournament, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -52,6 +129,10 @@ func (r *MemoryTournamentRepository) Commit(req CommitRequest) error {
 		r.FailNextCommits--
 		return fmt.Errorf("injected commit failure")
 	}
+	return r.applyCommitLocked(req)
+}
+
+func (r *MemoryTournamentRepository) applyCommitLocked(req CommitRequest) error {
 	if req.CommandID == "" {
 		return fmt.Errorf("commandId required for commit")
 	}
@@ -260,18 +341,18 @@ func NewFakePublisher() *FakePublisher {
 	return &FakePublisher{Published: make([]OutboxEvent, 0)}
 }
 
-func (p *FakePublisher) Publish(_ context.Context, events ...OutboxEvent) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.Calls++
-	if p.Err != nil {
-		return p.Err
+func (f *FakePublisher) Publish(_ context.Context, events ...OutboxEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls++
+	if f.Err != nil {
+		return f.Err
 	}
-	if p.FailNext > 0 {
-		p.FailNext--
+	if f.FailNext > 0 {
+		f.FailNext--
 		return fmt.Errorf("injected publish failure")
 	}
-	p.Published = append(p.Published, events...)
+	f.Published = append(f.Published, events...)
 	return nil
 }
 

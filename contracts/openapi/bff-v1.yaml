@@ -667,7 +667,49 @@ components:
           type: string
 
     CommandEnvelope:
+      description: |
+        Discriminated command envelope. `type` selects exactly one catalog variant;
+        each variant constrains `payload` and whether `expectedSequenceNumber` is
+        required (existing-room mutations) or prohibited (CreateRoom and tournament
+        commands). Gateway accepts only these envelope fields.
+      oneOf:
+        - $ref: "#/components/schemas/CreateRoomCommand"
+        - $ref: "#/components/schemas/JoinRoomCommand"
+        - $ref: "#/components/schemas/LeaveRoomCommand"
+        - $ref: "#/components/schemas/LockRoomCommand"
+        - $ref: "#/components/schemas/StartMatchCommand"
+        - $ref: "#/components/schemas/CancelRoomCommand"
+        - $ref: "#/components/schemas/PlayCardCommand"
+        - $ref: "#/components/schemas/DrawCardCommand"
+        - $ref: "#/components/schemas/ChooseColorCommand"
+        - $ref: "#/components/schemas/CallUnoCommand"
+        - $ref: "#/components/schemas/ReportMissingUnoCommand"
+        - $ref: "#/components/schemas/ReconnectToRoomCommand"
+        - $ref: "#/components/schemas/CreateTournamentCommand"
+        - $ref: "#/components/schemas/RegisterPlayerCommand"
+        - $ref: "#/components/schemas/CloseRegistrationCommand"
+      discriminator:
+        propertyName: type
+        mapping:
+          CreateRoom: "#/components/schemas/CreateRoomCommand"
+          JoinRoom: "#/components/schemas/JoinRoomCommand"
+          LeaveRoom: "#/components/schemas/LeaveRoomCommand"
+          LockRoom: "#/components/schemas/LockRoomCommand"
+          StartMatch: "#/components/schemas/StartMatchCommand"
+          CancelRoom: "#/components/schemas/CancelRoomCommand"
+          PlayCard: "#/components/schemas/PlayCardCommand"
+          DrawCard: "#/components/schemas/DrawCardCommand"
+          ChooseColor: "#/components/schemas/ChooseColorCommand"
+          CallUno: "#/components/schemas/CallUnoCommand"
+          ReportMissingUno: "#/components/schemas/ReportMissingUnoCommand"
+          ReconnectToRoom: "#/components/schemas/ReconnectToRoomCommand"
+          CreateTournament: "#/components/schemas/CreateTournamentCommand"
+          RegisterPlayer: "#/components/schemas/RegisterPlayerCommand"
+          CloseRegistration: "#/components/schemas/CloseRegistrationCommand"
+
+    CreateRoomCommand:
       type: object
+      additionalProperties: false
       required: [commandId, type, schemaVersion, payload]
       properties:
         commandId:
@@ -675,23 +717,43 @@ components:
           description: Idempotency key
         type:
           type: string
-          description: Command name from the design catalog
-          enum:
-            - CreateRoom
-            - JoinRoom
-            - LeaveRoom
-            - LockRoom
-            - StartMatch
-            - CancelRoom
-            - PlayCard
-            - DrawCard
-            - ChooseColor
-            - CallUno
-            - ReportMissingUno
-            - ReconnectToRoom
-            - CreateTournament
-            - RegisterPlayer
-            - CloseRegistration
+          enum: [CreateRoom]
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+            visibility:
+              type: string
+              enum: [public, private]
+            maxSeats:
+              description: |
+                Optional seat capacity. Omitted or nonpositive values default to 10
+                in domain handling. Explicit positive values must be integers in
+                2..10 inclusive; 1 and values greater than 10 are rejected.
+              anyOf:
+                - type: integer
+                  maximum: 0
+                  description: Nonpositive values default to 10
+                - type: integer
+                  minimum: 2
+                  maximum: 10
+
+    JoinRoomCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [JoinRoom]
         expectedSequenceNumber:
           type: integer
           format: int64
@@ -700,11 +762,359 @@ components:
         schemaVersion:
           type: integer
           enum: [1]
-          description: Must equal 1 (current BFF command envelope version)
         payload:
           type: object
-          additionalProperties: true
-          description: Command-specific object payload (required; may be empty {})
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+
+    LeaveRoomCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [LeaveRoom]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+
+    LockRoomCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [LockRoom]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+
+    StartMatchCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [StartMatch]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+            gameId:
+              type: string
+
+    CancelRoomCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [CancelRoom]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+
+    PlayCardCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [PlayCard]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+            cardId:
+              type: string
+
+    DrawCardCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [DrawCard]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+
+    ChooseColorCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [ChooseColor]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+            color:
+              type: string
+              enum: [red, yellow, green, blue]
+
+    CallUnoCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [CallUno]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+
+    ReportMissingUnoCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [ReportMissingUno]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+            targetId:
+              type: string
+
+    ReconnectToRoomCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, expectedSequenceNumber, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [ReconnectToRoom]
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            roomId:
+              type: string
+            disconnectVersion:
+              type: integer
+              format: int64
+              minimum: 0
+
+    CreateTournamentCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [CreateTournament]
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            tournamentId:
+              type: string
+            capacity:
+              type: integer
+              minimum: 1
+            retryBudget:
+              type: integer
+              minimum: 0
+            batchSize:
+              type: integer
+              minimum: 1
+
+    RegisterPlayerCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [RegisterPlayer]
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            tournamentId:
+              type: string
+            playerId:
+              type: string
+
+    CloseRegistrationCommand:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, schemaVersion, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          enum: [CloseRegistration]
+        schemaVersion:
+          type: integer
+          enum: [1]
+        payload:
+          type: object
+          additionalProperties: false
+          properties:
+            tournamentId:
+              type: string
 
     CommandResult:
       type: object

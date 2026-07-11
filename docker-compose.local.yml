@@ -12,13 +12,13 @@
 # volumes from this file.
 #
 # Probes: compose healthcheck maps to readiness (/ready). Liveness is /health in Helm only.
-# Base mode keeps Redis/Postgres/Kafka/EventStore/ClickHouse wired and does NOT set
+# Base mode keeps Redis/Postgres/Kafka/KurrentDB/ClickHouse wired and does NOT set
 # GATEWAY_CAPABILITY_MODE / ROOM_CAPABILITY_MODE / GATEWAY_ALLOW_FAKES /
 # ROOM_ALLOW_FAKES / GAME_INTEGRITY_ALLOW_MEMORY.
 # Gateway stays not-ready without a Redis rate-limit adapter; Room stays not-ready
 # without a Postgres session adapter; Game Integrity stays not-ready while
-# EVENTSTORE_URL is set (adapter blocked). For CLI capability mode (real HTTP paths,
-# GI explicit memory; EventStore omitted via capability overlay profile):
+# KURRENTDB_URL is set (adapter blocked). For CLI capability mode (real HTTP paths,
+# GI explicit memory; KurrentDB omitted via capability overlay profile):
 #   docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example config
 
 name: uno-arena-local
@@ -41,7 +41,7 @@ volumes:
   pg_tournament_data_v18:
   pg_ranking_data_v18:
   kafka_data:
-  eventstore_data:
+  kurrentdb_data:
   redis_data:
   clickhouse_data:
 
@@ -138,16 +138,16 @@ services:
       retries: 12
       start_period: 20s
 
-  eventstore:
-    image: ${EVENTSTORE_IMAGE:-eventstore/eventstore:24.10.14}
+  kurrentdb:
+    image: ${KURRENTDB_IMAGE:-kurrentplatform/kurrentdb:26.0.3-experimental-arm64-10.0-noble@sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e}
     environment:
-      EVENTSTORE_CLUSTER_SIZE: 1
-      EVENTSTORE_RUN_PROJECTIONS: None
-      EVENTSTORE_START_STANDARD_PROJECTIONS: "false"
-      EVENTSTORE_INSECURE: "true"
-      EVENTSTORE_ENABLE_ATOM_PUB_OVER_HTTP: "true"
+      KURRENTDB_CLUSTER_SIZE: 1
+      KURRENTDB_RUN_PROJECTIONS: None
+      KURRENTDB_START_STANDARD_PROJECTIONS: "false"
+      KURRENTDB_INSECURE: "true"
+      KURRENTDB_ENABLE_ATOM_PUB_OVER_HTTP: "true"
     volumes:
-      - eventstore_data:/var/lib/eventstore
+      - kurrentdb_data:/var/lib/kurrentdb
     networks: [uno_private]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:2113/health/live || exit 1"]
@@ -199,6 +199,10 @@ services:
       ANALYTICS_URL: http://analytics:8080
       RANKING_URL: http://ranking:8080
       GATEWAY_SERVICE_CREDENTIAL: ${GATEWAY_SERVICE_CREDENTIAL:-local-gw-backend}
+      GATEWAY_IDENTITY_SERVICE_CREDENTIAL: ${GATEWAY_IDENTITY_SERVICE_CREDENTIAL:-local-gw-backend}
+      GATEWAY_ROOM_SERVICE_CREDENTIAL: ${GATEWAY_ROOM_SERVICE_CREDENTIAL:-local-gw-backend}
+      GATEWAY_TOURNAMENT_SERVICE_CREDENTIAL: ${GATEWAY_TOURNAMENT_SERVICE_CREDENTIAL:-local-room-to-tournament}
+      GATEWAY_SPECTATOR_SERVICE_CREDENTIAL: ${GATEWAY_SPECTATOR_SERVICE_CREDENTIAL:-local-room-to-spectator}
       GATEWAY_IDENTITY_CREDENTIAL: ${GATEWAY_IDENTITY_CREDENTIAL:-local-gw-backend}
       GATEWAY_ROOM_CREDENTIAL: ${GATEWAY_ROOM_CREDENTIAL:-local-room-to-gw}
       GATEWAY_SPECTATOR_CREDENTIAL: ${GATEWAY_SPECTATOR_CREDENTIAL:-local-spectator-to-gw}
@@ -258,13 +262,13 @@ services:
       IDENTITY_SERVICE_CREDENTIAL: ${ROOM_IDENTITY_CREDENTIAL:-local-gw-backend}
       ROOM_IDENTITY_CREDENTIAL: ${ROOM_IDENTITY_CREDENTIAL:-local-gw-backend}
       SPECTATOR_VIEW_URL: http://spectator-view:8080
-      SPECTATOR_VIEW_SERVICE_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-gw-backend}
+      SPECTATOR_VIEW_SERVICE_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-room-to-spectator}
       RANKING_URL: http://ranking:8080
       RANKING_SERVICE_CREDENTIAL: ${RANKING_INTERNAL_CREDENTIAL:-local-ranking-internal}
       ANALYTICS_URL: http://analytics:8080
       ANALYTICS_SERVICE_CREDENTIAL: ${ANALYTICS_ROOM_CREDENTIAL:-local-analytics-room}
       TOURNAMENT_URL: http://tournament-orchestration:8080
-      TOURNAMENT_SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
+      TOURNAMENT_SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-room-to-tournament}
       GAME_INTEGRITY_URL: http://game-integrity:8080
       GAME_INTEGRITY_INTERNAL_CREDENTIAL: ${ROOM_GI_CREDENTIAL:-local-gi-room}
       DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-room-gameplay:5432/room_gameplay?sslmode=disable
@@ -292,14 +296,18 @@ services:
       dockerfile: services/game-integrity/Dockerfile
     environment:
       SERVICE_NAME: game-integrity
-      # EVENTSTORE_URL present => readiness blocked (eventstore_adapter_blocked) until real adapter exists.
-      EVENTSTORE_URL: ${EVENTSTORE_URL:-esdb://eventstore:2113?tls=false}
+      # Durable KurrentDB adapter (ADR-0035) + local-only envelope encryption (ADR-0024).
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      KURRENTDB_URL: ${KURRENTDB_URL:-kurrentdb://kurrentdb:2113?tls=false}
       GAME_INTEGRITY_INTERNAL_CREDENTIAL: ${GAME_INTEGRITY_INTERNAL_CREDENTIAL:-local-gi-room}
       GAME_INTEGRITY_AUDIT_CREDENTIAL: ${GAME_INTEGRITY_AUDIT_CREDENTIAL:-local-gi-operator}
+      GAME_INTEGRITY_ENVELOPE_PROVIDER: ${GAME_INTEGRITY_ENVELOPE_PROVIDER:-dev}
+      GAME_INTEGRITY_ENVELOPE_KEY_VERSION: ${GAME_INTEGRITY_ENVELOPE_KEY_VERSION:-1}
+      GAME_INTEGRITY_ENVELOPE_DEV_KEYS: ${GAME_INTEGRITY_ENVELOPE_DEV_KEYS:-1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
       KAFKA_BROKERS: kafka:9092
     networks: [uno_private]
     depends_on:
-      eventstore:
+      kurrentdb:
         condition: service_healthy
     healthcheck: *app_ready
 
@@ -310,8 +318,8 @@ services:
       dockerfile: services/tournament-orchestration/Dockerfile
     environment:
       SERVICE_NAME: tournament-orchestration
-      TOURNAMENT_INTERNAL_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
-      SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
+      TOURNAMENT_INTERNAL_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-room-to-tournament}
+      SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-room-to-tournament}
       ROOM_GAMEPLAY_URL: http://room-gameplay:8080
       DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-tournament:5432/tournament?sslmode=disable
       KAFKA_BROKERS: kafka:9092
@@ -354,7 +362,7 @@ services:
       dockerfile: services/spectator-view/Dockerfile
     environment:
       SERVICE_NAME: spectator-view
-      SPECTATOR_VIEW_INTERNAL_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-gw-backend}
+      SPECTATOR_VIEW_INTERNAL_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-room-to-spectator}
       KAFKA_BROKERS: kafka:9092
       REDIS_URL: redis://redis:6379/5
     networks: [uno_private]

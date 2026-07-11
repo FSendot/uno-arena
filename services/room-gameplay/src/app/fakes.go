@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +82,7 @@ func NewMemorySessionRepository() *MemorySessionRepository {
 	}
 }
 
-func (r *MemorySessionRepository) Get(roomID domain.RoomID) (*domain.Session, bool) {
+func (r *MemorySessionRepository) Get(_ context.Context, roomID domain.RoomID) (*domain.Session, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.byID[roomID]
@@ -93,7 +94,7 @@ func (r *MemorySessionRepository) Get(roomID domain.RoomID) (*domain.Session, bo
 	return s.Clone(), true
 }
 
-func (r *MemorySessionRepository) Commit(req CommitRequest) error {
+func (r *MemorySessionRepository) Commit(_ context.Context, req CommitRequest) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.FailCommit != nil {
@@ -136,14 +137,14 @@ func (r *MemorySessionRepository) Commit(req CommitRequest) error {
 	return nil
 }
 
-func (r *MemorySessionRepository) Delete(roomID domain.RoomID) error {
+func (r *MemorySessionRepository) Delete(_ context.Context, roomID domain.RoomID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.byID, roomID)
 	return nil
 }
 
-func (r *MemorySessionRepository) ListPendingOutbox(limit int) ([]OutboxEntry, error) {
+func (r *MemorySessionRepository) ListPendingOutbox(_ context.Context, limit int) ([]OutboxEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if limit <= 0 {
@@ -184,7 +185,7 @@ func (r *MemorySessionRepository) MarkOutboxPublished(eventID string, publishedA
 }
 
 // MarkOutboxEntryPublished marks an entire outbox entry published by command id.
-func (r *MemorySessionRepository) MarkOutboxEntryPublished(commandID string, publishedAt time.Time) error {
+func (r *MemorySessionRepository) MarkOutboxEntryPublished(_ context.Context, commandID string, publishedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.FailMark != nil {
@@ -203,47 +204,47 @@ func (r *MemorySessionRepository) MarkOutboxEntryPublished(commandID string, pub
 	return nil
 }
 
-func (r *MemorySessionRepository) PlayerSession(roomID, playerID string) (string, bool) {
+func (r *MemorySessionRepository) PlayerSession(_ context.Context, roomID, playerID string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	v, ok := r.playerSess[roomID+"|"+playerID]
 	return v, ok
 }
 
-func (r *MemorySessionRepository) GetProvision(key ProvisionKey) (string, bool) {
+func (r *MemorySessionRepository) GetProvision(_ context.Context, key ProvisionKey) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	v, ok := r.provisions[key]
 	return v, ok
 }
 
-func (r *MemorySessionRepository) IntegrityRevision(roomID string) int64 {
+func (r *MemorySessionRepository) IntegrityRevision(_ context.Context, roomID string) int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.revisions[roomID]
 }
 
-func (r *MemorySessionRepository) PeekStreamSeq(roomID string) int64 {
+func (r *MemorySessionRepository) PeekStreamSeq(_ context.Context, roomID string) int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.streamSeq[roomID]
 }
 
-func (r *MemorySessionRepository) GetGlobalOutcome(commandID string) (domain.CommandOutcome, bool) {
+func (r *MemorySessionRepository) GetGlobalOutcome(_ context.Context, commandID string) (domain.CommandOutcome, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out, ok := r.globalOutcomes[commandID]
 	return out, ok
 }
 
-func (r *MemorySessionRepository) GetPendingAudit(commandID string) (audit.RejectionRecord, bool) {
+func (r *MemorySessionRepository) GetPendingAudit(_ context.Context, commandID string) (audit.RejectionRecord, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec, ok := r.pendingAudits[commandID]
 	return rec, ok
 }
 
-func (r *MemorySessionRepository) MarkAuditComplete(commandID string) error {
+func (r *MemorySessionRepository) MarkAuditComplete(_ context.Context, commandID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.FailMarkAudit != nil {
@@ -291,6 +292,36 @@ func (f *FakeGameIntegrity) Append(_ context.Context, req AppendRequest) (Append
 	f.Appends = append(f.Appends, req)
 	rev := req.ExpectedRevision + 1
 	return AppendResult{LogOffset: req.ExpectedRevision, Revision: rev}, nil
+}
+
+func (f *FakeGameIntegrity) Replay(_ context.Context, roomID string, fromOffset int64) (ReplayResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailAll != nil {
+		return ReplayResult{}, f.FailAll
+	}
+	out := ReplayResult{RoomID: roomID}
+	hasExact := false
+	for _, a := range f.Appends {
+		if a.RoomID != roomID {
+			continue
+		}
+		off := a.ExpectedRevision
+		if off < fromOffset {
+			continue
+		}
+		out.Entries = append(out.Entries, ReplayEntry{
+			Offset: off, EventID: a.EventID, EventType: a.EventType, GameID: a.GameID, Payload: a.Payload,
+		})
+		out.Revision = off + 1
+		if off == fromOffset {
+			hasExact = true
+		}
+	}
+	if !hasExact {
+		return ReplayResult{}, fmt.Errorf("gi replay: missing entry at offset %d", fromOffset)
+	}
+	return out, nil
 }
 
 func (f *FakeGameIntegrity) Len() int {
@@ -524,7 +555,11 @@ func (f *FakeDealSource) ReserveDraw(_ context.Context, roomID, gameID, operatio
 	return res, nil
 }
 
-func (f *FakeDealSource) Confirm(_ context.Context, reservationID string) error {
+func (f *FakeDealSource) Confirm(ctx context.Context, reservationID string) error {
+	return f.ConfirmAt(ctx, "", "", reservationID)
+}
+
+func (f *FakeDealSource) ConfirmAt(_ context.Context, _, _, reservationID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ConfirmCalls++
@@ -551,7 +586,11 @@ func (f *FakeDealSource) Confirm(_ context.Context, reservationID string) error 
 	return nil
 }
 
-func (f *FakeDealSource) Cancel(_ context.Context, reservationID string) error {
+func (f *FakeDealSource) Cancel(ctx context.Context, reservationID string) error {
+	return f.CancelAt(ctx, "", "", reservationID)
+}
+
+func (f *FakeDealSource) CancelAt(_ context.Context, _, _, reservationID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.pending[reservationID]; !ok {

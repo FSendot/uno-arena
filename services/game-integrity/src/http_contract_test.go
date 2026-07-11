@@ -55,7 +55,11 @@ func withRoomCred(extra map[string]string) map[string]string {
 }
 
 func withAuditCred(extra map[string]string) map[string]string {
-	h := map[string]string{internalCredentialHeader: testAuditCredential}
+	h := map[string]string{
+		internalCredentialHeader: testAuditCredential,
+		auditActorHeader:         "test-operator",
+		auditReasonHeader:        "test-audit-reason",
+	}
 	for k, v := range extra {
 		h[k] = v
 	}
@@ -92,7 +96,7 @@ func TestHealthAndReadyOffline(t *testing.T) {
 	}
 }
 
-func TestReadyUnwiredAndEventStoreBlocked(t *testing.T) {
+func TestReadyUnwiredAndKurrentDBBlocked(t *testing.T) {
 	unwired := NewServer(nil, testRoomCredential, testAuditCredential, "", "repository_unwired")
 	w := httptest.NewRecorder()
 	unwired.routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
@@ -100,32 +104,54 @@ func TestReadyUnwiredAndEventStoreBlocked(t *testing.T) {
 		t.Fatalf("unwired: %d %s", w.Code, w.Body.String())
 	}
 
-	blocked := NewServer(nil, testRoomCredential, testAuditCredential, "", "eventstore_adapter_blocked")
+	blocked := NewServer(nil, testRoomCredential, testAuditCredential, "", "envelope_provider_required")
 	w2 := httptest.NewRecorder()
 	blocked.routes().ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/ready", nil))
-	if w2.Code != http.StatusServiceUnavailable || decodeJSON(t, w2)["reason"] != "eventstore_adapter_blocked" {
-		t.Fatalf("blocked: %d %s", w2.Code, w2.Body.String())
+	if w2.Code != http.StatusServiceUnavailable || decodeJSON(t, w2)["reason"] != "envelope_provider_required" {
+		t.Fatalf("not ready: %d %s", w2.Code, w2.Body.String())
 	}
 }
 
-func TestResolveRuntimeMemoryGateAndEventStore(t *testing.T) {
-	t.Setenv("EVENTSTORE_URL", "")
+func TestResolveRuntimeMemoryGateAndKurrentDB(t *testing.T) {
+	t.Setenv("KURRENTDB_URL", "")
 	t.Setenv("GAME_INTEGRITY_ALLOW_MEMORY", "")
-	repo, mode, reason := resolveRuntime()
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_PROVIDER", "")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_DEV_MASTER_KEY", "")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_DEV_KEYS", "")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_KEY_VERSION", "")
+	t.Setenv("DEPLOYMENT_ENV", "")
+	repo, _, mode, reason := resolveRuntime()
 	if repo != nil || mode != "" || reason != "memory_not_allowed" {
 		t.Fatalf("default: repo=%v mode=%q reason=%q", repo != nil, mode, reason)
 	}
 
 	t.Setenv("GAME_INTEGRITY_ALLOW_MEMORY", "true")
-	repo, mode, reason = resolveRuntime()
+	repo, _, mode, reason = resolveRuntime()
 	if repo == nil || mode != "offline" || reason != "" {
 		t.Fatalf("memory: repo=%v mode=%q reason=%q", repo != nil, mode, reason)
 	}
 
-	t.Setenv("EVENTSTORE_URL", "esdb://localhost:2113")
-	repo, mode, reason = resolveRuntime()
-	if repo != nil || reason != "eventstore_adapter_blocked" {
-		t.Fatalf("eventstore: repo=%v mode=%q reason=%q", repo != nil, mode, reason)
+	t.Setenv("KURRENTDB_URL", "kurrentdb://localhost:2113")
+	repo, _, mode, reason = resolveRuntime()
+	if repo != nil || reason != "envelope_provider_required" {
+		t.Fatalf("kurrentdb without envelope: repo=%v mode=%q reason=%q", repo != nil, mode, reason)
+	}
+
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_PROVIDER", "dev")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_KEY_VERSION", "1")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_DEV_KEYS", "1:not-64-hex")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_DEV_MASTER_KEY", "")
+	t.Setenv("DEPLOYMENT_ENV", "local")
+	repo, _, mode, reason = resolveRuntime()
+	if repo != nil || reason != "envelope_dev_keyring_invalid" {
+		t.Fatalf("bad master key: repo=%v mode=%q reason=%q", repo != nil, mode, reason)
+	}
+
+	t.Setenv("DEPLOYMENT_ENV", "staging")
+	t.Setenv("GAME_INTEGRITY_ENVELOPE_DEV_KEYS", "1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	repo, _, mode, reason = resolveRuntime()
+	if repo != nil || reason != "envelope_dev_provider_forbidden_outside_local" {
+		t.Fatalf("staging forbids dev: repo=%v mode=%q reason=%q", repo != nil, mode, reason)
 	}
 }
 

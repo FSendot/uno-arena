@@ -1,11 +1,21 @@
 replicaCount: 2
 
 env:
-  EVENTSTORE_URL: esdb://eventstore.uno-arena.svc.cluster.local:2113?tls=false
+  KURRENTDB_URL: kurrentdb://kurrentdb.uno-arena.svc.cluster.local:2113?tls=false
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
-  # Production rollout blocked: EventStoreDB adapter absent → /ready eventstore_adapter_blocked.
+  DEPLOYMENT_ENV: production
+  # Fail-closed until a managed KMS/HSM provider is configured (ADR-0024).
+  # Do not set GAME_INTEGRITY_ENVELOPE_PROVIDER=dev in production.
+  GAME_INTEGRITY_ENVELOPE_PROVIDER: kms
+  GAME_INTEGRITY_ENVELOPE_KEY_VERSION: "1"
 
 existingSecret: game-integrity-secrets
+secretEnv:
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
+  # Clear base chart's local-only keyring mapping; KMS is required instead.
+  GAME_INTEGRITY_ENVELOPE_DEV_KEYS: ""
+  GAME_INTEGRITY_ENVELOPE_DEV_MASTER_KEY: ""
 
 resources:
   requests:

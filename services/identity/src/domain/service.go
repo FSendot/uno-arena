@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -8,28 +9,30 @@ import (
 
 // ServiceDeps wires Identity application use-cases for the offline slice.
 type ServiceDeps struct {
-	Players    PlayerRepository
-	Sessions   SessionRepository
-	Hasher     PasswordHasher
-	IDs        IDGenerator
-	Tokens     TokenGenerator
-	Clock      Clock
-	SessionTTL time.Duration
-	Transport  InvalidationTransport
-	DrainLimit int
+	Players      PlayerRepository
+	Sessions     SessionRepository
+	Hasher       PasswordHasher
+	IDs          IDGenerator
+	Tokens       TokenGenerator
+	Clock        Clock
+	SessionTTL   time.Duration
+	Transport    InvalidationTransport
+	DrainLimit   int
+	AllowedRoles []string // OIDC ACL allowlist; empty → DefaultAllowedRoles
 }
 
 // Service implements register/login/session validation with single-active-session.
 type Service struct {
-	players    PlayerRepository
-	sessions   SessionRepository
-	hasher     PasswordHasher
-	ids        IDGenerator
-	tokens     TokenGenerator
-	clock      Clock
-	sessionTTL time.Duration
-	transport  InvalidationTransport
-	drainLimit int
+	players      PlayerRepository
+	sessions     SessionRepository
+	hasher       PasswordHasher
+	ids          IDGenerator
+	tokens       TokenGenerator
+	clock        Clock
+	sessionTTL   time.Duration
+	transport    InvalidationTransport
+	drainLimit   int
+	allowedRoles []string
 }
 
 func NewService(d ServiceDeps) *Service {
@@ -45,16 +48,21 @@ func NewService(d ServiceDeps) *Service {
 	if limit <= 0 {
 		limit = 32
 	}
+	allowed := d.AllowedRoles
+	if len(allowed) == 0 {
+		allowed = append([]string(nil), DefaultAllowedRoles...)
+	}
 	return &Service{
-		players:    d.Players,
-		sessions:   d.Sessions,
-		hasher:     d.Hasher,
-		ids:        d.IDs,
-		tokens:     d.Tokens,
-		clock:      clock,
-		sessionTTL: ttl,
-		transport:  d.Transport,
-		drainLimit: limit,
+		players:      d.Players,
+		sessions:     d.Sessions,
+		hasher:       d.Hasher,
+		ids:          d.IDs,
+		tokens:       d.Tokens,
+		clock:        clock,
+		sessionTTL:   ttl,
+		transport:    d.Transport,
+		drainLimit:   limit,
+		allowedRoles: allowed,
 	}
 }
 
@@ -80,17 +88,19 @@ type WhoamiResult struct {
 	Username  string
 }
 
-func (s *Service) Register(username, password string) (Player, error) {
+func (s *Service) Register(ctx context.Context, username, password string) (Player, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
 		return Player{}, ErrInvalidInput
 	}
-	if _, exists := s.players.FindByUsername(username); exists {
+	if _, exists, err := s.players.FindByUsername(ctx, username); err != nil {
+		return Player{}, MapRepoError(err)
+	} else if exists {
 		return Player{}, ErrUsernameTaken
 	}
 	hash, err := s.hasher.Hash(password)
 	if err != nil {
-		return Player{}, err
+		return Player{}, MapRepoError(err)
 	}
 	now := s.clock.Now()
 	p := Player{
@@ -99,18 +109,21 @@ func (s *Service) Register(username, password string) (Player, error) {
 		PasswordHash: hash,
 		CreatedAt:    now,
 	}
-	if err := s.players.Save(p); err != nil {
-		return Player{}, err
+	if err := s.players.RegisterWithDefaultACL(ctx, p, "player"); err != nil {
+		return Player{}, MapRepoError(err)
 	}
 	return p, nil
 }
 
-func (s *Service) Login(username, password string) (LoginResult, error) {
+func (s *Service) Login(ctx context.Context, username, password string) (LoginResult, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
 		return LoginResult{}, ErrInvalidCredentials
 	}
-	player, ok := s.players.FindByUsername(username)
+	player, ok, err := s.players.FindByUsername(ctx, username)
+	if err != nil {
+		return LoginResult{}, MapRepoError(err)
+	}
 	encoded := DummyPasswordHash()
 	if ok {
 		encoded = player.PasswordHash
@@ -118,7 +131,34 @@ func (s *Service) Login(username, password string) (LoginResult, error) {
 	if !s.hasher.Compare(encoded, password) || !ok {
 		return LoginResult{}, ErrInvalidCredentials
 	}
+	return s.establishSession(ctx, player)
+}
 
+// EstablishOIDCSession creates an UnoArena session for an already-validated OIDC principal.
+// Never accepts or stores provider tokens/raw claims — only issuer/subject/username/roles.
+func (s *Service) EstablishOIDCSession(ctx context.Context, issuer, subject, username string, roles []string) (LoginResult, error) {
+	issuer = strings.TrimSpace(issuer)
+	subject = strings.TrimSpace(subject)
+	username = strings.TrimSpace(username)
+	if issuer == "" || subject == "" || username == "" {
+		return LoginResult{}, ErrInvalidInput
+	}
+	now := s.clock.Now()
+	newPlayer := Player{
+		ID:           PlayerID(s.ids.NewID("player")),
+		Username:     username,
+		PasswordHash: "",
+		CreatedAt:    now,
+	}
+	accepted := NormalizeAcceptedRoles(roles, s.allowedRoles)
+	player, _, err := s.players.LinkOrResolveExternal(ctx, issuer, subject, username, newPlayer, accepted)
+	if err != nil {
+		return LoginResult{}, MapRepoError(err)
+	}
+	return s.establishSession(ctx, player)
+}
+
+func (s *Service) establishSession(ctx context.Context, player Player) (LoginResult, error) {
 	now := s.clock.Now()
 	token, err := s.tokens.NewToken()
 	if err != nil {
@@ -134,7 +174,9 @@ func (s *Service) Login(username, password string) (LoginResult, error) {
 	}
 
 	var previous *Session
-	if active, found := s.sessions.FindActiveByPlayer(player.ID); found {
+	if active, found, err := s.sessions.FindActiveByPlayer(ctx, player.ID); err != nil {
+		return LoginResult{}, MapRepoError(err)
+	} else if found {
 		inv := active
 		ts := now
 		inv.Status = SessionStatusInvalidated
@@ -150,13 +192,14 @@ func (s *Service) Login(username, password string) (LoginResult, error) {
 			SessionID:  inv.ID,
 			Reason:     inv.InvalidationReason,
 			OccurredAt: now,
-		}
+		}.Normalize()
 	}
-	if err := s.sessions.ReplaceActiveSession(previous, sess, eventFor); err != nil {
-		return LoginResult{}, err
+	if err := s.sessions.ReplaceActiveSession(ctx, previous, sess, eventFor); err != nil {
+		return LoginResult{}, MapRepoError(err)
 	}
-	// Publish after commit; failure leaves outbox pending — never compensate sessions.
-	_, _ = s.DrainOutbox(s.drainLimit)
+	if s.transport != nil {
+		_, _ = s.DrainOutbox(ctx, s.drainLimit)
+	}
 
 	return LoginResult{
 		SessionID: sess.ID,
@@ -165,79 +208,100 @@ func (s *Service) Login(username, password string) (LoginResult, error) {
 	}, nil
 }
 
-func (s *Service) RevokeSession(id SessionID, reason string) error {
-	sess, ok := s.sessions.FindByID(id)
+func (s *Service) RevokeSession(ctx context.Context, id SessionID, reason string) error {
+	sess, ok, err := s.sessions.FindByID(ctx, id)
+	if err != nil {
+		return MapRepoError(err)
+	}
 	if !ok {
 		return ErrSessionNotFound
 	}
 	if sess.Status != SessionStatusActive {
-		return nil // idempotent
+		return nil
 	}
 	if reason == "" {
 		reason = ReasonLogout
 	}
 	now := s.clock.Now()
-	if err := s.invalidateWithOutbox(sess, reason, now); err != nil {
-		return err
+	if err := s.invalidateWithOutbox(ctx, sess, reason, now); err != nil {
+		return MapRepoError(err)
 	}
-	_, _ = s.DrainOutbox(s.drainLimit)
+	if s.transport != nil {
+		_, _ = s.DrainOutbox(ctx, s.drainLimit)
+	}
 	return nil
 }
 
-func (s *Service) ValidateToken(token string) (SessionPrincipal, error) {
+func (s *Service) ValidateToken(ctx context.Context, token string) (SessionPrincipal, error) {
 	if token == "" {
 		return SessionPrincipal{}, ErrSessionInvalid
 	}
-	sess, ok := s.sessions.FindByTokenHash(HashToken(token))
+	sess, ok, err := s.sessions.FindByTokenHash(ctx, HashToken(token))
+	if err != nil {
+		return SessionPrincipal{}, MapRepoError(err)
+	}
 	if !ok {
 		return SessionPrincipal{}, ErrSessionNotFound
 	}
-	return s.principalFromSession(sess)
+	return s.principalFromSession(ctx, sess)
 }
 
 // ValidateSessionBinding authorizes a forwarded sessionId+playerId pair under a
 // service credential. sessionId is a durable session identity, not an opaque
 // bearer token — callers must not present it as Authorization Bearer.
-func (s *Service) ValidateSessionBinding(sessionID SessionID, playerID PlayerID) (SessionPrincipal, error) {
+func (s *Service) ValidateSessionBinding(ctx context.Context, sessionID SessionID, playerID PlayerID) (SessionPrincipal, error) {
 	if sessionID == "" || playerID == "" {
 		return SessionPrincipal{}, ErrInvalidInput
 	}
-	sess, ok := s.sessions.FindByID(sessionID)
+	sess, ok, err := s.sessions.FindByID(ctx, sessionID)
+	if err != nil {
+		return SessionPrincipal{}, MapRepoError(err)
+	}
 	if !ok {
 		return SessionPrincipal{}, ErrSessionNotFound
 	}
 	if sess.PlayerID != playerID {
 		return SessionPrincipal{}, ErrSessionInvalid
 	}
-	return s.principalFromSession(sess)
+	return s.principalFromSession(ctx, sess)
 }
 
-func (s *Service) principalFromSession(sess Session) (SessionPrincipal, error) {
+func (s *Service) principalFromSession(ctx context.Context, sess Session) (SessionPrincipal, error) {
 	now := s.clock.Now()
 	if err := sess.IsActiveAt(now); err != nil {
 		if err == ErrSessionExpired && sess.Status == SessionStatusActive {
-			if invErr := s.invalidateWithOutbox(sess, ReasonExpired, now); invErr != nil {
-				// Do not claim expiry succeeded; never authorize on persist failure.
-				return SessionPrincipal{}, ErrSessionInvalid
+			if invErr := s.invalidateWithOutbox(ctx, sess, ReasonExpired, now); invErr != nil {
+				return SessionPrincipal{}, MapRepoError(invErr)
 			}
-			_, _ = s.DrainOutbox(s.drainLimit)
+			if s.transport != nil {
+				_, _ = s.DrainOutbox(ctx, s.drainLimit)
+			}
 		}
 		return SessionPrincipal{}, err
+	}
+	roles := []string{"player"}
+	if listed, err := s.players.ListRoles(ctx, sess.PlayerID); err != nil {
+		return SessionPrincipal{}, MapRepoError(err)
+	} else if len(listed) > 0 {
+		roles = listed
 	}
 	return SessionPrincipal{
 		PlayerID:  sess.PlayerID,
 		SessionID: sess.ID,
-		Roles:     []string{"player"},
+		Roles:     roles,
 		ExpiresAt: sess.ExpiresAt,
 	}, nil
 }
 
-func (s *Service) Whoami(token string) (WhoamiResult, error) {
-	principal, err := s.ValidateToken(token)
+func (s *Service) Whoami(ctx context.Context, token string) (WhoamiResult, error) {
+	principal, err := s.ValidateToken(ctx, token)
 	if err != nil {
 		return WhoamiResult{}, err
 	}
-	player, ok := s.players.FindByID(principal.PlayerID)
+	player, ok, err := s.players.FindByID(ctx, principal.PlayerID)
+	if err != nil {
+		return WhoamiResult{}, MapRepoError(err)
+	}
 	if !ok {
 		return WhoamiResult{}, ErrPlayerNotFound
 	}
@@ -249,12 +313,12 @@ func (s *Service) Whoami(token string) (WhoamiResult, error) {
 }
 
 // DrainOutbox delivers pending SessionInvalidated events via the transport and
-// marks them published. Stops on first delivery failure (remaining stay pending).
-func (s *Service) DrainOutbox(limit int) (int, error) {
+// marks them published. Capability-mode only — durable production never polls.
+func (s *Service) DrainOutbox(ctx context.Context, limit int) (int, error) {
 	if s.transport == nil || s.sessions == nil {
 		return 0, errors.New("outbox dependencies not configured")
 	}
-	pending, err := s.sessions.ListPendingOutbox(limit)
+	pending, err := s.sessions.ListPendingOutbox(ctx, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -264,7 +328,7 @@ func (s *Service) DrainOutbox(limit int) (int, error) {
 		if err := s.transport.Deliver(entry.Event); err != nil {
 			return published, err
 		}
-		if err := s.sessions.MarkOutboxPublished(entry.Event.EventID, now); err != nil {
+		if err := s.sessions.MarkOutboxPublished(ctx, entry.Event.EventID, now); err != nil {
 			return published, err
 		}
 		published++
@@ -272,7 +336,7 @@ func (s *Service) DrainOutbox(limit int) (int, error) {
 	return published, nil
 }
 
-func (s *Service) invalidateWithOutbox(sess Session, reason string, now time.Time) error {
+func (s *Service) invalidateWithOutbox(ctx context.Context, sess Session, reason string, now time.Time) error {
 	ts := now
 	sess.Status = SessionStatusInvalidated
 	if reason == ReasonExpired {
@@ -286,6 +350,6 @@ func (s *Service) invalidateWithOutbox(sess Session, reason string, now time.Tim
 		SessionID:  sess.ID,
 		Reason:     reason,
 		OccurredAt: now,
-	}
-	return s.sessions.InvalidateWithOutbox(sess, evt)
+	}.Normalize()
+	return s.sessions.InvalidateWithOutbox(ctx, sess, evt)
 }

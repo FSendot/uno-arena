@@ -1,0 +1,91 @@
+# Tournament Postgres bootstrap Job (ADR-0027).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-postgres-tournament
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: bootstrap-postgres-tournament
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/context: tournament
+    uno-arena.local/bootstrap: postgres
+    uno-arena.local/non-production: "true"
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootstrap-postgres-tournament
+        uno-arena.local/context: tournament
+        uno-arena.local/bootstrap: postgres
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          image: uno-arena/bootstrap:local
+          imagePullPolicy: IfNotPresent
+          args: ["postgres"]
+          env:
+            - name: CONTEXT_NAME
+              value: tournament
+            - name: PGHOST
+              value: postgres-tournament.uno-arena.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: tournament
+            - name: ADVISORY_LOCK_KEY
+              value: "27003"
+            - name: EXPECTED_VERSION
+              value: "001_init"
+            - name: MIGRATION_FILE
+              value: /bootstrap/migrations/tournament-orchestration/001_init.sql
+            - name: FINGERPRINT_ENV
+              value: /bootstrap/fingerprints/tournament-orchestration.env
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-admin-user
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-admin-password
+            - name: BOOTSTRAP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-bootstrap-user
+            - name: BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-bootstrap-password
+            - name: RUNTIME_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-runtime-user
+            - name: RUNTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-runtime-password
+            - name: CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-cdc-user
+            - name: CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: tournament-cdc-password
+            - name: CDC_PUBLICATION
+              value: tournament_cdc_outbox
+            - name: CDC_TABLE
+              value: outbox_events
+            - name: CDC_PEER_TABLE
+              value: ""

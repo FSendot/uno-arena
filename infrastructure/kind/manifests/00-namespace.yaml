@@ -1,0 +1,21 @@
+# Shared local namespace matching Helm discovery (*.uno-arena.svc.cluster.local).
+# Disposable local foundation only — not a production namespace claim.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uno-arena
+  labels:
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/foundation: "true"
+    uno-arena.local/non-production: "true"
+---
+# Optional scratch namespace for ad-hoc operator experiments. Services and
+# foundation datastores live in uno-arena.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uno-arena-local
+  labels:
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/foundation: "scratch"
+    uno-arena.local/non-production: "true"

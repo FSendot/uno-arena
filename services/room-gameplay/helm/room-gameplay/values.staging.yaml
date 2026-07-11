@@ -1,6 +1,7 @@
 replicaCount: 1
 
 env:
+  DEPLOYMENT_ENV: staging
   GATEWAY_URL: http://gateway.uno-arena.svc.cluster.local:8080
   IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
@@ -10,8 +11,7 @@ env:
   GAME_INTEGRITY_URL: http://game-integrity.uno-arena.svc.cluster.local:8080
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
-  # Staging configured-mode rollout blocked: /ready always postgres_adapter_blocked
-  # until a durable Postgres session adapter exists (DATABASE_URL does not unblock).
+  # Durable Postgres adapter is implemented; Debezium Kafka + Redis sink delivery PENDING.
 
 timerWorker:
   enabled: false

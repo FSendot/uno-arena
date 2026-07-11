@@ -29,10 +29,23 @@ const (
 type Server struct {
 	svc                *Service
 	internalCredential string
+	mode               string
+	readyReason        string
+	durableReady       func(context.Context) error
 }
 
 func NewServer(svc *Service, internalCredential string) *Server {
-	return &Server{svc: svc, internalCredential: internalCredential}
+	return &Server{svc: svc, internalCredential: internalCredential, mode: "capability"}
+}
+
+func serverFromRuntime(rt tournamentRuntime, cred string) *Server {
+	return &Server{
+		svc:                rt.svc,
+		internalCredential: cred,
+		mode:               rt.mode,
+		readyReason:        rt.readyReason,
+		durableReady:       rt.durableReady,
+	}
 }
 
 // Routes returns the injectable HTTP handler tree.
@@ -78,14 +91,36 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.isReady() {
-		_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", "internal credential not configured", correlation.FromHTTP(r.Header).CorrelationID, "")
+		reason := s.readyReason
+		if reason == "" {
+			reason = "not_ready"
+		}
+		_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", reason, correlation.FromHTTP(r.Header).CorrelationID, "")
 		return
+	}
+	if s.durableReady != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.durableReady(ctx); err != nil {
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", "schema_or_database_unavailable", correlation.FromHTTP(r.Header).CorrelationID, "")
+			return
+		}
 	}
 	_ = httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready", "service": "tournament-orchestration"})
 }
 
 func (s *Server) isReady() bool {
-	return s.internalCredential != ""
+	if s.internalCredential == "" {
+		return false
+	}
+	switch s.mode {
+	case "misconfigured":
+		return false
+	case "durable":
+		return s.durableReady != nil && s.readyReason == ""
+	default:
+		return s.readyReason == ""
+	}
 }
 
 func (s *Server) requireReady(w http.ResponseWriter, r *http.Request) bool {
@@ -611,21 +646,23 @@ func main() {
 	if cred == "" {
 		cred = os.Getenv("SERVICE_CREDENTIAL")
 	}
-	repo := NewMemoryTournamentRepository()
-	svc := NewService(ServiceDeps{
-		Repo:      repo,
-		Rooms:     NewFakeRoomProvisioner(),
-		Publisher: NoopPublisher{},
-		Audit:     NewMemoryAudit(),
-		Clock:     systemClock{},
-		IDs:       randomIDs{},
-	})
-	srv := NewServer(svc, cred)
+	rt, err := wireTournamentRuntime()
+	if err != nil {
+		log.Fatalf("tournament runtime: %v", err)
+	}
+	srv := serverFromRuntime(rt, cred)
+	if !rt.ready && rt.mode == "durable" {
+		// Keep serving /health + /ready=503 with fail-closed wiring.
+		srv.readyReason = rt.readyReason
+	}
+	if rt.mode == "misconfigured" {
+		srv.readyReason = rt.readyReason
+	}
 	httpSrv := &http.Server{Addr: ":8080", Handler: srv.Routes()}
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"tournament-orchestration","event":"startup"}`)
+		log.Printf(`{"level":"info","service":"tournament-orchestration","event":"startup","mode":"%s"}`, rt.mode)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -641,4 +678,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
+	if rt.pool != nil {
+		rt.pool.Close()
+	}
 }

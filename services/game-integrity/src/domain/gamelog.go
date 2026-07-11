@@ -55,6 +55,49 @@ func NewGameLog(roomID RoomID) (*GameLog, error) {
 	}, nil
 }
 
+// RestoreGameLog rebuilds a GameLog from previously accepted entries.
+// Offsets must be gapless from 0, event IDs unique, and roomID valid.
+// Idempotency outcomes are reconstructed so duplicate/conflict semantics match a live log.
+func RestoreGameLog(roomID RoomID, entries []GameLogEntry) (*GameLog, error) {
+	if !roomID.Valid() {
+		return nil, errors.New("roomId required")
+	}
+	g := &GameLog{
+		roomID:  roomID,
+		entries: make([]GameLogEntry, 0, len(entries)),
+		byEvent: map[EventID]eventRecord{},
+	}
+	for i, e := range entries {
+		if e.Offset != LogOffset(i) {
+			return nil, errors.New("game log offsets must be gapless from zero")
+		}
+		if !e.EventID.Valid() {
+			return nil, errors.New("game log entry requires eventId")
+		}
+		if _, exists := g.byEvent[e.EventID]; exists {
+			return nil, errors.New("game log eventIds must be unique")
+		}
+		payload := append([]byte(nil), e.Payload...)
+		entry := GameLogEntry{
+			Offset:    e.Offset,
+			EventID:   e.EventID,
+			EventType: e.EventType,
+			GameID:    e.GameID,
+			Payload:   payload,
+		}
+		g.entries = append(g.entries, entry)
+		fact := logAppendedFact(e.EventID, e.Offset, e.EventType)
+		rev := g.Revision()
+		g.byEvent[e.EventID] = eventRecord{
+			eventType: e.EventType,
+			gameID:    e.GameID,
+			payload:   append([]byte(nil), payload...),
+			outcome:   acceptedAppend([]Fact{fact}, e.Offset, rev),
+		}
+	}
+	return g, nil
+}
+
 func (g *GameLog) RoomID() RoomID { return g.roomID }
 
 // Revision is the number of successfully appended entries (next expected revision).

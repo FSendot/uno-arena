@@ -35,6 +35,24 @@ func NewPlayerRating(playerID PlayerID, cfg RatingConfig) *PlayerRating {
 	}
 }
 
+// RestorePlayerRating rebuilds an aggregate from durable rating values without history.
+// Prior history remains authoritative in Postgres; empty in-memory history/keys mean
+// this instance only applies the next command in the current transaction.
+func RestorePlayerRating(playerID PlayerID, cfg RatingConfig, casualElo, tournamentPlacementRating int) *PlayerRating {
+	cfg = cfg.withDefaults()
+	return &PlayerRating{
+		playerID:                  playerID,
+		config:                    cfg,
+		casualElo:                 casualElo,
+		tournamentPlacementRating: tournamentPlacementRating,
+		history:                   nil,
+		outcomes:                  map[CommandID]CommandOutcome{},
+		processedEvents:           map[EventID]CommandOutcome{},
+		casualKeys:                map[GameID]CommandOutcome{},
+		tournamentKeys:            map[string]CommandOutcome{},
+	}
+}
+
 func (p *PlayerRating) PlayerID() PlayerID { return p.playerID }
 func (p *PlayerRating) CasualElo() EloRating {
 	return EloRating{Value: p.casualElo}

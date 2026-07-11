@@ -16,7 +16,8 @@ spec:
     spec:
       containers:
         - name: {{ .Release.Name }}
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          image: {{ include "spectator-view.image" . | quote }}
+          imagePullPolicy: {{ include "spectator-view.imagePullPolicy" . }}
           ports:
             - containerPort: 8080
           env:
@@ -26,11 +27,13 @@ spec:
             {{- end }}
             {{- if .Values.existingSecret }}
             {{- range $envName, $key := .Values.secretEnv }}
+            {{- if and $key (ne $key "") }}
             - name: {{ $envName }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $.Values.existingSecret | quote }}
                   key: {{ $key | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
           readinessProbe:

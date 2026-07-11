@@ -38,6 +38,9 @@ func OpenUnoWindow(
 
 func (w UnoWindow) IsOpen() bool { return w.open }
 
+// ClosedByNextTurn reports whether the window was closed because the next turn began.
+func (w UnoWindow) ClosedByNextTurn() bool { return w.closedByNextTurn }
+
 // IsTimely reports whether nowUTC is strictly before expiresAt and the window is still open.
 // At the exact expiresAt instant the window is no longer timely (boundary closed).
 func (w UnoWindow) IsTimely(nowUTC time.Time) bool {

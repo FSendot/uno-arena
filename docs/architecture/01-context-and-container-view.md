@@ -45,7 +45,7 @@ The BFF is the only external boundary. Clients do not talk to microservices dire
 
 For this implementation, the repo-owned simple CLI is the sole client and test interface. A graphical interface is deferred for later refactoring and must continue to use only the BFF REST/SSE boundary.
 
-The platform is split by bounded context, not by transport technology. SSE, Kafka, Postgres, Redis, and EventStoreDB are containers or infrastructure choices, not domain boundaries.
+The platform is split by bounded context, not by transport technology. SSE, Kafka, Postgres, Redis, and KurrentDB are containers or infrastructure choices, not domain boundaries.
 
 ## Container View
 
@@ -73,14 +73,16 @@ flowchart TB
         TimerWorker["Room Timer Worker"]
         TournamentWorkers["Sharded Tournament Provisioning Workers"]
         ProjectionWorkers["Projection Rebuilders"]
+        BootstrapJobs["Context Postgres Bootstrap Jobs"]
+        AnalyticsBootstrap["Analytics ClickHouse Bootstrap Job"]
     end
 
     subgraph Data["Data Stores"]
-        IdentityDB["Postgres"]
-        RoomDB["Postgres"]
-        EventStore["EventStoreDB"]
-        TourneyDB["Postgres"]
-        RankDB["Postgres"]
+        IdentityDB["Identity HA Postgres Cluster"]
+        RoomDB["Room HA Postgres Cluster"]
+        KurrentDB["KurrentDB 26.0.3 LTS"]
+        TourneyDB["Tournament HA Postgres Cluster"]
+        RankDB["Ranking HA Postgres Cluster"]
         Redis["Redis"]
         ClickHouse["ClickHouse"]
         Kafka["Kafka"]
@@ -98,7 +100,7 @@ flowchart TB
     RoomSvc --> IntegritySvc
     RoomSvc --> Kafka
     RoomSvc --> Redis
-    IntegritySvc --> EventStore
+    IntegritySvc --> KurrentDB
     IntegritySvc --> Kafka
     TourneySvc --> TourneyDB
     TourneySvc --> Kafka
@@ -116,9 +118,46 @@ flowchart TB
     TournamentWorkers --> TourneyDB
     TournamentWorkers --> RoomSvc
     ProjectionWorkers --> Kafka
+    BootstrapJobs --> IdentityDB
+    BootstrapJobs --> RoomDB
+    BootstrapJobs --> TourneyDB
+    BootstrapJobs --> RankDB
+    AnalyticsBootstrap --> ClickHouse
 ```
 
 ## Container Notes
+
+- `Context Postgres Bootstrap Jobs`
+  - one context-owned Kubernetes Job per Postgres database, completed before the corresponding service and CDC connector become ready
+  - acquires a context-specific advisory lock, initializes only an empty database, and accepts an existing database only at the exact expected schema version
+  - uses a dedicated DDL credential; runtime services and workers have no schema mutation privileges
+  - never drops or rewrites an unexpected schema; disposable reset is an explicit operator action
+
+- `Context HA Postgres clusters`
+  - one primary and two synchronous standbys represent one database boundary per Postgres-backed context, never application-visible shards
+  - authoritative traffic uses the stable fenced read-write endpoint and requires primary-plus-one-standby acknowledgment
+  - standby reads are allowed only for contracts explicitly tolerant of lag; local `kind` uses one instance per context and makes no HA claim
+
+- `Analytics ClickHouse Bootstrap Job`
+  - owns Analytics tables, materialized views, retention policies, and the exact schema-version marker
+  - initializes only empty storage or accepts exact-current state; unexpected state fails unchanged
+  - uses a dedicated DDL credential unavailable to the Analytics runtime service
+
+- `Game Integrity / KurrentDB and Redis initialization`
+  - Game Integrity validates KurrentDB policy, expected-revision support, credentials, and envelope-key access; streams are created lazily on first append
+  - local ARM64 uses the pinned official-publisher 26.0.3 experimental ARM build and must pass real persistence/restart tests; failure never falls back to memory
+  - Redis-owning services validate a versioned context key prefix and required capabilities, then safely load Lua scripts on every target node
+  - neither store is forced through a relational schema bootstrap Job
+
+- `Kafka`
+  - production uses at least three rack/zone-aware brokers; every domain, projection, DLQ, replacement, and Connect internal topic uses replication factor 3 with minimum ISR 2
+  - all producers require `acks=all` and idempotence; unclean leader election is disabled
+  - local Docker Compose and `kind` may use a single replica only as an explicitly non-HA verification topology
+
+- `Backup and recovery plane`
+  - stores encrypted Postgres WAL/base backups, KurrentDB/key-history recovery material, and ClickHouse backups outside the primary cluster failure domain using backup-only credentials
+  - restores quarterly into isolated infrastructure and verifies context invariants, Game Integrity replay/commitments, decryptability, CDC/checkpoints, and measured RPO/RTO
+  - does not treat Redis persistence or local `kind` volumes as authoritative backup
 
 - `Realtime Gateway / BFF`
   - the only public HTTP and SSE entrypoint; all client traffic uses REST command envelopes and SSE
@@ -160,8 +199,10 @@ flowchart TB
 ## Local and Test Topology
 
 - Local development can run the BFF plus a reduced set of services and backing stores.
+- Production application, worker, CDC, and datastore namespaces are enrolled in Istio Ambient with strict L4 mTLS and service-account workload identities. The `kind` integration topology verifies the same security path without claiming target-scale capacity.
 - The repo-owned simple CLI under `client-checkpoint/` is the sole client and automated test driver for this implementation; a graphical UI is deferred and must still use only the BFF REST/SSE boundary.
 - Integration tests should cover command validation and rejection audit records, SSE fan-out including `409 snapshot_required`, spectator admission/denial and terminal stream close, advisory Uno countdown correction, replay, and cross-context event consumption.
-- **Offline capability adapters vs production adapters:** capability mode uses real service HTTP paths (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE`) with bounded in-memory edge/principal limiters and a memory session repository where Postgres is absent, plus explicit Game Integrity memory. Isolated-test fakes remain behind `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` only. Room Gameplay HTTP bridges carry the same event *names* and canonical domain fields as AsyncAPI, but each sink receives a destination-specific HTTP body (documented transform — not identical to the Kafka envelope). Postgres, Kafka, Redis, EventStoreDB, and ClickHouse remain required production architecture adapters and are **not** claimed as implemented. Gateway Redis, Room Postgres, and GI EventStore readiness intentionally block staging/production rollout until those adapters exist. Migrations under `services/*/migrations/` document intended schemas for the production stores.
-- EventStoreDB, Postgres, Redis, Kafka, and ClickHouse should all be replaceable with test containers or lightweight local equivalents in non-production runs once their adapters exist.
+- **Offline capability adapters vs durable adapters:** capability mode uses real service HTTP paths (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `ANALYTICS_CAPABILITY_MODE`) with bounded in-memory edge/principal limiters and a memory session repository where Postgres is absent, plus explicit Game Integrity memory. Isolated-test fakes remain behind `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` only. Room Gameplay HTTP bridges carry the same event *names* and canonical domain fields as AsyncAPI, but each sink receives a destination-specific HTTP body (documented transform — not identical to the Kafka envelope). Identity/Room/Ranking/Tournament Postgres, GI KurrentDB, Analytics ClickHouse HTTP, Spectator Redis projection, and Gateway Redis rate-limit + direct LiveFeed SSE durable adapters are implemented when configured; **Kafka connectors/ingestion and Debezium player-feed sink remain pending**. Capability/fakes retain the in-process Hub; configured Gateway `/ready` pings every configured Redis client. Migrations under `services/*/migrations/` document intended schemas for the durable stores.
+- KurrentDB, Postgres, Redis, Kafka, and ClickHouse should all be exercised as real local containers once their adapters exist.
+- External ingress TLS, ambient east-west mTLS, Game Integrity envelope encryption, and encrypted storage/backups are independent layers; none substitutes for another.
 - The logical topology stays the same across environments even when containers are collapsed for local speed.

@@ -255,7 +255,7 @@ func TestAudit_MarkCompleteFailureReplayNoDuplicate_ThenRestart(t *testing.T) {
 	if rej.Err == nil || !strings.Contains(rej.Err.Error(), "mark boom") {
 		t.Fatalf("MarkAuditComplete failure must surface, got %+v", rej)
 	}
-	if _, ok := sessions.GetPendingAudit("bad"); !ok {
+	if _, ok := sessions.GetPendingAudit(context.Background(), "bad"); !ok {
 		t.Fatal("pending audit must remain after mark failure")
 	}
 	raw, err := os.ReadFile(path)
@@ -277,7 +277,7 @@ func TestAudit_MarkCompleteFailureReplayNoDuplicate_ThenRestart(t *testing.T) {
 	if replay.Result.Status != envelope.StatusRejected {
 		t.Fatalf("replay=%+v", replay.Result)
 	}
-	if _, ok := sessions.GetPendingAudit("bad"); ok {
+	if _, ok := sessions.GetPendingAudit(context.Background(), "bad"); ok {
 		t.Fatal("pending audit must clear after successful mark")
 	}
 	raw, err = os.ReadFile(path)

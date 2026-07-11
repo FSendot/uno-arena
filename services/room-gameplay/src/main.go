@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +28,6 @@ var timerCommandAllowlist = map[string]struct{}{
 	app.CmdForfeitPlayer:        {},
 	app.CmdSkipDisconnectedTurn: {},
 }
-
 // Server wires HTTP handlers to the Room Gameplay application service.
 type Server struct {
 	svc                *app.Service
@@ -37,6 +36,7 @@ type Server struct {
 	serviceName        string
 	ready              bool
 	notReadyReason     string
+	durableReady       func(context.Context) error
 }
 
 // NewServer constructs an injectable HTTP server.
@@ -106,6 +106,14 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+		return
+	}
+	if s.durableReady != nil {
+		if err := s.durableReady(r.Context()); err != nil {
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", "schema_or_db", "", "")
+			return
+		}
+		_ = httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready", "service": s.serviceName})
 		return
 	}
 	if !s.ready {
@@ -277,7 +285,7 @@ func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request, roomID 
 		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "playerId required", "", "")
 		return
 	}
-	snap, err := s.svc.PlayerSnapshot(roomID, playerID)
+	snap, err := s.svc.PlayerSnapshot(r.Context(), roomID, playerID)
 	if err != nil {
 		switch {
 		case errors.Is(err, app.ErrNotFound):
@@ -486,285 +494,36 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	worker := NewOutboxRetryWorker(wired.Service)
-	worker.Start()
-	defer worker.Stop()
+
+	if cfg.WorkerRole == "room-timer" {
+		if wired.Mode != "durable" || wired.Timers == nil {
+			log.Fatal("WORKER_ROLE=room-timer requires durable mode with Redis timers")
+		}
+		tw := NewTimerWorker(wired.Timers, cfg.RoomGameplayURL, cfg.TimerCredential)
+		tw.Start()
+		defer tw.Stop()
+		log.Printf(`{"level":"info","service":"%s","event":"timer_worker_startup","mode":%q}`, cfg.ServiceName, wired.Mode)
+		select {}
+	}
+
+	// Capability-only: OutboxRetryWorker + MultiDestinationPublisher drain.
+	// Durable mode relies on Debezium CDC — never start polling outbox workers.
+	if wired.Mode == "capability" || wired.Mode == "capability-fakes" {
+		worker := NewOutboxRetryWorker(wired.Service)
+		worker.Start()
+		defer worker.Stop()
+	}
+
+	// Durable API: autonomous GI reconciliation (markers survive commit failure).
+	if wired.Mode == "durable" && wired.Sessions != nil && wired.Deps.Integrity != nil {
+		rw := NewReconciliationWorker(wired.Sessions, wired.Deps.Integrity, wired.Deps.Deals)
+		rw.Start()
+		defer rw.Stop()
+	}
 
 	srv := NewServerWithTimerCred(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.ServiceName)
 	srv.SetReady(wired.Ready, wired.NotReadyReason)
+	srv.durableReady = wired.DurableReady
 	log.Printf(`{"level":"info","service":"%s","event":"startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
 	log.Fatal(http.ListenAndServe(":8080", srv.routes()))
-}
-
-// roomRuntimeConfig is the env-derived Room process wiring input.
-type roomRuntimeConfig struct {
-	ServiceName       string
-	ServiceCredential string
-	TimerCredential   string
-	GatewayURL        string
-	GatewayCred       string
-	IdentityURL       string
-	IdentityCred      string
-	GameIntegrityURL  string
-	GameIntegrityCred string
-	DatabaseURL       string
-	AuditLogPath      string
-	AllowFakes        bool
-	CapabilityMode    bool
-	SpectatorURL      string
-	SpectatorCred     string
-	RankingURL        string
-	RankingCred       string
-	AnalyticsURL      string
-	AnalyticsCred     string
-	TournamentURL     string
-	TournamentCred    string
-}
-
-type roomRuntime struct {
-	Service        *app.Service
-	Deps           app.ServiceDeps
-	Ready          bool
-	NotReadyReason string
-	Mode           string
-}
-
-func loadRoomRuntimeConfig() roomRuntimeConfig {
-	cred := strings.TrimSpace(os.Getenv("SERVICE_CREDENTIAL"))
-	if cred == "" {
-		cred = strings.TrimSpace(os.Getenv("ROOM_SERVICE_CREDENTIAL"))
-	}
-	gatewayCred := strings.TrimSpace(os.Getenv("GATEWAY_SERVICE_CREDENTIAL"))
-	if gatewayCred == "" {
-		gatewayCred = cred
-	}
-	svcName := os.Getenv("SERVICE_NAME")
-	if svcName == "" {
-		svcName = "room-gameplay"
-	}
-	return roomRuntimeConfig{
-		ServiceName:       svcName,
-		ServiceCredential: cred,
-		TimerCredential:   strings.TrimSpace(os.Getenv("ROOM_TIMER_SERVICE_CREDENTIAL")),
-		GatewayURL:        strings.TrimSpace(os.Getenv("GATEWAY_URL")),
-		GatewayCred:       gatewayCred,
-		IdentityURL:       strings.TrimSpace(os.Getenv("IDENTITY_URL")),
-		IdentityCred: firstNonEmptyEnv(
-			os.Getenv("IDENTITY_SERVICE_CREDENTIAL"),
-			os.Getenv("ROOM_IDENTITY_CREDENTIAL"),
-			cred,
-		),
-		GameIntegrityURL: strings.TrimSpace(os.Getenv("GAME_INTEGRITY_URL")),
-		GameIntegrityCred: firstNonEmptyEnv(
-			os.Getenv("GAME_INTEGRITY_INTERNAL_CREDENTIAL"),
-			os.Getenv("ROOM_GAME_INTEGRITY_CREDENTIAL"),
-			cred,
-		),
-		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		AuditLogPath:   strings.TrimSpace(os.Getenv("ROOM_AUDIT_LOG_PATH")),
-		AllowFakes:     envTruthy("ROOM_ALLOW_FAKES") || envTruthy("ALLOW_FAKES"),
-		CapabilityMode: envTruthy("ROOM_CAPABILITY_MODE"),
-		SpectatorURL:   strings.TrimSpace(os.Getenv("SPECTATOR_VIEW_URL")),
-		SpectatorCred:  firstEnv("SPECTATOR_VIEW_SERVICE_CREDENTIAL", gatewayCred),
-		RankingURL:     strings.TrimSpace(os.Getenv("RANKING_URL")),
-		RankingCred:    firstEnv("RANKING_SERVICE_CREDENTIAL", gatewayCred),
-		AnalyticsURL:   strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
-		AnalyticsCred:  firstEnv("ANALYTICS_SERVICE_CREDENTIAL", gatewayCred),
-		TournamentURL:  strings.TrimSpace(os.Getenv("TOURNAMENT_URL")),
-		TournamentCred: firstEnv("TOURNAMENT_SERVICE_CREDENTIAL", gatewayCred),
-	}
-}
-
-// wireRoomRuntime selects isolated fakes, real-service capability, or configured mode.
-// Configured mode never silently falls back to memory; readiness reports
-// postgres_adapter_blocked until a durable Postgres session adapter exists.
-// Capability mode uses MemorySessionRepository only as a missing-Postgres stand-in
-// with real HTTP Identity/GI/publisher/JSONL audit — not a production adapter masquerade.
-func wireRoomRuntime(cfg roomRuntimeConfig) (roomRuntime, error) {
-	clock := app.SystemClock{}
-
-	multiPublisher := app.NewMultiDestinationPublisher(app.PublisherDestinations{
-		GatewayURL:     cfg.GatewayURL,
-		GatewayCred:    cfg.GatewayCred,
-		SpectatorURL:   cfg.SpectatorURL,
-		SpectatorCred:  cfg.SpectatorCred,
-		RankingURL:     cfg.RankingURL,
-		RankingCred:    cfg.RankingCred,
-		AnalyticsURL:   cfg.AnalyticsURL,
-		AnalyticsCred:  cfg.AnalyticsCred,
-		TournamentURL:  cfg.TournamentURL,
-		TournamentCred: cfg.TournamentCred,
-	}, nil)
-
-	var publisher app.EventPublisher = app.NewFakeEventPublisher()
-	if cfg.GatewayURL != "" || cfg.SpectatorURL != "" || cfg.RankingURL != "" {
-		publisher = multiPublisher
-	}
-
-	if cfg.AllowFakes {
-		deps := app.ServiceDeps{
-			Sessions:  app.NewMemorySessionRepository(),
-			Integrity: app.NewFakeGameIntegrity(),
-			Publisher: publisher,
-			Audit:     app.NewFakeAuditSink(),
-			Deals:     app.NewFakeDealSource(),
-			Clock:     clock,
-			SessionsV: app.AllowAllSessionValidator{},
-		}
-		if cfg.IdentityURL != "" {
-			deps.SessionsV = app.NewHTTPSessionValidator(cfg.IdentityURL, cfg.IdentityCred, nil)
-		}
-		return roomRuntime{
-			Service: app.NewService(deps),
-			Deps:    deps,
-			Ready:   true,
-			Mode:    "capability-fakes",
-		}, nil
-	}
-
-	if cfg.CapabilityMode {
-		return wireRoomCapabilityRuntime(cfg, clock, multiPublisher)
-	}
-
-	// Configured / production mode: real HTTP adapters; never memory fallback.
-	ready := false
-	notReadyReason := "postgres_adapter_blocked"
-	_ = cfg.DatabaseURL // presence or absence: Postgres adapter is not implemented.
-
-	var integrity app.GameIntegrity = app.ClosedGameIntegrity{}
-	var deals app.DealSource = app.ClosedDealSource{}
-	if cfg.GameIntegrityURL != "" {
-		integrity = app.NewHTTPGameIntegrity(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
-		deals = app.NewHTTPDealSource(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
-	}
-
-	var sessionsV app.SessionValidator = app.ClosedSessionValidator{}
-	if cfg.IdentityURL != "" {
-		sessionsV = app.NewHTTPSessionValidator(cfg.IdentityURL, cfg.IdentityCred, nil)
-	}
-
-	var auditSink app.AuditSink = app.NewStderrJSONLAuditSink()
-	if cfg.AuditLogPath != "" {
-		sink, err := app.OpenJSONLAuditSink(cfg.AuditLogPath)
-		if err != nil {
-			return roomRuntime{}, err
-		}
-		auditSink = sink
-	}
-
-	deps := app.ServiceDeps{
-		Sessions:  app.BlockedSessionRepository{},
-		Integrity: integrity,
-		Publisher: publisher,
-		Audit:     auditSink,
-		Deals:     deals,
-		Clock:     clock,
-		SessionsV: sessionsV,
-	}
-	if cfg.TimerCredential == "" && notReadyReason == "postgres_adapter_blocked" {
-		// Keep postgres reason primary; timer still required for full readiness later.
-	}
-	return roomRuntime{
-		Service:        app.NewService(deps),
-		Deps:           deps,
-		Ready:          ready,
-		NotReadyReason: notReadyReason,
-		Mode:           "configured",
-	}, nil
-}
-
-func wireRoomCapabilityRuntime(cfg roomRuntimeConfig, clock app.Clock, publisher *app.MultiDestinationPublisher) (roomRuntime, error) {
-	var integrity app.GameIntegrity = app.ClosedGameIntegrity{}
-	var deals app.DealSource = app.ClosedDealSource{}
-	if cfg.GameIntegrityURL != "" {
-		integrity = app.NewHTTPGameIntegrity(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
-		deals = app.NewHTTPDealSource(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
-	}
-
-	var sessionsV app.SessionValidator = app.ClosedSessionValidator{}
-	if cfg.IdentityURL != "" {
-		sessionsV = app.NewHTTPSessionValidator(cfg.IdentityURL, cfg.IdentityCred, nil)
-	}
-
-	var auditSink app.AuditSink = app.NewStderrJSONLAuditSink()
-	if cfg.AuditLogPath != "" {
-		sink, err := app.OpenJSONLAuditSink(cfg.AuditLogPath)
-		if err != nil {
-			return roomRuntime{}, err
-		}
-		auditSink = sink
-	}
-
-	deps := app.ServiceDeps{
-		// Memory only as missing-Postgres stand-in — not a production adapter claim.
-		Sessions:  app.NewMemorySessionRepository(),
-		Integrity: integrity,
-		Publisher: publisher,
-		Audit:     auditSink,
-		Deals:     deals,
-		Clock:     clock,
-		SessionsV: sessionsV,
-	}
-
-	ready := true
-	notReadyReason := ""
-	if missing := roomCapabilityMissing(cfg); len(missing) > 0 {
-		ready = false
-		notReadyReason = "capability_dependencies_missing: " + strings.Join(missing, ",")
-	}
-
-	return roomRuntime{
-		Service:        app.NewService(deps),
-		Deps:           deps,
-		Ready:          ready,
-		NotReadyReason: notReadyReason,
-		Mode:           "capability",
-	}, nil
-}
-
-func roomCapabilityMissing(cfg roomRuntimeConfig) []string {
-	var missing []string
-	require := func(name, v string) {
-		if strings.TrimSpace(v) == "" {
-			missing = append(missing, name)
-		}
-	}
-	require("SERVICE_CREDENTIAL", cfg.ServiceCredential)
-	require("ROOM_TIMER_SERVICE_CREDENTIAL", cfg.TimerCredential)
-	require("IDENTITY_URL", cfg.IdentityURL)
-	require("IDENTITY_CREDENTIAL", cfg.IdentityCred)
-	require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)
-	require("GAME_INTEGRITY_CREDENTIAL", cfg.GameIntegrityCred)
-	require("GATEWAY_URL", cfg.GatewayURL)
-	require("GATEWAY_CREDENTIAL", cfg.GatewayCred)
-	require("SPECTATOR_VIEW_URL", cfg.SpectatorURL)
-	require("SPECTATOR_CREDENTIAL", cfg.SpectatorCred)
-	require("RANKING_URL", cfg.RankingURL)
-	require("RANKING_CREDENTIAL", cfg.RankingCred)
-	require("ANALYTICS_URL", cfg.AnalyticsURL)
-	require("ANALYTICS_CREDENTIAL", cfg.AnalyticsCred)
-	require("TOURNAMENT_URL", cfg.TournamentURL)
-	require("TOURNAMENT_CREDENTIAL", cfg.TournamentCred)
-	return missing
-}
-
-func firstEnv(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func firstNonEmptyEnv(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}
-
-func envTruthy(key string) bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
-	return v == "1" || v == "true" || v == "yes" || v == "on"
 }

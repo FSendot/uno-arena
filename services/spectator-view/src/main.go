@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
-	"os"
+	"strconv"
+	"time"
 
 	"unoarena/services/spectator-view/domain"
 )
@@ -14,19 +16,34 @@ import (
 // internalCredentialHeader authenticates service-to-service callers of internal routes.
 const internalCredentialHeader = "X-Service-Credential"
 
-// Server wires HTTP handlers to the Spectator View domain projection store.
+// Server wires HTTP handlers to the Spectator View application seam.
 type Server struct {
-	store              ProjectionStore
-	hub                *StreamHub
+	app                SpectatorApplication
+	feed               SpectatorLiveFeed
 	internalCredential string
+	mode               string
+	readyReason        string
+	readyOverride      *bool // tests
 }
 
-// NewServer constructs a Spectator View HTTP server.
-func NewServer(store ProjectionStore, internalCredential string) *Server {
+// NewServer constructs a Spectator View HTTP server (capability defaults).
+func NewServer(app SpectatorApplication, internalCredential string) *Server {
+	hub := NewStreamHub()
 	return &Server{
-		store:              store,
-		hub:                NewStreamHub(),
+		app:                app,
+		feed:               hub,
 		internalCredential: internalCredential,
+		mode:               "capability",
+	}
+}
+
+// NewServerWithFeed constructs a server with an explicit live feed (durable Redis).
+func NewServerWithFeed(app SpectatorApplication, feed SpectatorLiveFeed, internalCredential, mode string) *Server {
+	return &Server{
+		app:                app,
+		feed:               feed,
+		internalCredential: internalCredential,
+		mode:               mode,
 	}
 }
 
@@ -74,10 +91,13 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if !s.isReady() {
-		reason := "store_unconfigured"
-		if s.store != nil && s.internalCredential == "" {
-			reason = "internal_credential_unconfigured"
+	if !s.isReady(r.Context()) {
+		reason := s.readyReason
+		if reason == "" {
+			reason = "store_unconfigured"
+			if s.app != nil && s.internalCredential == "" {
+				reason = "internal_credential_unconfigured"
+			}
 		}
 		writeJSON(w, http.StatusServiceUnavailable, readyResponse{
 			Status:  "not_ready",
@@ -87,20 +107,34 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 		logRequest(r, "/ready")
 		return
 	}
+	mode := s.mode
+	if mode == "" {
+		mode = "offline"
+	}
 	writeJSON(w, http.StatusOK, readyResponse{
 		Status:  "ready",
 		Service: "spectator-view",
-		Mode:    "offline",
+		Mode:    mode,
 	})
 	logRequest(r, "/ready")
 }
 
-func (s *Server) isReady() bool {
-	return s.store != nil && s.internalCredential != ""
+func (s *Server) isReady(ctx context.Context) bool {
+	if s.readyOverride != nil {
+		return *s.readyOverride
+	}
+	if s.app == nil || s.internalCredential == "" {
+		return false
+	}
+	if err := s.app.Ready(ctx); err != nil {
+		s.readyReason = "redis_unavailable"
+		return false
+	}
+	return true
 }
 
 func (s *Server) requireReady(w http.ResponseWriter, r *http.Request) bool {
-	if s.isReady() {
+	if s.isReady(r.Context()) {
 		return true
 	}
 	writeError(w, r, http.StatusServiceUnavailable, "not_ready", "required dependencies not configured")
@@ -112,7 +146,6 @@ type admissionRequest struct {
 	PlayerID  string `json:"playerId"`
 	SessionID string `json:"sessionId"`
 	// Operator is trusted only on this internal route (Gateway credential required).
-	// Raw client invite/operator booleans are never accepted; invites use X-Room-Invite.
 	Operator bool `json:"operator"`
 	// Authorized is ignored — never trusted as blanket private admission.
 	Authorized bool `json:"authorized"`
@@ -157,7 +190,12 @@ func (s *Server) registerInviteHandler(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token = body.Token
 	}
-	if !s.store.RegisterInvite(roomID, token) {
+	ok, err := s.app.RegisterInvite(r.Context(), roomID, token)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "invite registry unavailable")
+		return
+	}
+	if !ok {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "inviteToken is required")
 		return
 	}
@@ -188,22 +226,31 @@ func (s *Server) admissionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inviteToken := r.Header.Get(headerRoomInvite)
+	hasInvite := false
+	if inviteToken != "" {
+		ok, err := s.app.HasInvite(r.Context(), roomID, inviteToken)
+		if err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "invite lookup unavailable")
+			return
+		}
+		hasInvite = ok
+	}
 	auth := domain.SpectatorAuth{
 		PlayerID:   domain.PlayerID(body.PlayerID),
 		SessionID:  body.SessionID,
-		HasInvite:  inviteToken != "" && s.store.HasInvite(roomID, inviteToken),
-		IsOperator: body.Operator, // trusted Gateway body only on credentialed route
+		HasInvite:  hasInvite,
+		IsOperator: body.Operator,
 	}
-	var dec domain.SpectatorAdmissionDecision
-	s.store.WithRoom(roomID, func(proj *domain.SpectatorRoomProjection) {
-		dec = proj.Admission(auth)
-	})
+	dec, err := s.app.Admission(r.Context(), roomID, auth)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "admission unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, admissionResponse{Allowed: dec.Allowed, Reason: dec.Reason})
 	logRequest(r, r.URL.Path)
 }
 
 // canonicalSpectatorEvent is the single Room/Gateway spectator-safe envelope.
-// No nested envelope: data holds flat fact fields only.
 type canonicalSpectatorEvent struct {
 	SchemaVersion int            `json:"schemaVersion"`
 	EventID       string         `json:"eventId"`
@@ -212,11 +259,7 @@ type canonicalSpectatorEvent struct {
 	Sequence      uint64         `json:"sequence"`
 	Event         string         `json:"event"`
 	Data          map[string]any `json:"data"`
-
-	// Batch: multiple facts at one sequence applied atomically.
-	Facts []canonicalFact `json:"facts"`
-
-	// Legacy aliases accepted only as flat top-level fields (not nested envelopes).
+	Facts         []canonicalFact `json:"facts"`
 	EventType      string         `json:"eventType"`
 	SequenceNumber uint64         `json:"sequenceNumber"`
 	Payload        map[string]any `json:"payload"`
@@ -328,33 +371,35 @@ func (s *Server) ingestEventHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var out domain.ApplyOutcome
-	s.store.WithRoomCreate(roomID, func(proj *domain.SpectatorRoomProjection) {
-		if len(events) == 1 {
-			out = proj.Apply(events[0])
-		} else {
-			out = proj.ApplyBatch(events)
-		}
-		if out.Kind == domain.OutcomeAccepted {
-			if raw, err := proj.SnapshotJSON(); err == nil {
-				// Publish under the same room lock so ingest order into the hub
-				// is sequence-guarded with projection apply.
-				s.hub.PublishUpdate(roomID, uint64(out.Sequence), raw)
-			}
-			if proj.StreamClosed() {
-				s.hub.MarkTerminal(roomID)
-			}
-		}
-	})
+	out, err := s.app.Apply(r.Context(), roomID, events)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "projection apply unavailable")
+		return
+	}
 	if out.Kind == domain.OutcomeAccepted {
-		s.store.IncrEventCount(roomID)
+		if s.mode == "capability" || s.mode == "" {
+			if hub, ok := s.feed.(*StreamHub); ok {
+				meta, _ := s.app.RoomMeta(r.Context(), roomID)
+				if raw, err := s.app.SnapshotJSON(r.Context(), roomID); err == nil {
+					hub.PublishUpdate(roomID, uint64(out.Sequence), raw)
+				}
+				if meta.StreamClosed {
+					hub.MarkTerminal(roomID)
+				}
+			}
+		} else {
+			meta, _ := s.app.RoomMeta(r.Context(), roomID)
+			if meta.StreamClosed {
+				s.feed.MarkTerminal(roomID)
+			}
+		}
 	}
 	status := http.StatusOK
 	switch out.Kind {
 	case domain.OutcomeQuarantined, domain.OutcomeDropped:
 		status = http.StatusConflict
 	case domain.OutcomeIgnored:
-		// Ignored (e.g. already-applied terminal) remains 200 so publishers can advance.
+		// Ignored remains 200 so publishers can advance.
 	}
 	writeJSON(w, status, outcomeResponse(out))
 	logRequest(r, r.URL.Path)
@@ -401,31 +446,29 @@ func (s *Server) rebuildHandler(w http.ResponseWriter, r *http.Request) {
 		events = append(events, evs...)
 	}
 
-	proj, outcomes := domain.RebuildFrom(roomID, events)
-	if ms, ok := s.store.(*MemoryProjectionStore); ok {
-		ms.ReplaceProjection(roomID, proj, len(events))
-	} else {
-		s.store.WithRoomCreate(roomID, func(p *domain.SpectatorRoomProjection) {
-			*p = *proj
-		})
-		s.store.SetEventCount(roomID, len(events))
+	result, err := s.app.Rebuild(r.Context(), roomID, events)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "rebuild unavailable")
+		return
 	}
-	if proj.StreamClosed() {
-		s.hub.MarkTerminal(roomID)
-	} else if raw, err := proj.SnapshotJSON(); err == nil {
-		s.hub.PublishUpdate(roomID, uint64(proj.Sequence()), raw)
+	if result.StreamClosed {
+		s.feed.MarkTerminal(roomID)
+	} else if hub, ok := s.feed.(*StreamHub); ok {
+		if raw, err := s.app.SnapshotJSON(r.Context(), roomID); err == nil {
+			hub.PublishUpdate(roomID, result.Sequence, raw)
+		}
 	}
 
-	outs := make([]outcomeDTO, 0, len(outcomes))
-	for _, o := range outcomes {
+	outs := make([]outcomeDTO, 0, len(result.Outcomes))
+	for _, o := range result.Outcomes {
 		outs = append(outs, outcomeResponse(o))
 	}
 	writeJSON(w, http.StatusOK, rebuildResponse{
 		Outcomes:     outs,
-		Sequence:     uint64(proj.Sequence()),
-		Status:       string(proj.Status()),
-		StreamClosed: proj.StreamClosed(),
-		EventCount:   s.store.EventCount(roomID),
+		Sequence:     result.Sequence,
+		Status:       result.Status,
+		StreamClosed: result.StreamClosed,
+		EventCount:   result.EventCount,
 	})
 	logRequest(r, r.URL.Path)
 }
@@ -444,12 +487,16 @@ func (s *Server) rebuildStatusHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "roomId is required")
 		return
 	}
-	seq, status, closed, count, _ := s.store.RoomMeta(roomID)
+	meta, err := s.app.RoomMeta(r.Context(), roomID)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "rebuild status unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, rebuildStatusResponse{
-		Sequence:     seq,
-		Status:       status,
-		StreamClosed: closed,
-		EventCount:   count,
+		Sequence:     meta.Sequence,
+		Status:       meta.Status,
+		StreamClosed: meta.StreamClosed,
+		EventCount:   meta.EventCount,
 	})
 	logRequest(r, r.URL.Path)
 }
@@ -464,21 +511,17 @@ func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "roomId is required")
 		return
 	}
-	auth := s.authFromRequest(r, roomID)
-	var (
-		allowed bool
-		dec     domain.SpectatorAdmissionDecision
-		raw     []byte
-		err     error
-	)
-	s.store.WithRoomCreate(roomID, func(proj *domain.SpectatorRoomProjection) {
-		dec = proj.Admission(auth)
-		allowed = dec.Allowed
-		if allowed {
-			raw, err = proj.SnapshotJSON()
-		}
-	})
-	if !allowed {
+	auth, err := s.authFromRequest(r, roomID)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "auth lookup unavailable")
+		return
+	}
+	dec, err := s.app.Admission(r.Context(), roomID, auth)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "admission unavailable")
+		return
+	}
+	if !dec.Allowed {
 		writeJSON(w, http.StatusForbidden, admissionDeniedResponse{
 			Reason:  string(dec.Code),
 			Message: dec.Reason,
@@ -486,6 +529,7 @@ func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
 		logRequest(r, r.URL.Path)
 		return
 	}
+	raw, err := s.app.SnapshotJSON(r.Context(), roomID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal_error", "snapshot encode failed")
 		return
@@ -509,20 +553,17 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "roomId is required")
 		return
 	}
-	auth := s.authFromRequest(r, roomID)
-	var (
-		allowed bool
-		dec     domain.SpectatorAdmissionDecision
-		closed  bool
-	)
-	s.store.WithRoomCreate(roomID, func(proj *domain.SpectatorRoomProjection) {
-		dec = proj.Admission(auth)
-		allowed = dec.Allowed
-		if allowed {
-			closed = proj.StreamClosed()
-		}
-	})
-	if !allowed {
+	auth, err := s.authFromRequest(r, roomID)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "auth lookup unavailable")
+		return
+	}
+	dec, err := s.app.Admission(r.Context(), roomID, auth)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "admission unavailable")
+		return
+	}
+	if !dec.Allowed {
 		writeJSON(w, http.StatusForbidden, admissionDeniedResponse{
 			Reason:  string(dec.Code),
 			Message: dec.Reason,
@@ -530,7 +571,12 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 		logRequest(r, r.URL.Path)
 		return
 	}
-	if closed || s.hub.IsTerminal(roomID) {
+	meta, err := s.app.RoomMeta(r.Context(), roomID)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "room meta unavailable")
+		return
+	}
+	if meta.StreamClosed || s.feed.IsTerminal(roomID) {
 		writeJSON(w, http.StatusForbidden, admissionDeniedResponse{
 			Reason:  string(domain.RejectSpectatorTerminal),
 			Message: "spectator admission denied after terminal room/match state",
@@ -539,10 +585,8 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register before capturing/writing snapshot so live updates queue on the
-	// channel and cannot be lost between snapshot and subscribe.
 	lastID := r.Header.Get("Last-Event-ID")
-	_, events, replay, cancel, subErr := s.hub.Subscribe(roomID, lastID)
+	sess, subErr := s.feed.BeginSession(r.Context(), roomID, lastID)
 	if errors.Is(subErr, errTerminalRoom) {
 		writeJSON(w, http.StatusForbidden, admissionDeniedResponse{
 			Reason:  string(domain.RejectSpectatorTerminal),
@@ -550,29 +594,30 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if cancel == nil {
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "subscription missing cancel")
+	if sess == nil {
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "subscription missing")
 		return
 	}
-	defer cancel()
+	defer sess.Close()
 
-	needSnap := errors.Is(subErr, errSnapshotRequired) || lastID == ""
+	needSnap := errors.Is(subErr, errSnapshotRequired) || lastID == "" || sess.SnapshotRequired()
 	var (
 		raw []byte
 		seq uint64
-		err error
 	)
 	if needSnap {
-		s.store.WithRoomCreate(roomID, func(proj *domain.SpectatorRoomProjection) {
-			raw, err = proj.SnapshotJSON()
-			seq = uint64(proj.Sequence())
-			closed = proj.StreamClosed()
-		})
+		raw, err = s.app.SnapshotJSON(r.Context(), roomID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "internal_error", "snapshot encode failed")
 			return
 		}
-		if closed || s.hub.IsTerminal(roomID) {
+		meta, err = s.app.RoomMeta(r.Context(), roomID)
+		if err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "store_unavailable", "room meta unavailable")
+			return
+		}
+		seq = meta.Sequence
+		if meta.StreamClosed || s.feed.IsTerminal(roomID) {
 			writeJSON(w, http.StatusForbidden, admissionDeniedResponse{
 				Reason:  string(domain.RejectSpectatorTerminal),
 				Message: "spectator admission denied after terminal room/match state",
@@ -593,10 +638,18 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	if needSnap {
-		snap := s.hub.PublishSnapshot(roomID, seq, raw)
+		snap := StreamEvent{
+			ID:       "seq_" + strconv.FormatUint(seq, 10),
+			Event:    "snapshot",
+			Data:     raw,
+			Sequence: seq,
+		}
+		if hub, ok := s.feed.(*StreamHub); ok {
+			snap = hub.PublishSnapshot(roomID, seq, raw)
+		}
 		_ = writeSSE(w, snap)
 	}
-	for _, ev := range replay {
+	for _, ev := range sess.Replay() {
 		if err := writeSSE(w, ev); err != nil {
 			return
 		}
@@ -604,6 +657,7 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 
 	logRequest(r, r.URL.Path)
 	ctx := r.Context()
+	events := sess.Events()
 	for {
 		select {
 		case <-ctx.Done():
@@ -613,7 +667,6 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 				_ = writeSSE(w, StreamEvent{Event: "stream_closed", Data: json.RawMessage(`{}`)})
 				return
 			}
-			// Queued updates already covered by the snapshot are skipped.
 			if needSnap && ev.Event == "projection_updated" && ev.Sequence <= seq {
 				continue
 			}
@@ -627,27 +680,28 @@ func (s *Server) sseEventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// authFromRequest builds SpectatorAuth for snapshot/SSE.
-// Invite and operator authority never come from query strings. Opaque
-// X-Room-Invite tokens are validated against the server-side invite registry
-// only when the caller presents a trusted Gateway service credential.
-// Operator scope is accepted only from Gateway-forwarded X-Operator-Scope
-// under that same credential. Without Gateway credential, only anonymous
-// public-room admission is possible (participant headers are ignored).
-func (s *Server) authFromRequest(r *http.Request, roomID domain.RoomID) domain.SpectatorAuth {
+func (s *Server) authFromRequest(r *http.Request, roomID domain.RoomID) (domain.SpectatorAuth, error) {
 	trusted := s.authorizeInternal(r)
 	if !trusted {
-		return domain.SpectatorAuth{}
+		return domain.SpectatorAuth{}, nil
 	}
 	playerID := r.Header.Get("X-Player-Id")
 	sessionID := r.Header.Get("X-Session-Id")
 	inviteToken := r.Header.Get(headerRoomInvite)
+	hasInvite := false
+	if inviteToken != "" {
+		ok, err := s.app.HasInvite(r.Context(), roomID, inviteToken)
+		if err != nil {
+			return domain.SpectatorAuth{}, err
+		}
+		hasInvite = ok
+	}
 	return domain.SpectatorAuth{
 		PlayerID:   domain.PlayerID(playerID),
 		SessionID:  sessionID,
-		HasInvite:  inviteToken != "" && s.store.HasInvite(roomID, inviteToken),
+		HasInvite:  hasInvite,
 		IsOperator: r.Header.Get("X-Operator-Scope") == "1",
-	}
+	}, nil
 }
 
 type healthResponse struct {
@@ -746,10 +800,26 @@ func itoa(n int) string {
 }
 
 func main() {
-	cred := os.Getenv("SPECTATOR_VIEW_INTERNAL_CREDENTIAL")
-	store := NewMemoryProjectionStore()
-	srv := NewServer(store, cred)
+	rt, err := wireSpectatorRuntime()
+	if err != nil {
+		log.Fatalf(`{"level":"error","service":"spectator-view","event":"startup_failed","error":%q}`, err.Error())
+	}
+	srv := NewServerWithFeed(rt.app, rt.feed, rt.cred, rt.mode)
+	srv.readyReason = rt.reason
+	if !rt.ready {
+		ready := false
+		srv.readyOverride = &ready
+	} else {
+		// Keep readyOverride nil so isReady pings Redis in durable mode.
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				_ = rt.durableReady(context.Background())
+			}
+		}()
+	}
 
-	log.Printf(`{"level":"info","service":"spectator-view","event":"startup","mode":"offline"}`)
+	log.Printf(`{"level":"info","service":"spectator-view","event":"startup","mode":%q}`, rt.mode)
 	log.Fatal(http.ListenAndServe(":8080", srv.routes()))
 }

@@ -17,3 +17,14 @@ go.work.sum
 **/helm/
 **/ci/
 **/migrations/
+# Bootstrap image (repo-root context) must embed context schema SQL.
+!services/identity/migrations/
+!services/identity/migrations/**
+!services/room-gameplay/migrations/
+!services/room-gameplay/migrations/**
+!services/tournament-orchestration/migrations/
+!services/tournament-orchestration/migrations/**
+!services/ranking/migrations/
+!services/ranking/migrations/**
+!services/analytics/migrations/
+!services/analytics/migrations/**

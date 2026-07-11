@@ -28,15 +28,15 @@ func TestMigration_RatingStatisticsOrderByRetainsLeaderboardRows(t *testing.T) {
 			section = section[:next+1]
 		}
 	}
-	if !strings.Contains(section, "ORDER BY (event_id, snapshot_id, player_id)") {
-		t.Fatalf("rating_statistics must ORDER BY (event_id, snapshot_id, player_id); section=\n%s", section)
+	if !strings.Contains(section, "ORDER BY (generation_id, event_id, snapshot_id, player_id)") {
+		t.Fatalf("rating_statistics must ORDER BY (generation_id, event_id, snapshot_id, player_id); section=\n%s", section)
 	}
 	// Bare event_id-only key would collapse leaderboard rows sharing one upstream event.
 	if strings.Contains(section, "ORDER BY (event_id)\n") || strings.Contains(section, "ORDER BY (event_id)\r") {
 		t.Fatal("rating_statistics must not use ORDER BY (event_id) alone")
 	}
-	if !strings.Contains(sql, "analytics.processed_events") || !strings.Contains(sql, "ORDER BY (event_id)") {
-		t.Fatal("processed_events must still dedupe ingestion by event_id")
+	if !strings.Contains(sql, "analytics.processed_events") || !strings.Contains(sql, "ORDER BY (generation_id, event_id)") {
+		t.Fatal("processed_events must still dedupe ingestion by (generation_id, event_id)")
 	}
 }
 
@@ -102,7 +102,7 @@ func TestSource_RequiredTrustedTopicBoundToEventType(t *testing.T) {
 	unknown := p.Apply(UpstreamEvent{
 		EventID:       "src_unknown",
 		EventType:     EventGameplayMetric,
-		Source:        SourceTopic("room.player-feed.events"),
+		Source:        SourceTopic("room.nonexistent.events"),
 		SchemaVersion: CurrentSchemaVersion,
 		Payload: map[string]any{
 			"visibility": "anonymized_adhoc",

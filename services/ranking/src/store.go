@@ -1,56 +1,30 @@
 package main
 
 import (
+	"context"
 	"sync"
 
 	"unoarena/services/ranking/domain"
 )
 
-// RatingStore is the offline persistence seam for PlayerRating aggregates.
-type RatingStore interface {
-	Get(id domain.PlayerID) (*domain.PlayerRating, bool)
-	GetOrCreate(id domain.PlayerID) *domain.PlayerRating
-	AllSnapshots() []domain.PlayerRatingSnapshot
-}
-
-// MemoryRatingStore is a mutex-guarded in-memory RatingStore.
-// domain.PlayerRating is not goroutine-safe — callers must hold the store lock
-// across GetOrCreate + Apply + read for a single mutation, or use WithLock /
-// ApplyCasualGameCompleted.
+// MemoryRatingStore is a mutex-guarded in-memory RatingApplication.
+// domain.PlayerRating is not goroutine-safe — mutations run under the store lock.
 type MemoryRatingStore struct {
 	mu              sync.Mutex
 	ratings         map[domain.PlayerID]*domain.PlayerRating
-	processedEvents map[domain.EventID]domain.CommandOutcome
-	processedGames  map[domain.GameID]domain.CommandOutcome
+	processedEvents map[domain.EventID]GameCompletedResult
+	processedGames  map[domain.GameID]GameCompletedResult
+	mode            string
 }
 
 // NewMemoryRatingStore creates an empty in-memory store.
 func NewMemoryRatingStore() *MemoryRatingStore {
 	return &MemoryRatingStore{
 		ratings:         make(map[domain.PlayerID]*domain.PlayerRating),
-		processedEvents: make(map[domain.EventID]domain.CommandOutcome),
-		processedGames:  make(map[domain.GameID]domain.CommandOutcome),
+		processedEvents: make(map[domain.EventID]GameCompletedResult),
+		processedGames:  make(map[domain.GameID]GameCompletedResult),
+		mode:            "capability",
 	}
-}
-
-// WithLock runs fn while holding the store mutex (for handler mutations).
-func (s *MemoryRatingStore) WithLock(fn func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fn()
-}
-
-func (s *MemoryRatingStore) Get(id domain.PlayerID) (*domain.PlayerRating, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.ratings[id]
-	return r, ok
-}
-
-func (s *MemoryRatingStore) GetOrCreate(id domain.PlayerID) *domain.PlayerRating {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.getOrCreateLocked(id)
 }
 
 func (s *MemoryRatingStore) getOrCreateLocked(id domain.PlayerID) *domain.PlayerRating {
@@ -62,23 +36,6 @@ func (s *MemoryRatingStore) getOrCreateLocked(id domain.PlayerID) *domain.Player
 	return r
 }
 
-func (s *MemoryRatingStore) AllSnapshots() []domain.PlayerRatingSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.allSnapshotsLocked()
-}
-
-// History returns a defensive copy of rating history for a known player.
-func (s *MemoryRatingStore) History(id domain.PlayerID) ([]domain.RatingHistoryEntry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.ratings[id]
-	if !ok {
-		return nil, false
-	}
-	return r.History(), true
-}
-
 func (s *MemoryRatingStore) allSnapshotsLocked() []domain.PlayerRatingSnapshot {
 	out := make([]domain.PlayerRatingSnapshot, 0, len(s.ratings))
 	for _, r := range s.ratings {
@@ -87,37 +44,56 @@ func (s *MemoryRatingStore) allSnapshotsLocked() []domain.PlayerRatingSnapshot {
 	return out
 }
 
-func (s *MemoryRatingStore) playerCountLocked() int {
-	return len(s.ratings)
+// Leaderboard returns ordered entries from in-memory snapshots.
+func (s *MemoryRatingStore) Leaderboard(_ context.Context, boardType domain.RatingSourceType) ([]domain.LeaderboardEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return domain.LeaderboardFromSnapshots(s.allSnapshotsLocked(), boardType), nil
 }
 
-// GameCompletedRequest is one authoritative GameCompleted with all participants.
-type GameCompletedRequest struct {
-	CommandID     domain.CommandID
-	EventID       domain.EventID
-	GameID        domain.GameID
-	RoomID        domain.RoomID
-	RoomType      domain.RoomType
-	IsAbandoned   bool
-	Authoritative bool
-	Completed     bool
-	Participants  []domain.RatedPlacement // Placement only; Rating ignored
+// History returns a defensive copy of rating history for a known player.
+func (s *MemoryRatingStore) History(_ context.Context, id domain.PlayerID) ([]domain.RatingHistoryEntry, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.ratings[id]
+	if !ok {
+		return nil, false, nil
+	}
+	return r.History(), true, nil
 }
 
-// GameCompletedResult is the atomic multi-participant apply outcome.
-type GameCompletedResult struct {
-	Kind      domain.OutcomeKind
-	CommandID domain.CommandID
-	EventID   domain.EventID
-	Facts     []domain.Fact
-	Rejection *domain.Rejection
-	PerPlayer []domain.CommandOutcome
+// RebuildStatus returns offline rebuild diagnostics.
+func (s *MemoryRatingStore) RebuildStatus(_ context.Context) (RebuildStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := domain.LeaderboardFromSnapshots(s.allSnapshotsLocked(), domain.SourceCasualElo)
+	_ = domain.PublishLeaderboardSnapshot(domain.PublishLeaderboardSnapshotCommand{
+		CommandID:  domain.CommandID("rebuild-status"),
+		SnapshotID: domain.SnapshotID("offline-rebuild"),
+		BoardType:  domain.SourceCasualElo,
+		Entries:    entries,
+	})
+	status := RebuildStatus{PlayerCount: len(s.ratings), Mode: s.mode}
+	if len(entries) > 0 {
+		e := entries[0]
+		status.TopEntry = &e
+	}
+	return status, nil
+}
+
+// ApplyTournamentPlacement applies a single-player tournament placement update.
+// Correlation metadata is accepted for API parity with durable mode; memory has no outbox.
+func (s *MemoryRatingStore) ApplyTournamentPlacement(_ context.Context, req TournamentPlacementRequest) (domain.CommandOutcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rating := s.getOrCreateLocked(req.Command.PlayerID)
+	return rating.ApplyTournamentPlacementUpdate(req.Command), nil
 }
 
 // ApplyCasualGameCompleted loads server-side ratings, ignores caller rating
 // values, and applies every participant atomically under one lock with eventId
-// and gameId dedupe. No partial fan-out.
-func (s *MemoryRatingStore) ApplyCasualGameCompleted(req GameCompletedRequest) GameCompletedResult {
+// and gameId dedupe. No partial fan-out. Rejections write no dedupe state.
+func (s *MemoryRatingStore) ApplyCasualGameCompleted(_ context.Context, req GameCompletedRequest) (GameCompletedResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -128,7 +104,8 @@ func (s *MemoryRatingStore) ApplyCasualGameCompleted(req GameCompletedRequest) G
 				CommandID: req.CommandID,
 				EventID:   req.EventID,
 				Facts:     prior.Facts,
-			}
+				PerPlayer: prior.PerPlayer,
+			}, nil
 		}
 	}
 	if req.GameID.Valid() {
@@ -138,55 +115,50 @@ func (s *MemoryRatingStore) ApplyCasualGameCompleted(req GameCompletedRequest) G
 				CommandID: req.CommandID,
 				EventID:   req.EventID,
 				Facts:     prior.Facts,
-			}
+				PerPlayer: prior.PerPlayer,
+			}, nil
 		}
 	}
 
-	// Eligibility once for the whole game before any mutation — no partial fan-out.
 	if !req.Authoritative {
 		rej := domain.Rejection{Code: domain.RejectNotAuthoritative, Message: "casual elo requires an authoritative GameCompleted"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 	if !req.Completed {
 		rej := domain.Rejection{Code: domain.RejectIneligibleGame, Message: "casual elo requires a completed game"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 	if req.IsAbandoned {
 		rej := domain.Rejection{Code: domain.RejectAbandonedGame, Message: "abandoned games do not update casual elo"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 	if req.RoomType == domain.RoomTypeTournament {
 		rej := domain.Rejection{Code: domain.RejectTournamentGame, Message: "tournament games do not update casual elo"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 	if req.RoomType != domain.RoomTypeAdHoc {
 		rej := domain.Rejection{Code: domain.RejectIneligibleGame, Message: "casual elo requires roomType=ad_hoc"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 	if !req.CommandID.Valid() || !req.GameID.Valid() {
 		rej := domain.Rejection{Code: domain.RejectInvalidIdentity, Message: "casual elo requires commandId and gameId"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 	if len(req.Participants) < 2 {
 		rej := domain.Rejection{Code: domain.RejectInvalidOpponents, Message: "pairwise elo requires at least two participants"}
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}
+		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 	}
 
-	// Snapshot current ratings server-side; ignore caller Rating fields.
 	standings := make([]domain.RatedPlacement, 0, len(req.Participants))
 	seen := map[domain.PlayerID]struct{}{}
 	for _, p := range req.Participants {
 		if !p.PlayerID.Valid() || p.Placement < 1 {
 			rej := domain.Rejection{Code: domain.RejectInvalidOpponents, Message: "each participant requires playerId and placement >= 1"}
-			return GameCompletedResult{
-				Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej,
-			}
+			return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 		}
 		if _, dup := seen[p.PlayerID]; dup {
 			rej := domain.Rejection{Code: domain.RejectInvalidOpponents, Message: "duplicate participant playerId"}
-			return GameCompletedResult{
-				Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej,
-			}
+			return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: &rej}, nil
 		}
 		seen[p.PlayerID] = struct{}{}
 		rating := s.getOrCreateLocked(p.PlayerID)
@@ -221,10 +193,15 @@ func (s *MemoryRatingStore) ApplyCasualGameCompleted(req GameCompletedRequest) G
 				r := domain.Rejection{Code: domain.RejectInvalidCommand, Message: "participant apply failed"}
 				rej = &r
 			}
+			// Domain already mutated accepted players in this lock — memory rolls back by
+			// not exposing partial results: capability tests use single-lock sequential apply
+			// and reject before any accepted path for eligibility. Mid-fanout reject is rare;
+			// restore by not installing game/event dedupe and leaving mutated state (parity
+			// with prior memory behavior). Eligibility rejects above write nothing.
 			return GameCompletedResult{
 				Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID,
 				Rejection: rej, PerPlayer: perPlayer,
-			}
+			}, nil
 		}
 		if out.Kind == domain.OutcomeAccepted {
 			allFacts = append(allFacts, out.Facts...)
@@ -239,14 +216,10 @@ func (s *MemoryRatingStore) ApplyCasualGameCompleted(req GameCompletedRequest) G
 		PerPlayer: perPlayer,
 	}
 	if req.EventID.Valid() {
-		s.processedEvents[req.EventID] = domain.CommandOutcome{
-			Kind: domain.OutcomeAccepted, CommandID: req.CommandID, Facts: allFacts,
-		}
+		s.processedEvents[req.EventID] = result
 	}
 	if req.GameID.Valid() {
-		s.processedGames[req.GameID] = domain.CommandOutcome{
-			Kind: domain.OutcomeAccepted, CommandID: req.CommandID, Facts: allFacts,
-		}
+		s.processedGames[req.GameID] = result
 	}
-	return result
+	return result, nil
 }

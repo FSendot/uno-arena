@@ -2,8 +2,8 @@
 # Isolates a single project via `docker compose -p`.
 # Teardown is caller-controlled: only tear down a project this harness started
 # (or an external project when CAP_TEARDOWN_EXTERNAL=1 is explicitly set).
-# Capability overlay profiles EventStore out; up uses resolved `config --services`
-# so EventStore is never selected (amd64-only image; GI uses memory).
+# Capability overlay profiles KurrentDB out; up uses resolved `config --services`
+# so KurrentDB is never selected (GI uses explicit memory).
 
 capability_compose_init() {
   local repo_root="$1"
@@ -30,7 +30,7 @@ capability_compose_cmd() {
     "$@"
 }
 
-# Resolved active services for capability mode (must not include eventstore).
+# Resolved active services for capability mode (must not include kurrentdb).
 capability_compose_services() {
   capability_compose_cmd config --services
 }
@@ -40,8 +40,8 @@ capability_compose_up() {
   local svc
   while IFS= read -r svc; do
     [ -n "$svc" ] || continue
-    if [ "$svc" = "eventstore" ]; then
-      echo "FAIL: capability compose selected eventstore (amd64-only; omit in capability mode)" >&2
+    if [ "$svc" = "kurrentdb" ]; then
+      echo "FAIL: capability compose selected kurrentdb (omit in capability mode)" >&2
       return 1
     fi
     services+=("$svc")
@@ -52,7 +52,7 @@ capability_compose_up() {
     return 1
   fi
 
-  # Exact harness up selection = resolved config --services (EventStore omitted).
+  # Exact harness up selection = resolved config --services (KurrentDB omitted).
   capability_compose_cmd up -d --build --remove-orphans "${services[@]}"
 }
 

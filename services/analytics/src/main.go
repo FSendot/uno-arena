@@ -31,21 +31,24 @@ type ProducerCredentials struct {
 	Ops        string // rebuild + ingestion-lag only
 }
 
-// Server wires HTTP handlers to an injectable analytics store.
+// Server wires HTTP handlers to an injectable analytics application.
 type Server struct {
-	store          AnalyticsStore
+	app            AnalyticsApplication
 	creds          ProducerCredentials
 	notReadyReason string
+	mode           string
+	readyCheck     func(context.Context) error
 }
 
 // NewServer constructs an Analytics HTTP server in scoped/production mode.
 // Ready fails when any role credential is missing or credentials collide.
 // Offline and production both require distinct scoped credentials.
-func NewServer(store AnalyticsStore, creds ProducerCredentials) *Server {
+func NewServer(app AnalyticsApplication, creds ProducerCredentials) *Server {
 	return &Server{
-		store:          store,
+		app:            app,
 		creds:          creds,
 		notReadyReason: scopedCredentialReadyReason(creds),
+		mode:           "scoped",
 	}
 }
 
@@ -111,7 +114,7 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status":  "not_ready",
 			"service": "analytics",
@@ -129,10 +132,33 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 		logRequest(r, "/ready")
 		return
 	}
+	if s.readyCheck != nil {
+		if err := s.readyCheck(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status":  "not_ready",
+				"service": "analytics",
+				"reason":  "clickhouse_schema",
+			})
+			logRequest(r, "/ready")
+			return
+		}
+	} else if err := s.app.Ready(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status":  "not_ready",
+			"service": "analytics",
+			"reason":  "clickhouse_schema",
+		})
+		logRequest(r, "/ready")
+		return
+	}
+	mode := s.mode
+	if mode == "" {
+		mode = "scoped"
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":  "ready",
 		"service": "analytics",
-		"mode":    "scoped",
+		"mode":    mode,
 	})
 	logRequest(r, "/ready")
 }
@@ -142,13 +168,13 @@ func (s *Server) publicAnalyticsHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unconfigured")
 		return
 	}
-	raw, err := s.store.SnapshotJSON()
+	raw, err := s.app.SnapshotJSON(r.Context())
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "snapshot encode failed")
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "snapshot unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -165,13 +191,13 @@ func (s *Server) publicGameplayHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unconfigured")
 		return
 	}
-	snap, err := snapshotFromStore(s.store)
+	snap, err := s.app.Snapshot(r.Context())
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "snapshot encode failed")
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "snapshot unavailable")
 		return
 	}
 	metrics := snap.GameplayMetrics
@@ -187,7 +213,7 @@ func (s *Server) publicTournamentHandler(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unconfigured")
 		return
 	}
@@ -197,9 +223,9 @@ func (s *Server) publicTournamentHandler(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusNotFound, "not_found", "not found")
 		return
 	}
-	snap, err := snapshotFromStore(s.store)
+	snap, err := s.app.Snapshot(r.Context())
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal_error", "snapshot encode failed")
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "snapshot unavailable")
 		return
 	}
 	filtered := make([]domain.TournamentStatistic, 0)
@@ -236,7 +262,7 @@ func (s *Server) ingestWithSource(w http.ResponseWriter, r *http.Request, cred s
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unconfigured")
 		return
 	}
@@ -253,7 +279,11 @@ func (s *Server) ingestWithSource(w http.ResponseWriter, r *http.Request, cred s
 	// Body source is ignored — trusted SourceTopic comes from credential mapping.
 	evt := body.toDomain()
 	evt.Source = source
-	out := s.store.Apply(evt)
+	out, err := s.app.Apply(r.Context(), evt)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unavailable")
+		return
+	}
 	status := http.StatusOK
 	if out.Kind == domain.OutcomeQuarantined {
 		status = http.StatusConflict
@@ -310,7 +340,7 @@ func (s *Server) rebuildHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unconfigured")
 		return
 	}
@@ -333,7 +363,11 @@ func (s *Server) rebuildHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, evt)
 	}
-	outs := s.store.Rebuild(events)
+	outs, err := s.app.Rebuild(r.Context(), events)
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "rebuild unavailable")
+		return
+	}
 	resp := make([]map[string]any, 0, len(outs))
 	for _, out := range outs {
 		resp = append(resp, outcomeResponse(out))
@@ -351,13 +385,21 @@ func (s *Server) ingestionLagHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
 		return
 	}
-	if s.store == nil {
+	if s.app == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unconfigured")
 		return
 	}
-	version := projectionVersion(s.store)
+	version, err := s.app.ProjectionVersion(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "projection unavailable")
+		return
+	}
+	mode := s.mode
+	if mode == "" {
+		mode = "offline"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":              "offline",
+		"mode":              mode,
 		"projectionVersion": version,
 		"lagSeconds":        0,
 	})
@@ -400,32 +442,6 @@ func outcomeResponse(out domain.ApplyOutcome) map[string]any {
 	return resp
 }
 
-func snapshotFromStore(store AnalyticsStore) (domain.AnalyticsSnapshot, error) {
-	if mem, ok := store.(*MemoryAnalyticsStore); ok {
-		return mem.Snapshot(), nil
-	}
-	raw, err := store.SnapshotJSON()
-	if err != nil {
-		return domain.AnalyticsSnapshot{}, err
-	}
-	var snap domain.AnalyticsSnapshot
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		return domain.AnalyticsSnapshot{}, err
-	}
-	return snap, nil
-}
-
-func projectionVersion(store AnalyticsStore) domain.ProjectionVersion {
-	if mem, ok := store.(*MemoryAnalyticsStore); ok {
-		return mem.ProjectionVersion()
-	}
-	snap, err := snapshotFromStore(store)
-	if err != nil {
-		return 0
-	}
-	return snap.ProjectionVersion
-}
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -449,19 +465,25 @@ func logRequest(r *http.Request, path string) {
 }
 
 func main() {
-	// Scoped credentials required offline and in production (no single-role mode).
-	creds := ProducerCredentials{
-		Room:       os.Getenv("ANALYTICS_ROOM_CREDENTIAL"),
-		Ranking:    os.Getenv("ANALYTICS_RANKING_CREDENTIAL"),
-		Tournament: os.Getenv("ANALYTICS_TOURNAMENT_CREDENTIAL"),
-		Ops:        os.Getenv("ANALYTICS_OPS_CREDENTIAL"),
+	rt, err := wireAnalyticsRuntime()
+	if err != nil {
+		log.Fatal(err)
 	}
-	srv := NewServer(NewMemoryAnalyticsStore(), creds)
+	srv := NewServer(rt.app, rt.creds)
+	srv.mode = rt.mode
+	if !rt.ready {
+		srv.notReadyReason = rt.readyReason
+	} else if rt.mode == "durable" {
+		srv.readyCheck = rt.durableReady
+		srv.mode = "durable"
+	} else if rt.mode == "capability" {
+		srv.mode = "capability"
+	}
 
 	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"analytics","event":"startup","mode":"offline"}`)
+		log.Printf(`{"level":"info","service":"analytics","event":"startup","mode":%q}`, rt.mode)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

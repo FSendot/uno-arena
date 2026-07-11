@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"unoarena/services/ranking/domain"
 )
 
 const testInternalCredential = "test-internal-credential"
@@ -322,4 +325,122 @@ func TestFinding_DomainRejectionReturnsNon2xx(t *testing.T) {
 	if body["kind"] != "rejected" {
 		t.Fatalf("kind=%v want rejected", body["kind"])
 	}
+}
+
+func TestResolveInboundCorrelationID(t *testing.T) {
+	cases := []struct {
+		name, body, header, eventID, want string
+	}{
+		{"body wins", " body-corr ", "header-corr", "e1", "body-corr"},
+		{"header when body blank", "  ", "header-corr", "e1", "header-corr"},
+		{"eventId fallback", "", "", "e-fallback", "e-fallback"},
+		{"unspecified last resort", "", "", "", "ranking-unspecified"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveInboundCorrelationID(tc.body, tc.header, tc.eventID)
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGamesResultsPropagatesBodyCorrelation(t *testing.T) {
+	var got GameCompletedRequest
+	srv := NewServer(captureApp{onCasual: func(req GameCompletedRequest) {
+		got = req
+	}}, testInternalCredential)
+	mux := srv.routes()
+	b, _ := json.Marshal(map[string]any{
+		"commandId": "cmd_corr", "eventId": "evt_corr", "correlationId": "body-corr",
+		"gameId": "g_corr", "roomId": "r1", "roomType": "ad_hoc",
+		"isAbandoned": false, "authoritative": true, "completed": true,
+		"participants": []map[string]any{
+			{"playerId": "p1", "placement": 1},
+			{"playerId": "p2", "placement": 2},
+		},
+	})
+	req := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/games-results", bytes.NewReader(b)))
+	req.Header.Set("X-Correlation-Id", "header-corr")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got.CorrelationID != "body-corr" {
+		t.Fatalf("CorrelationID=%q", got.CorrelationID)
+	}
+	if got.CausationID != "cmd_corr" {
+		t.Fatalf("CausationID=%q", got.CausationID)
+	}
+}
+
+func TestTournamentPlacementPropagatesHeaderCorrelation(t *testing.T) {
+	var got TournamentPlacementRequest
+	srv := NewServer(captureApp{onPlacement: func(req TournamentPlacementRequest) {
+		got = req
+	}}, testInternalCredential)
+	mux := srv.routes()
+	b, _ := json.Marshal(map[string]any{
+		"commandId": "cmd_t", "eventId": "evt_t", "playerId": "p1",
+		"tournamentId": "t1", "placementEventId": "pe1",
+		"placement": 1, "delta": 10, "reason": "tournament_placement",
+	})
+	req := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/tournament-placements", bytes.NewReader(b)))
+	req.Header.Set("X-Correlation-Id", "header-place")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got.CorrelationID != "header-place" {
+		t.Fatalf("CorrelationID=%q", got.CorrelationID)
+	}
+	if got.CausationID != "cmd_t" {
+		t.Fatalf("CausationID=%q", got.CausationID)
+	}
+	if got.Command.PlayerID != "p1" {
+		t.Fatalf("command not forwarded: %+v", got.Command)
+	}
+}
+
+// captureApp records requests then delegates to memory for compatible outcomes.
+type captureApp struct {
+	mem         *MemoryRatingStore
+	onCasual    func(GameCompletedRequest)
+	onPlacement func(TournamentPlacementRequest)
+}
+
+func (c captureApp) store() *MemoryRatingStore {
+	if c.mem != nil {
+		return c.mem
+	}
+	return NewMemoryRatingStore()
+}
+
+func (c captureApp) ApplyCasualGameCompleted(ctx context.Context, req GameCompletedRequest) (GameCompletedResult, error) {
+	if c.onCasual != nil {
+		c.onCasual(req)
+	}
+	return c.store().ApplyCasualGameCompleted(ctx, req)
+}
+
+func (c captureApp) ApplyTournamentPlacement(ctx context.Context, req TournamentPlacementRequest) (domain.CommandOutcome, error) {
+	if c.onPlacement != nil {
+		c.onPlacement(req)
+	}
+	return c.store().ApplyTournamentPlacement(ctx, req)
+}
+
+func (c captureApp) Leaderboard(ctx context.Context, boardType domain.RatingSourceType) ([]domain.LeaderboardEntry, error) {
+	return c.store().Leaderboard(ctx, boardType)
+}
+
+func (c captureApp) History(ctx context.Context, playerID domain.PlayerID) ([]domain.RatingHistoryEntry, bool, error) {
+	return c.store().History(ctx, playerID)
+}
+
+func (c captureApp) RebuildStatus(ctx context.Context) (RebuildStatus, error) {
+	return c.store().RebuildStatus(ctx)
 }

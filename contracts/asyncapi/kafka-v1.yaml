@@ -7,7 +7,17 @@ info:
     Every Kafka message payload carries the canonical EventMetadata fields
     (`schemaVersion`, `eventId`, `eventType`, `correlationId`, optional `causationId`,
     `occurredAt`) plus topic-specific body fields. Partition and idempotency keys are
-    documented per channel. Rejected commands are never published as domain events.
+    documented per channel. Consumers atomically persist the declared idempotency key
+    with their owned-state mutation before committing the Kafka offset. Ordered flows
+    also checkpoint their contract sequence/version and quarantine gaps or conflicts.
+    Rejected commands are never published as domain events.
+
+    Ordered topic partition counts are immutable after creation. Production planning uses
+    256 partitions for `room.spectator-safe.events` and `room.gameplay.metrics`, and
+    32 for lower-volume business topics. Load testing may change these values before
+    creation. Later expansion uses a versioned replacement topic with producer
+    watermark and consumer-drain cutover; it never increases partitions in place. Local
+    `kind` may use reduced pre-creation counts while preserving the same keying and rules.
 
     **Authoritative wire format:** this AsyncAPI Kafka envelope is the production
     contract. Production topology requires Kafka adapters for these topics.
@@ -25,10 +35,35 @@ info:
     | `room.gameplay.metrics` / `GameplayMetric` | Analytics `POST .../room/events` | Forwards (or lightly normalizes) the GameplayMetric envelope to the same Analytics room ingest path. Distinct from the GameCompleted rewrite above. |
     | `room.match.completed` / `MatchCompleted` | Tournament `POST .../match-results` | Forwards canonical match fields including `tournamentId`, `completionVersion`, `players`; requires `tournamentId`. |
     | `room.spectator-safe.events` | Spectator ingest | Flattens to `{schemaVersion,eventId,stream,roomId,sequence,event,data}`; Kafka `sequenceNumber` → HTTP `sequence`; Kafka `eventType` → HTTP `event`; nested `payload`/`data` unwrapped into `data`. Uno window canonical field is `openingSequence` (`openingRoomSequence` accepted as ingest alias). |
-    | `room.player-feed.events` | Gateway stream ingest | Maps to `{schemaVersion,eventId,stream,roomId,sessionId?,playerId?,sequence,event,data}` for SSE fan-out; Kafka `sequenceNumber` → HTTP `sequence`. |
 
     Kafka remains unwired until production adapters exist; the HTTP bridge is an
     offline capability transform only.
+x-partitionPlanning:
+  immutableAfterCreation: true
+  highVolumeInitialPartitions: 256
+  businessInitialPartitions: 32
+  highVolumeTopics:
+    - room.spectator-safe.events
+    - room.gameplay.metrics
+  expansion: versioned-replacement-topic
+x-productionDurability:
+  minimumBrokers: 3
+  replicationFactor: 3
+  minInSyncReplicas: 2
+  producerAcks: all
+  idempotentProducer: true
+  uncleanLeaderElection: false
+  rackAwarePlacement: true
+  localKindMayUseSingleReplica: true
+x-retentionPlanning:
+  spectatorSafeHours: 6
+  gameplayMetricsHours: 24
+  identityInvalidationHours: 24
+  otherBusinessDays: 7
+  consumerDlqDays: 30
+  supersededTopicDaysAfterVerifiedCutover: 7
+  kafkaIsPermanentAuditStore: false
+  localKindMayUseShorterRetention: true
 defaultContentType: application/json
 channels:
   identity.session.invalidated:
@@ -41,7 +76,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: identity.session.invalidated
-        partitions: 3
+        partitions: 32
         key:
           type: string
           description: Partition key = playerId
@@ -58,7 +93,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: room.game.completed
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = roomId
@@ -75,28 +110,11 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: room.match.completed
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = roomId
         x-idempotencyKey: "(roomId, completionVersion)"
-        x-partitionKey: roomId
-
-  room.player-feed.events:
-    description: Player-safe room feed facts for BFF fan-out / recovery.
-    publish:
-      operationId: publishPlayerFeedEvent
-      message:
-        $ref: "#/components/messages/RoomFeedEvent"
-    bindings:
-      kafka:
-        bindingVersion: 0.4.0
-        topic: room.player-feed.events
-        partitions: 12
-        key:
-          type: string
-          description: Partition key = roomId
-        x-idempotencyKey: eventId
         x-partitionKey: roomId
 
   room.spectator-safe.events:
@@ -109,7 +127,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: room.spectator-safe.events
-        partitions: 12
+        partitions: 256
         key:
           type: string
           description: Partition key = roomId
@@ -126,7 +144,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: room.gameplay.metrics
-        partitions: 6
+        partitions: 256
         key:
           type: string
           description: Partition key = roomId
@@ -143,7 +161,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: tournament.match.assigned
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = tournamentId
@@ -160,7 +178,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: tournament.match.result_recorded
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = tournamentId
@@ -177,7 +195,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: tournament.players.advanced
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = tournamentId
@@ -194,7 +212,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: tournament.round.completed
-        partitions: 3
+        partitions: 32
         key:
           type: string
           description: Partition key = tournamentId
@@ -211,7 +229,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: tournament.completed
-        partitions: 3
+        partitions: 32
         key:
           type: string
           description: Partition key = tournamentId
@@ -228,7 +246,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: ranking.player_rating_updated
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = playerId
@@ -245,7 +263,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: ranking.leaderboard_snapshot_published
-        partitions: 3
+        partitions: 32
         key:
           type: string
           description: Partition key = boardType
@@ -262,7 +280,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: spectator.room_projection.updated
-        partitions: 6
+        partitions: 32
         key:
           type: string
           description: Partition key = roomId
@@ -279,7 +297,7 @@ channels:
       kafka:
         bindingVersion: 0.4.0
         topic: analytics.public_projection.updated
-        partitions: 3
+        partitions: 32
         key:
           type: string
           description: Partition key = projectionKey
@@ -384,32 +402,6 @@ components:
                   type: string
               isAbandoned:
                 type: boolean
-
-    RoomFeedEvent:
-      name: RoomFeedEvent
-      payload:
-        allOf:
-          - $ref: "#/components/schemas/EventMetadata"
-          - type: object
-            required: [roomId, sequenceNumber]
-            properties:
-              roomId:
-                type: string
-              gameId:
-                type: string
-              sequenceNumber:
-                type: integer
-                minimum: 1
-                description: Per-audience player-feed sequence (producer SequenceNumber)
-              sessionId:
-                type: string
-              playerId:
-                type: string
-              unoWindow:
-                $ref: "#/components/schemas/UnoWindow"
-              payload:
-                type: object
-                additionalProperties: true
 
     SpectatorSafeEvent:
       name: SpectatorSafeEvent

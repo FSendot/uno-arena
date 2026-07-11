@@ -2,6 +2,7 @@ package bff
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"sync"
@@ -14,11 +15,17 @@ const MaxRequestBodyBytes = 64 << 10 // 64 KiB
 // DefaultMemoryLimiterKeys caps distinct rate-limit keys before eviction.
 const DefaultMemoryLimiterKeys = 4096
 
+// ErrRateLimiterUnavailable means the distributed limiter adapter failed.
+// Callers must fail closed with HTTP 503 — never treat this as quota exhaustion.
+var ErrRateLimiterUnavailable = errors.New("rate_limiter_unavailable")
+
 // RateLimiter is an injectable edge/principal throttle.
-// Offline mode uses the bounded/evicting in-memory limiter; a Redis adapter is not faked.
+// Offline mode uses the bounded/evicting in-memory limiter; durable mode uses Redis.
 type RateLimiter interface {
-	// Allow reports whether the key may proceed. retryAfter is advisory when denied.
-	Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration)
+	// Allow reports whether the key may proceed.
+	// err != nil (typically ErrRateLimiterUnavailable) means adapter failure → 503.
+	// allowed=false with err=nil means quota exhaustion → 429 with advisory retryAfter.
+	Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error)
 }
 
 // MemoryRateLimiter is a fixed-window in-process limiter with bounded key eviction.
@@ -66,8 +73,8 @@ func (m *MemoryRateLimiter) SetMaxKeys(n int) {
 	m.maxKeys = n
 }
 
-// Allow implements RateLimiter.
-func (m *MemoryRateLimiter) Allow(_ context.Context, key string) (bool, time.Duration) {
+// Allow implements RateLimiter. Memory limiter never returns an adapter error.
+func (m *MemoryRateLimiter) Allow(_ context.Context, key string) (bool, time.Duration, error) {
 	if key == "" {
 		key = "anonymous"
 	}
@@ -88,10 +95,10 @@ func (m *MemoryRateLimiter) Allow(_ context.Context, key string) (bool, time.Dur
 		if retry < 0 {
 			retry = 0
 		}
-		return false, retry
+		return false, retry, nil
 	}
 	c.count++
-	return true, 0
+	return true, 0, nil
 }
 
 func (m *MemoryRateLimiter) evictLocked() {
@@ -105,7 +112,7 @@ func (m *MemoryRateLimiter) evictLocked() {
 // AllowAll is a no-op limiter for tests that do not exercise throttling.
 type AllowAll struct{}
 
-func (AllowAll) Allow(context.Context, string) (bool, time.Duration) { return true, 0 }
+func (AllowAll) Allow(context.Context, string) (bool, time.Duration, error) { return true, 0, nil }
 
 // clientIP extracts a coarse edge key from the request.
 func clientIP(r *http.Request) string {

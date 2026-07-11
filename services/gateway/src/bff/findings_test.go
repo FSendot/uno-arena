@@ -1203,8 +1203,10 @@ func TestFinding_NilAuditDefaultsFailClosed(t *testing.T) {
 		// Audit nil -> ClosedAudit
 	})
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/commands", bytes.NewReader([]byte(
-		`{"commandId":"c2","type":"JoinRoom","schemaVersion":1,"payload":{"roomId":"r1"}}`,
+	// Domain rejection that audits (tournament on room route); unknown type is now
+	// invalid_envelope HTTP 400 before audit.
+	req := httptest.NewRequest(http.MethodPost, "/v1/rooms/room_1/commands", bytes.NewReader([]byte(
+		`{"commandId":"c2","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1"}}`,
 	)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer tok")

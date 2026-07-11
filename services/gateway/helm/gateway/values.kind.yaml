@@ -1,0 +1,47 @@
+# Local kind overlay for Gateway durable Redis rate-limit + LiveFeed SSE.
+# Kafka SessionInvalidated consumer and Debezium player-feed sink remain PENDING.
+kind: true
+
+replicaCount: 1
+
+image:
+  repository: uno-arena/gateway
+  tag: local
+  digest: ""
+  pullPolicy: IfNotPresent
+
+env:
+  SERVICE_NAME: gateway
+  DEPLOYMENT_ENV: local
+  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
+  ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+  TOURNAMENT_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080
+  SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
+  RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
+  ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
+  # Rate-limit buckets — dedicated DB 6 (distinct from Room timers DB 2 / Spectator DB 5).
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/6
+  # Player feeds (room:{roomId}:player) — same Redis instance as Room timers (DB 2).
+  GATEWAY_PLAYER_FEED_REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
+  # Spectator projection streams — Spectator View DB 5.
+  GATEWAY_SPECTATOR_REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/5
+  GATEWAY_SPECTATOR_REDIS_KEY_PREFIX: "spectator:"
+  GATEWAY_EDGE_RATE_LIMIT: "1000"
+  GATEWAY_EDGE_RATE_WINDOW: "1m"
+  GATEWAY_PRINCIPAL_RATE_LIMIT: "1000"
+  GATEWAY_PRINCIPAL_RATE_WINDOW: "1m"
+  # Durable mode: no capability/fakes flags.
+  # Kafka brokers intentionally omitted — SessionInvalidated consumer PENDING.
+
+existingSecret: uno-arena-local-credentials
+secretEnv:
+  # Backward-compat fallback only; explicit outbound envs below take precedence.
+  GATEWAY_SERVICE_CREDENTIAL: identity-internal-credential
+  GATEWAY_IDENTITY_SERVICE_CREDENTIAL: identity-internal-credential
+  GATEWAY_ROOM_SERVICE_CREDENTIAL: room-service-credential
+  GATEWAY_TOURNAMENT_SERVICE_CREDENTIAL: tournament-internal-credential
+  GATEWAY_SPECTATOR_SERVICE_CREDENTIAL: spectator-view-internal-credential
+  # Inbound producer credentials (not reused for outbound backend HTTP).
+  GATEWAY_IDENTITY_CREDENTIAL: identity-internal-credential
+  GATEWAY_ROOM_CREDENTIAL: room-to-gateway-credential
+  GATEWAY_SPECTATOR_CREDENTIAL: spectator-view-internal-credential

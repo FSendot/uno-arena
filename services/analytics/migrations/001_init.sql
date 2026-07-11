@@ -2,9 +2,11 @@
 -- Physical ownership: analytics database only. No joins to transactional stores.
 -- Inputs: sanitized gameplay metrics, public tournament facts, public rating facts.
 -- Privacy: no private hands, hidden deck order, private draw ids, session tokens, or raw audit.
--- Dedupe: processed_events keyed by event_id (docs/04 projection idempotency).
+-- Dedupe: processed_events keyed by (generation_id, event_id) with durable outcome_json.
+-- Generations: public reads use only the latest completed active generation (FINAL).
 -- rating_statistics ORDER BY retains every leaderboard row under one upstream event_id.
 -- Partitions: time (YYYYMM) and tournament_id where applicable (architecture/04, ADR 0008).
+-- ClickHouse is non-transactional: writers insert projection rows before processed_events.
 
 CREATE DATABASE IF NOT EXISTS analytics;
 
@@ -17,12 +19,40 @@ ENGINE = ReplacingMergeTree(applied_at)
 ORDER BY version;
 
 -- ---------------------------------------------------------------------------
+-- Projection generation bookkeeping for safe rebuild activation.
+-- status: building (invisible to public reads) | complete (eligible for activation).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS analytics.projection_generations
+(
+    generation_id String,
+    status LowCardinality(String),
+    accepted_count UInt64 DEFAULT 0,
+    created_at DateTime64(3, 'UTC') DEFAULT now64(3),
+    completed_at DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3, 'UTC')
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY (generation_id)
+SETTINGS index_granularity = 8192;
+
+-- Singleton active-generation pointer. Public APIs read only this generation when complete.
+CREATE TABLE IF NOT EXISTS analytics.active_generation
+(
+    singleton UInt8 DEFAULT 1,
+    generation_id String,
+    switched_at DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(switched_at)
+ORDER BY (singleton)
+SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------------
 -- Sanitized gameplay metrics (room.gameplay.metrics and public room facts).
 -- Ad-hoc metrics must already be anonymized before insert.
 -- Public tournament metrics may round-trip already-public player display facts.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS analytics.gameplay_metrics
 (
+    generation_id String,
     event_id String,
     schema_version UInt16,
     correlation_id String,
@@ -47,7 +77,7 @@ CREATE TABLE IF NOT EXISTS analytics.gameplay_metrics
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMM(occurred_at)
-ORDER BY (event_id)
+ORDER BY (generation_id, event_id)
 SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------------
@@ -56,6 +86,7 @@ SETTINGS index_granularity = 8192;
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS analytics.tournament_statistics
 (
+    generation_id String,
     event_id String,
     schema_version UInt16,
     correlation_id String,
@@ -74,7 +105,7 @@ CREATE TABLE IF NOT EXISTS analytics.tournament_statistics
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY (toYYYYMM(occurred_at), sipHash64(tournament_id) % 16)
-ORDER BY (tournament_id, event_id)
+ORDER BY (generation_id, tournament_id, event_id)
 SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------------
@@ -84,6 +115,7 @@ SETTINGS index_granularity = 8192;
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS analytics.rating_statistics
 (
+    generation_id String,
     event_id String,
     schema_version UInt16,
     correlation_id String,
@@ -98,21 +130,25 @@ CREATE TABLE IF NOT EXISTS analytics.rating_statistics
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMM(occurred_at)
-ORDER BY (event_id, snapshot_id, player_id)
+ORDER BY (generation_id, event_id, snapshot_id, player_id)
 SETTINGS index_granularity = 8192;
 
 -- ---------------------------------------------------------------------------
 -- Ingestion dedupe / quarantine markers for unsafe or duplicate upstream events.
+-- outcome_json holds the byte-stable durable ApplyOutcome (accepted/quarantined).
+-- Writers MUST insert projection rows (if any) before this marker.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS analytics.processed_events
 (
+    generation_id String,
     event_id String,
     topic LowCardinality(String),
     disposition LowCardinality(String) DEFAULT 'applied',
+    outcome_json String,
     processed_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(processed_at)
-ORDER BY (event_id)
+ORDER BY (generation_id, event_id)
 SETTINGS index_granularity = 8192;
 
 -- Explicit insert is safe to re-run only if version row is replaced by engine semantics.

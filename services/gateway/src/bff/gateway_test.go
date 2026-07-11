@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -181,54 +184,45 @@ func TestRouting_AllRoomCatalogTypes(t *testing.T) {
 	}
 }
 
-func TestRejection_UnknownTypeNoDispatch(t *testing.T) {
+func TestEnvelope_UnknownTypeHTTP400NoDispatchNoAudit(t *testing.T) {
 	h := newHarness(t)
 	body := []byte(`{"commandId":"cmd_x","type":"NotARealCommand","schemaVersion":1,"payload":{}}`)
 	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var res envelope.Result
-	_ = json.Unmarshal(w.Body.Bytes(), &res)
-	if res.Status != envelope.StatusRejected || res.Reason != "unknown_command_type" {
-		t.Fatalf("result=%+v", res)
+	if !strings.Contains(w.Body.String(), "invalid_envelope") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unknown command type") {
+		t.Fatalf("body=%s", w.Body.String())
 	}
 	if h.room.DispatchCount()+h.tournament.DispatchCount() != 0 {
 		t.Fatal("unknown type must not dispatch")
 	}
-	if h.audit.Len() != 1 {
-		t.Fatalf("audit len=%d", h.audit.Len())
-	}
-	rec := h.audit.Records()[0]
-	if rec.Reason != "unknown_command_type" || rec.CommandID != "cmd_x" || rec.CorrelationID != "corr_test" {
-		t.Fatalf("audit=%+v", rec)
-	}
-	if rec.PlayerID != h.principal.PlayerID || rec.SessionID != h.principal.SessionID {
-		t.Fatalf("audit identity=%+v", rec)
+	if h.audit.Len() != 0 {
+		t.Fatal("unknown type is malformed envelope, not rejection audit")
 	}
 }
 
-func TestRejection_MissingExpectedSequenceNoDispatch(t *testing.T) {
+func TestEnvelope_MissingExpectedSequenceHTTP400(t *testing.T) {
 	h := newHarness(t)
 	body := []byte(`{"commandId":"cmd_stale","type":"PlayCard","schemaVersion":1,"payload":{"roomId":"room_1"}}`)
 	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var res envelope.Result
-	_ = json.Unmarshal(w.Body.Bytes(), &res)
-	if res.Status != envelope.StatusRejected || res.Reason != "missing_expected_sequence_number" {
-		t.Fatalf("result=%+v", res)
+	if !strings.Contains(w.Body.String(), "invalid_envelope") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "expectedSequenceNumber") {
+		t.Fatalf("body=%s", w.Body.String())
 	}
 	if h.room.DispatchCount() != 0 {
 		t.Fatal("must not dispatch without expectedSequenceNumber")
 	}
-	if h.audit.Len() != 1 {
-		t.Fatalf("audit len=%d", h.audit.Len())
-	}
-	rec := h.audit.Records()[0]
-	if rec.RoomID != "room_1" || rec.Reason != "missing_expected_sequence_number" {
-		t.Fatalf("audit=%+v", rec)
+	if h.audit.Len() != 0 {
+		t.Fatal("missing sequence is malformed envelope, not rejection audit")
 	}
 }
 
@@ -512,14 +506,18 @@ func TestRouting_RouteBackendHelpers(t *testing.T) {
 	if bff.RouteBackend("Nope") != bff.BackendUnknown {
 		t.Fatal("unknown")
 	}
-	if bff.RequiresExpectedSequence("CreateRoom") {
+	// Sequence rules live in shared/envelope (avoid duplicating the catalog helper in bff).
+	if envelope.RequiresExpectedSequence("CreateRoom") {
 		t.Fatal("CreateRoom exception")
 	}
-	if !bff.RequiresExpectedSequence("JoinRoom") {
+	if !envelope.RequiresExpectedSequence("JoinRoom") {
 		t.Fatal("JoinRoom requires sequence")
 	}
-	if bff.RequiresExpectedSequence("RegisterPlayer") {
+	if envelope.RequiresExpectedSequence("RegisterPlayer") {
 		t.Fatal("tournament commands do not require room sequence")
+	}
+	if !envelope.IsPublicCommandType("PlayCard") || envelope.IsPublicCommandType("Nope") {
+		t.Fatal("public catalog coherence")
 	}
 }
 
@@ -579,8 +577,9 @@ func TestAuditFailure_NoDispatchOnPreReject(t *testing.T) {
 		Ready:      true,
 		Clock:      func() time.Time { return time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC) },
 	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/commands",
-		bytes.NewReader([]byte(`{"commandId":"cmd_x","type":"Nope","schemaVersion":1,"payload":{}}`)))
+	// Tournament on room route is a domain rejection that audits before dispatch.
+	req := httptest.NewRequest(http.MethodPost, "/v1/rooms/room_1/commands",
+		bytes.NewReader([]byte(`{"commandId":"cmd_t","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1"}}`)))
 	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -637,15 +636,18 @@ func TestUpstreamResult_InvalidShapeRejected(t *testing.T) {
 
 func TestCorrelation_SameValueThroughAuthBackendAudit(t *testing.T) {
 	h := newHarness(t)
-	body := []byte(`{"commandId":"cmd_c","type":"NotARealCommand","schemaVersion":1,"payload":{}}`)
+	body := []byte(`{"commandId":"cmd_c","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1"}}`)
 	headers := h.authHeaders()
 	headers[correlation.HeaderCorrelationID] = "corr_once"
-	w := h.do(http.MethodPost, "/v1/commands", body, headers)
+	w := h.do(http.MethodPost, "/v1/rooms/room_1/commands", body, headers)
 	if w.Header().Get(correlation.HeaderCorrelationID) != "corr_once" {
 		t.Fatalf("response corr=%q", w.Header().Get(correlation.HeaderCorrelationID))
 	}
 	if h.identity.LastCorr.CorrelationID != "corr_once" {
 		t.Fatalf("auth corr=%+v", h.identity.LastCorr)
+	}
+	if h.audit.Len() != 1 {
+		t.Fatalf("audit len=%d", h.audit.Len())
 	}
 	if h.audit.Records()[0].CorrelationID != "corr_once" {
 		t.Fatalf("audit corr=%+v", h.audit.Records()[0])
@@ -1018,5 +1020,221 @@ func TestClosedClients_FailRequests(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 		}
+	}
+}
+
+func TestEnvelope_UnknownTopLevelFieldHTTP400(t *testing.T) {
+	h := newHarness(t)
+	body := []byte(`{"commandId":"cmd_1","type":"CreateRoom","schemaVersion":1,"payload":{},"extra":true}`)
+	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_envelope") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if h.room.DispatchCount() != 0 {
+		t.Fatal("must not dispatch")
+	}
+	if h.audit.Len() != 0 {
+		t.Fatal("shape errors are not rejection audits")
+	}
+}
+
+func TestEnvelope_UnknownPayloadFieldHTTP400(t *testing.T) {
+	h := newHarness(t)
+	body := []byte(`{"commandId":"cmd_1","type":"JoinRoom","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"roomId":"r1","extra":1}}`)
+	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_envelope") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if h.room.DispatchCount() != 0 {
+		t.Fatal("must not dispatch")
+	}
+}
+
+func TestEnvelope_ForbiddenSequenceOnCreateRoomAndTournamentHTTP400(t *testing.T) {
+	h := newHarness(t)
+	cases := []struct {
+		typ     string
+		payload string
+	}{
+		{"CreateRoom", `{}`},
+		{"CreateTournament", `{"tournamentId":"t1"}`},
+		{"RegisterPlayer", `{"tournamentId":"t1"}`},
+		{"CloseRegistration", `{"tournamentId":"t1"}`},
+	}
+	for _, tc := range cases {
+		body := []byte(`{"commandId":"cmd_` + tc.typ + `","type":"` + tc.typ + `","expectedSequenceNumber":0,"schemaVersion":1,"payload":` + tc.payload + `}`)
+		w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s status=%d body=%s", tc.typ, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "invalid_envelope") {
+			t.Fatalf("%s body=%s", tc.typ, w.Body.String())
+		}
+	}
+	if h.room.DispatchCount()+h.tournament.DispatchCount() != 0 {
+		t.Fatal("must not dispatch prohibited-sequence envelopes")
+	}
+	if h.audit.Len() != 0 {
+		t.Fatal("shape errors are not rejection audits")
+	}
+}
+
+func TestEnvelope_UnknownTypeHTTP400Malformed(t *testing.T) {
+	h := newHarness(t)
+	body := []byte(`{"commandId":"cmd_x","type":"NotARealCommand","schemaVersion":1,"payload":{"anything":true}}`)
+	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_envelope") {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	if h.audit.Len() != 0 {
+		t.Fatal("unknown type must not audit")
+	}
+}
+
+func TestEnvelope_InvalidPayloadTypesEnumsRangesHTTP400(t *testing.T) {
+	h := newHarness(t)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"non-string roomId", `{"commandId":"c","type":"JoinRoom","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"roomId":99}}`},
+		{"invalid visibility", `{"commandId":"c","type":"CreateRoom","schemaVersion":1,"payload":{"visibility":"friends"}}`},
+		{"maxSeats 1", `{"commandId":"c","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":1}}`},
+		{"maxSeats 11", `{"commandId":"c","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":11}}`},
+		{"negative disconnectVersion", `{"commandId":"c","type":"ReconnectToRoom","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"disconnectVersion":-1}}`},
+		{"invalid color", `{"commandId":"c","type":"ChooseColor","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"color":"purple"}}`},
+		{"non-integer capacity", `{"commandId":"c","type":"CreateTournament","schemaVersion":1,"payload":{"capacity":"8"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := h.do(http.MethodPost, "/v1/commands", []byte(tc.body), h.authHeaders())
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "invalid_envelope") {
+				t.Fatalf("body=%s", w.Body.String())
+			}
+		})
+	}
+	if h.room.DispatchCount()+h.tournament.DispatchCount() != 0 {
+		t.Fatal("must not dispatch invalid payloads")
+	}
+	if h.audit.Len() != 0 {
+		t.Fatal("shape errors are not rejection audits")
+	}
+}
+
+func TestEnvelope_ValidPayloadBoundsDispatch(t *testing.T) {
+	h := newHarness(t)
+	cases := []string{
+		`{"commandId":"c_ms0","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":0}}`,
+		`{"commandId":"c_ms2","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":2}}`,
+		`{"commandId":"c_ms10","type":"CreateRoom","schemaVersion":1,"payload":{"maxSeats":10,"visibility":"private"}}`,
+		`{"commandId":"c_color","type":"ChooseColor","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"roomId":"r1","color":"blue"}}`,
+		`{"commandId":"c_tour","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1","capacity":8}}`,
+	}
+	for _, body := range cases {
+		w := h.do(http.MethodPost, "/v1/commands", []byte(body), h.authHeaders())
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s for %s", w.Code, w.Body.String(), body)
+		}
+	}
+}
+
+func TestRejection_StaleSequenceStillHTTP200DomainReject(t *testing.T) {
+	h := newHarness(t)
+	seq := int64(7)
+	h.room.Results["cmd_stale"] = envelope.Rejected("cmd_stale", "PlayCard", "stale_sequence", &seq)
+	body := []byte(`{"commandId":"cmd_stale","type":"PlayCard","expectedSequenceNumber":3,"schemaVersion":1,"payload":{"roomId":"room_1"}}`)
+	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var res envelope.Result
+	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	if res.Status != envelope.StatusRejected || res.Reason != "stale_sequence" {
+		t.Fatalf("result=%+v", res)
+	}
+	if h.room.DispatchCount() != 1 {
+		t.Fatal("stale/wrong sequence must still dispatch")
+	}
+	if h.audit.Len() != 1 {
+		t.Fatalf("audit len=%d", h.audit.Len())
+	}
+}
+
+func TestOpenAPI_CommandEnvelopeHasExactlyFifteenVariants(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	path := filepath.Join(root, "contracts", "openapi", "bff-v1.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read openapi: %v", err)
+	}
+	text := string(raw)
+	idx := strings.Index(text, "CommandEnvelope:")
+	if idx < 0 {
+		t.Fatal("CommandEnvelope missing")
+	}
+	oneOf := strings.Index(text[idx:], "oneOf:")
+	if oneOf < 0 {
+		t.Fatal("oneOf missing")
+	}
+	disc := strings.Index(text[idx+oneOf:], "discriminator:")
+	if disc < 0 {
+		t.Fatal("discriminator missing")
+	}
+	section := text[idx+oneOf : idx+oneOf+disc]
+	refs := regexp.MustCompile(`\$ref:\s*"#/components/schemas/\w+Command"`).FindAllString(section, -1)
+	if len(refs) != 15 {
+		t.Fatalf("CommandEnvelope oneOf variants=%d want 15", len(refs))
+	}
+}
+
+func TestOpenAPI_CreateRoomMaxSeatsContractShape(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	path := filepath.Join(root, "contracts", "openapi", "bff-v1.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read openapi: %v", err)
+	}
+	text := string(raw)
+	idx := strings.Index(text, "CreateRoomCommand:")
+	if idx < 0 {
+		t.Fatal("CreateRoomCommand missing")
+	}
+	next := strings.Index(text[idx+1:], "\n    JoinRoomCommand:")
+	if next < 0 {
+		t.Fatal("JoinRoomCommand boundary missing")
+	}
+	section := text[idx : idx+1+next]
+	if !strings.Contains(section, "maxSeats:") {
+		t.Fatal("maxSeats missing from CreateRoomCommand")
+	}
+	if !strings.Contains(section, "anyOf:") {
+		t.Fatal("maxSeats must use anyOf for nonpositive-default vs 2..10")
+	}
+	if !regexp.MustCompile(`(?s)maximum:\s*0`).MatchString(section) {
+		t.Fatal("maxSeats anyOf must allow nonpositive (maximum: 0)")
+	}
+	if !regexp.MustCompile(`(?s)minimum:\s*2`).MatchString(section) {
+		t.Fatal("maxSeats anyOf must require minimum 2 for explicit positive")
+	}
+	if !regexp.MustCompile(`(?s)maximum:\s*10`).MatchString(section) {
+		t.Fatal("maxSeats anyOf must cap at maximum 10")
+	}
+	if regexp.MustCompile(`(?s)maxSeats:.*?minimum:\s*1\b`).MatchString(section) {
+		t.Fatal("maxSeats must not claim minimum: 1 (domain rejects 1)")
+	}
+	if !strings.Contains(section, "default to 10") {
+		t.Fatal("maxSeats description must document default 10 for nonpositive")
 	}
 }

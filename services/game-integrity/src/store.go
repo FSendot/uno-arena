@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -62,15 +63,18 @@ type DeckState struct {
 	ByOp          map[domain.DrawOperationID]*pendingReservation
 	Confirmed     map[domain.DrawOperationID]confirmedOp
 	ConfirmedByID map[string]confirmedOp // original reservation ID → confirmed record
+	// Cancelled tombstones: a cancelled reservation/operation identity is never reused.
+	Cancelled    map[string]struct{}
+	CancelledOps map[domain.DrawOperationID]struct{}
 }
 
 // StreamRepository is the injectable backing store for offline Game Integrity.
 type StreamRepository interface {
-	WithRoom(roomID domain.RoomID, fn func(*RoomState) error) error
-	WithExistingRoom(roomID domain.RoomID, fn func(*RoomState) error) error
-	WithDeck(roomID domain.RoomID, gameID domain.GameID, create bool, fn func(*DeckState) error) error
-	WithExistingDeck(roomID domain.RoomID, gameID domain.GameID, fn func(*DeckState) error) error
-	FindByGameID(gameID domain.GameID) (roomID domain.RoomID, ok bool)
+	WithRoom(ctx context.Context, roomID domain.RoomID, fn func(*RoomState) error) error
+	WithExistingRoom(ctx context.Context, roomID domain.RoomID, fn func(*RoomState) error) error
+	WithDeck(ctx context.Context, roomID domain.RoomID, gameID domain.GameID, create bool, fn func(*DeckState) error) error
+	WithExistingDeck(ctx context.Context, roomID domain.RoomID, gameID domain.GameID, fn func(*DeckState) error) error
+	FindByGameID(ctx context.Context, gameID domain.GameID) (roomID domain.RoomID, ok bool, err error)
 }
 
 // ErrStreamNotFound is returned when a room or deck stream has not been created.
@@ -155,6 +159,8 @@ func (r *MemoryStreamRepository) getOrCreateDeckLocked(k deckKey) *DeckState {
 		ByOp:          map[domain.DrawOperationID]*pendingReservation{},
 		Confirmed:     map[domain.DrawOperationID]confirmedOp{},
 		ConfirmedByID: map[string]confirmedOp{},
+		Cancelled:     map[string]struct{}{},
+		CancelledOps:  map[domain.DrawOperationID]struct{}{},
 	}
 	r.decks[k] = s
 	return s
@@ -168,7 +174,10 @@ func (r *MemoryStreamRepository) getDeckLocked(k deckKey) (*DeckState, bool) {
 }
 
 // WithRoom implements StreamRepository.
-func (r *MemoryStreamRepository) WithRoom(roomID domain.RoomID, fn func(*RoomState) error) error {
+func (r *MemoryStreamRepository) WithRoom(ctx context.Context, roomID domain.RoomID, fn func(*RoomState) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !roomID.Valid() {
 		return fmt.Errorf("roomId required")
 	}
@@ -183,7 +192,10 @@ func (r *MemoryStreamRepository) WithRoom(roomID domain.RoomID, fn func(*RoomSta
 }
 
 // WithExistingRoom implements StreamRepository.
-func (r *MemoryStreamRepository) WithExistingRoom(roomID domain.RoomID, fn func(*RoomState) error) error {
+func (r *MemoryStreamRepository) WithExistingRoom(ctx context.Context, roomID domain.RoomID, fn func(*RoomState) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !roomID.Valid() {
 		return fmt.Errorf("roomId required")
 	}
@@ -198,7 +210,10 @@ func (r *MemoryStreamRepository) WithExistingRoom(roomID domain.RoomID, fn func(
 }
 
 // WithDeck implements StreamRepository.
-func (r *MemoryStreamRepository) WithDeck(roomID domain.RoomID, gameID domain.GameID, create bool, fn func(*DeckState) error) error {
+func (r *MemoryStreamRepository) WithDeck(ctx context.Context, roomID domain.RoomID, gameID domain.GameID, create bool, fn func(*DeckState) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !roomID.Valid() || !gameID.Valid() {
 		return fmt.Errorf("roomId and gameId required")
 	}
@@ -220,12 +235,15 @@ func (r *MemoryStreamRepository) WithDeck(roomID domain.RoomID, gameID domain.Ga
 }
 
 // WithExistingDeck implements StreamRepository.
-func (r *MemoryStreamRepository) WithExistingDeck(roomID domain.RoomID, gameID domain.GameID, fn func(*DeckState) error) error {
-	return r.WithDeck(roomID, gameID, false, fn)
+func (r *MemoryStreamRepository) WithExistingDeck(ctx context.Context, roomID domain.RoomID, gameID domain.GameID, fn func(*DeckState) error) error {
+	return r.WithDeck(ctx, roomID, gameID, false, fn)
 }
 
 // FindByGameID implements StreamRepository.
-func (r *MemoryStreamRepository) FindByGameID(gameID domain.GameID) (domain.RoomID, bool) {
+func (r *MemoryStreamRepository) FindByGameID(ctx context.Context, gameID domain.GameID) (domain.RoomID, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var found domain.RoomID
@@ -237,9 +255,9 @@ func (r *MemoryStreamRepository) FindByGameID(gameID domain.GameID) (domain.Room
 		}
 	}
 	if n != 1 {
-		return "", false
+		return "", false, nil
 	}
-	return found, true
+	return found, true, nil
 }
 
 func (d *DeckState) outstandingPending() *pendingReservation {
