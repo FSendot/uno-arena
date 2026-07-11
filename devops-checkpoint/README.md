@@ -249,7 +249,7 @@ The `integration-staging` stage runs `devops-checkpoint/smoke-test/run-smoke-tes
 
 1. Calls `unoarena register --user smoketest-$CI_JOB_ID --pass testpass --json` and asserts the response contains `"status": "ok"`.
 2. Calls `unoarena whoami --user smoketest-$CI_JOB_ID --json` and asserts the response contains `"username": "smoketest-$CI_JOB_ID"`.
-3. Cleans up the seeded account on exit (or namespaces it by `CI_JOB_ID` so repeated runs do not collide).
+3. Namespaces the seeded account by `CI_JOB_ID` so repeated runs do not collide; the placeholder exposes no cleanup endpoint.
 
 The staging URL is injected as `UNOARENA_API_URL` — never hardcoded.
 
