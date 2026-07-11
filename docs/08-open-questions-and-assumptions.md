@@ -24,7 +24,11 @@ These assumptions were used to make the domain model concrete where the brief do
 - A room hosts exactly one best-of-three match.
 - A match is decided when one player wins two games, while tournament advancement still records the ranked top 3 for non-final matches.
 - Standard Uno-like turn, draw, wild-color, and Uno-call mechanics apply.
+- Draw-card stacking is enabled. The player targeted by a pending draw penalty may stack a `Draw Two` or legally playable `Wild Draw Four`; penalties accumulate and transfer until a targeted player draws the full total and forfeits the turn.
+- Exact-match jump-ins are enabled. Outside mandatory-resolution states, any player may play out of turn when the card matches the discard by both color and rank or action symbol; the jumper becomes the acting player and play resumes after their seat.
 - Rejected stale commands are treated as API outcomes rather than business events.
+
+These two optional-rule decisions use [*UNO - How to Play Correctly!*](https://www.youtube.com/watch?v=rC-DYC3ZELM) as their rule source. The video's `01:33` “Special Cards” chapter states that a `Draw Two` may be played on another `Draw Two`; its transcript does not define mixed draw-card stacking or mention jump-ins. Per the product-owner fallback, unmentioned optional-rule behavior is enabled, so mixed draw-card stacking and exact-match jump-ins are part of the implementation baseline.
 
 ### Tournament assumptions
 
@@ -63,11 +67,10 @@ These assumptions are included because the assignment asks to surface connection
 
 The following items remain unresolved and should be clarified with the teaching staff or product owner.
 
-1. What exact optional Uno ruleset applies for stacking and jump-ins?
-2. Should rejected commands be recorded as audit events in high-stakes tournaments, or is operational logging sufficient?
-3. Can spectators join before the room is locked, or only once the match starts?
-4. If host reassignment occurs in ad-hoc rooms, what exact rule selects the new host?
-5. How should client UI display server-authoritative 5-second Uno deadlines under latency?
+1. Should rejected commands be recorded as audit events in high-stakes tournaments, or is operational logging sufficient?
+2. Can spectators join before the room is locked, or only once the match starts?
+3. If host reassignment occurs in ad-hoc rooms, what exact rule selects the new host?
+4. How should client UI display server-authoritative 5-second Uno deadlines under latency?
 
 ## Why These Assumptions Matter
 

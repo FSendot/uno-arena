@@ -18,7 +18,8 @@
 - **Turn Order**: the circular sequence determining which Seat acts next; may reverse direction.
 - **Sequence Number**: monotonic version attached to every player action, used to reject stale moves and guarantee that only one action at a time is accepted against the current room state.
 - **Active Color**: the current effective color on the discard pile, especially relevant after a wild card.
-- **Penalty Stack**: pending draw penalty accumulated by special-card interactions (e.g., stacked +2 cards).
+- **Penalty Stack**: pending draw penalty accumulated by consecutive `Draw Two` or legally playable `Wild Draw Four` cards. Only the targeted player may stack; otherwise that player draws the total and forfeits the turn.
+- **Jump-In**: an out-of-turn play that exactly matches the discard by color and rank or action symbol. It is unavailable while a penalty stack or other mandatory resolution is pending.
 - **Hand**: private set of cards held by one player in a Room Session; only that player may see and play those cards.
 - **Uno Window**: rule window in which a player must call Uno or may be penalized, this window lasts 5 seconds once the player has played his second-to-last card in his turn; the penalty of the Uno window is to draw 2 cards.
 - **Challenge Window**: Another player can challenge a player with the Uno window available, penalizing the challenged player if successful, otherwise the challenger receives the Uno window penalty himself; it closes after 5 seconds or as soon as the next player begins their turn, whichever comes first.
@@ -184,7 +185,7 @@ This is the hardest real-time part, since actions are concurrent and must be ser
 
 ### Hotspots
 
-- Exact interpretation of jump-ins and stacking rules.
+- Stacking and jump-ins are enabled: draw-card penalties accumulate and transfer between targeted players, while an exact-match jump-in makes the jumper the acting player and resumes play after that seat. The policy is synchronized with the refined design package.
 - Whether a failed stale command should emit a domain event or remain only an API outcome.
 - How clients should display the server-authoritative 5-second Uno deadline under latency.
 
@@ -285,12 +286,14 @@ Owns the authoritative lifecycle of a single room session: roster, current turn,
 
 **Invariants**
 
-1. A card can only be played if the acting player holds it, it is their turn, and the submitted sequence number matches the current room version; every successful mutation increments the sequence number exactly once.
+1. A card can only be played if the acting player holds it, the submitted sequence number matches the current room version, and the player either owns the turn, is the targeted player making a legal draw-card stack, or is making a legal exact-match jump-in; every successful mutation increments the sequence number exactly once.
 2. Room capacity must be between 2 and 10 seats; joins beyond the limit are rejected.
 3. Status transitions follow strictly `waiting` → `in_progress` → `completed`; no backwards transitions are allowed.
 4. The Uno penalty window closes exactly 5 seconds after the player plays their second-to-last card or as soon as the next player begins their turn, whichever comes first; late `CallUno` commands are rejected.
 5. A player who fails to call Uno within that 5-second window and is successfully challenged draws 2 penalty cards.
 6. If a player disconnects during their own turn, their turn is skipped for up to 60 seconds without bot substitution; reconnecting within 60 seconds preserves their seat and hand, while missing the deadline causes `PlayerForfeited`.
+7. A targeted player may stack a `Draw Two` or legally playable `Wild Draw Four`; the draw values accumulate and transfer until a targeted player draws the total and forfeits the turn.
+8. Outside mandatory-resolution states, an exact color-and-rank-or-symbol jump-in makes the jumper the acting player and resumes turn order after the jumper's seat.
 
 **Why separate**
 It owns the core consistency boundary for a match, and all gameplay mutations must pass through the aggregate root, not be updated piecemeal. This is the Core Domain that differentiates UnoArena.

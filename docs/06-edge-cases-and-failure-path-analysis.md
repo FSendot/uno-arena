@@ -19,6 +19,20 @@ Two players attempt to play different cards at nearly the same time.
 - accepted branch: `CardPlayed`, follow-up events such as `ColorChosen`, `UnoPenaltyApplied`, `TurnAdvanced`
 - rejected branch: no business event; API returns stale-command outcome
 
+### Jump-in race
+
+- An out-of-turn `PlayCard` is eligible only when its card exactly matches the discard by color and rank or action symbol and no penalty stack, wild-color choice, or other mandatory resolution is pending.
+- A current-turn play and one or more jump-ins may race against the same room sequence number. Room serialization accepts exactly one valid command; all later commands are rejected as stale.
+- An accepted jump-in records `CardPlayed` with `playMode=jump_in`, makes the jumper the acting player, applies the card effect normally, and resumes turn order after the jumper's seat.
+- An invalid or losing jump-in changes no state and emits no business event.
+
+### Draw-card stacking
+
+- Only the player currently targeted by a draw penalty may stack a `Draw Two` or legally playable `Wild Draw Four`.
+- Each stacked card emits `CardPlayed` with `playMode=stack` and `PenaltyStackIncreased`, adds 2 or 4 to the accumulated penalty, and transfers the penalty to the next player in turn order.
+- The first targeted player who does not or cannot stack draws the accumulated total, emits `CardDrawn` and `PenaltyStackResolved`, and forfeits the rest of the turn.
+- Jump-ins cannot intercept or bypass a pending penalty stack. Concurrent stack attempts use the same sequence-number and idempotency rules as other room commands.
+
 ## 2. Disconnections and Late Rejoin Attempts
 
 ### Expected domain behavior

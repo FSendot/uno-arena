@@ -21,7 +21,8 @@ This glossary defines the ubiquitous language used across the rest of the submis
 - **Turn Order**: the ordered sequence of seats and the current direction of play.
 - **Sequence Number**: monotonic room version attached to commands so stale or replayed actions can be rejected.
 - **Active Color**: the current effective color on the discard pile, including a color chosen after a wild card.
-- **Penalty Stack**: the pending draw penalty that must be resolved before ordinary play resumes.
+- **Penalty Stack**: the accumulated draw penalty created by consecutively stacked `Draw Two` and `Wild Draw Four` cards. The player targeted by the current penalty may add either draw-card type, subject to ordinary card-legality rules, and transfer the increased penalty to the next player. The first targeted player who does not stack must draw the full accumulated penalty and forfeits the rest of their turn.
+- **Jump-In**: an out-of-turn play of a card that exactly matches the current discard by both color and rank or action symbol. An accepted jump-in makes the jumper the acting player, resolves the card normally, and continues turn order from the seat after the jumper. Jump-ins cannot bypass an unresolved penalty stack, a pending wild-color choice, or any other mandatory resolution; only the player targeted by a penalty may stack a draw card.
 - **Hand**: private set of cards held by one player in a game; only that player may see and play those cards.
 - **Uno Window**: the rule window in which a player who reached one remaining card must successfully call Uno or be penalized; it closes after 5 seconds or as soon as the next player begins their turn, whichever comes first.
 - **Challenge Window**: the period in which an opponent may challenge a missing Uno call; a successful challenge makes the target draw 2 cards, while an invalid challenge makes the challenger draw 2 cards.

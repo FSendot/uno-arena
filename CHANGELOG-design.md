@@ -6,6 +6,18 @@ This changelog records design-package updates made while shaping the architectur
 
 The DevOps Checkpoint preserves the Architecture Checkpoint service boundaries unchanged: its eight service placeholders map one-to-one to the architecture services and introduce no new bounded contexts or shared platform service.
 
+## Optional Uno Rules Resolution
+
+- `docs/01-domain-glossary.md` - Deliverable 1, Domain glossary: defined accumulated draw-card stacking and exact-match jump-ins as part of the ubiquitous language.
+- `docs/03-aggregates-entities-value-objects.md` - Deliverable 3, Aggregates, entities, and value objects: added Room invariants for stack eligibility, accumulated penalty resolution, jump-in matching, and post-jump turn authority.
+- `docs/04-commands-and-domain-events.md` - Deliverable 4, Commands and domain events catalog: expanded `PlayCard` and `DrawCard` causality with `playMode`, `PenaltyStackIncreased`, and `PenaltyStackResolved`, and documented invalid stack/jump-in rejection outcomes.
+- `docs/05-domain-event-flow-narratives.md` - Deliverable 5, Domain event flow narratives: added the synchronous stack and jump-in decision path to room gameplay.
+- `docs/06-edge-cases-and-failure-path-analysis.md` - Deliverable 6, Edge cases and failure-path analysis: defined serialization of competing jump-ins and turn actions, plus pending-penalty ownership and resolution behavior.
+- `docs/08-open-questions-and-assumptions.md` - Deliverable 8, Open questions and assumptions: resolved the optional stacking/jump-in question using [*UNO - How to Play Correctly!*](https://www.youtube.com/watch?v=rC-DYC3ZELM) and the product-owner fallback for behavior the video does not mention.
+- `docs/raw/Design Assignment.md` - Raw EventStorming artifact: synchronized the previously unresolved stacking/jump-in hotspot with the refined design decision.
+
+The implementation baseline enables both rules. `Draw Two` and legally playable `Wild Draw Four` penalties may be stacked by the currently targeted player, including mixed stacks; the accumulated penalty transfers until a target draws the full total and forfeits the turn. Outside mandatory-resolution states, a player may jump in with an exact color-and-rank-or-symbol match, after which turn order continues from the jumper's seat. This changes Room Gameplay policy only and does not move ownership across bounded contexts.
+
 ## Architecture Evaluation Closure
 
 - `docs/architecture/01-context-and-container-view.md` - Architecture deliverable 6.1, context and container view: annotated the Mermaid container diagram with an explicit `Trust Boundary / External Edge (DMZ)` between untrusted clients and private services/data stores.

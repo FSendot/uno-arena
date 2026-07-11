@@ -14,7 +14,7 @@ This document describes end-to-end event flows with both synchronous decision po
 6. Room Gameplay synchronously requests deck initialization from Game Integrity for Game 1.
 7. Game Integrity commits the deck seed and confirms authoritative deal material.
 8. Room Gameplay emits `MatchStarted` and `GameStarted`.
-9. Players submit gameplay commands. Each accepted command is synchronously validated against room invariants and then committed as domain events such as `CardPlayed`, `CardDrawn`, `ColorChosen`, `UnoCalled`, `UnoWindowExpired`, `UnoPenaltyApplied`, and `TurnAdvanced`.
+9. Players submit gameplay commands. Each accepted command is synchronously validated against room invariants and then committed as domain events such as `CardPlayed`, `PenaltyStackIncreased`, `PenaltyStackResolved`, `CardDrawn`, `ColorChosen`, `UnoCalled`, `UnoWindowExpired`, `UnoPenaltyApplied`, and `TurnAdvanced`. A targeted player may stack `Draw Two` or a legally playable `Wild Draw Four`, transferring the accumulated draw penalty; a player who declines or cannot stack draws the total and loses the rest of the turn. Outside mandatory-resolution states, any player may jump in with an exact color-and-rank-or-symbol match; the first valid command serialized at the current sequence number wins, the jumper becomes the acting player, and play continues after the jumper's seat.
 10. In parallel with each accepted gameplay decision, Game Integrity appends the immutable log entry.
 11. If a player plays their second-to-last card, the Uno challenge window opens and closes after 5 seconds or when the next player begins their turn. If the persisted deadline is reached first, Room Gameplay emits `UnoWindowExpired`; a later missing-Uno challenge is rejected because the window is closed. A successful missing-Uno challenge before expiry emits `UnoPenaltyApplied` with a 2-card draw.
 12. After each committed gameplay event, Spectator View receives only public projection facts such as discard state, active color, turn, public roster, and card counts.
@@ -28,7 +28,8 @@ This document describes end-to-end event flows with both synchronous decision po
 
 - session validity for every player command
 - room capacity and lock eligibility
-- turn ownership and sequence-number validation
+- turn ownership or exact-match jump-in eligibility, plus sequence-number validation
+- draw-card stacking eligibility, accumulated-penalty calculation, and mandatory penalty resolution
 - hand ownership of the played card
 - whether the 5-second Uno window is still open and whether the next player has begun their turn
 - whether an `UnoWindowExpired` timer command still corresponds to the currently open Uno window

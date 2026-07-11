@@ -17,8 +17,8 @@ This catalog lists the main commands, their primary emitted events, causality, a
 
 | Command | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
-| `PlayCard` | Player | `CardPlayed` | Accepted if turn, sequence, session, rate-limit, and hand ownership are valid; event payload includes `roomId`, `gameId`, `playerId`, `card`, and `sequenceNumber` | Command deduped by command id; stale or conflicting commands are rejected |
-| `DrawCard` | Player | `CardDrawn`, `TurnAdvanced` or `DrawTurnRetained` | Used when player cannot or chooses not to play | Duplicate submissions return the previously decided outcome |
+| `PlayCard` | Player | `CardPlayed`, optionally `PenaltyStackIncreased` or `TurnAdvanced` | Accepted when sequence, session, rate-limit, and hand ownership are valid and the player either owns the turn, legally stacks a draw card as the targeted player, or makes an exact-match jump-in. Payload includes `roomId`, `gameId`, `playerId`, `card`, `sequenceNumber`, and `playMode` (`turn`, `stack`, or `jump_in`). A stack adds 2 or 4 and transfers the penalty; a jump-in makes the jumper the acting player and continues turn order after that seat | Command deduped by command id; sequence serialization selects one winner among concurrent turn and jump-in attempts |
+| `DrawCard` | Player | `CardDrawn`, optionally `PenaltyStackResolved`, then `TurnAdvanced` or `DrawTurnRetained` | Used when a player cannot or chooses not to play. If the player is targeted by a penalty stack and does not stack, the command draws the accumulated total and forfeits the rest of the turn | Duplicate submissions return the previously decided outcome |
 | `ChooseColor` | Player | `ColorChosen` | Follows a wild-card play that requires a color decision | Same command id must not apply twice |
 | `CallUno` | Player | `UnoCalled` | Allowed only before the 5-second Uno window closes or the next player begins their turn | Duplicate calls after success are ignored |
 | `ReportMissingUno` | Opponent or system | `UnoChallengeIssued`, `UnoPenaltyApplied` | Triggered when eligible target failed to call Uno before the challenge window closed; penalty event includes `roomId`, `targetPlayerId`, `challengerPlayerId`, and `cardsDrawn=2` | Idempotent by `(targetPlayerId, triggeringGameEventId)` |
@@ -101,6 +101,9 @@ These commands model fallback outcomes that are meaningful to the business proce
 The following cases are intentionally treated as command outcomes rather than domain events because the domain state does not change:
 
 - stale `PlayCard` with old sequence number
+- out-of-turn `PlayCard` that is not an exact-match jump-in
+- jump-in attempted while a penalty stack, wild-color choice, or other mandatory resolution is pending
+- attempted draw-card stack by anyone other than the currently targeted player, or with an illegally playable card
 - replayed command with already-consumed idempotency key
 - command from expired or revoked session
 - `JoinRoom` after lock or capacity reached

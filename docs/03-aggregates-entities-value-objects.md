@@ -29,7 +29,7 @@ One room hosts one match. All changes that affect roster, turn authority, match 
 **Key invariants**
 
 1. A room can only move forward through `waiting -> locked -> in_progress -> completed` or `waiting -> cancelled`.
-2. A command that changes gameplay is only accepted if the acting player is the current turn owner and the submitted sequence number matches the current room version.
+2. A command that changes gameplay is only accepted if the submitted sequence number matches the current room version and the acting player is either the current turn owner or is making a legal jump-in with an exact color-and-rank-or-symbol match.
 3. A player can only play a card currently held in their hand for the active game.
 4. A room hosts exactly one active game at a time and at most one active match.
 5. A match completes as soon as one player reaches two game wins, but tournament advancement uses the full ranked match result, not only the winner.
@@ -38,6 +38,8 @@ One room hosts one match. All changes that affect roster, turn authority, match 
 8. The Uno challenge window closes exactly 5 seconds after the second-to-last card is played or as soon as the next player begins their turn, whichever comes first.
 9. A player who fails to call Uno and is successfully challenged draws 2 penalty cards; an invalid challenger draws 2 cards instead.
 10. During a disconnection window, the disconnected player's turn is skipped for up to 60 seconds with no bot substitution; reconnecting within the window restores the original hand.
+11. A targeted player may respond to an unresolved draw penalty by stacking a `Draw Two` or legally playable `Wild Draw Four`; each stacked card adds its draw value and transfers the accumulated penalty to the next player. A player who does not stack draws the total and forfeits the rest of their turn.
+12. A jump-in is accepted only when the card exactly matches the discard by color and rank or action symbol, no mandatory resolution is pending, and the command wins sequence-number serialization. The jumper becomes the acting player and turn order resumes after the jumper's seat.
 
 ## Game Integrity
 
