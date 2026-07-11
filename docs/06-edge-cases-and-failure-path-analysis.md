@@ -17,14 +17,14 @@ Two players attempt to play different cards at nearly the same time.
 ### Emitted events
 
 - accepted branch: `CardPlayed`, follow-up events such as `ColorChosen`, `UnoPenaltyApplied`, `TurnAdvanced`
-- rejected branch: no business event; API returns stale-command outcome
+- rejected branch: no domain event and no Game Integrity log entry; API returns stale-command outcome and a structured operational/security audit record is emitted with `commandId`, `correlationId`, session/player, room/tournament when known, rejection reason, submitted/current sequence, and timestamp
 
 ### Jump-in race
 
 - An out-of-turn `PlayCard` is eligible only when its card exactly matches the discard by color and rank or action symbol and no penalty stack, wild-color choice, or other mandatory resolution is pending.
 - A current-turn play and one or more jump-ins may race against the same room sequence number. Room serialization accepts exactly one valid command; all later commands are rejected as stale.
 - An accepted jump-in records `CardPlayed` with `playMode=jump_in`, makes the jumper the acting player, applies the card effect normally, and resumes turn order after the jumper's seat.
-- An invalid or losing jump-in changes no state and emits no business event.
+- An invalid or losing jump-in changes no state, emits no domain event, appends no Game Integrity entry, and records a structured operational/security audit record.
 
 ### Draw-card stacking
 
@@ -67,9 +67,9 @@ Two players attempt to play different cards at nearly the same time.
 
 ### Emitted events
 
-- no new business event for stale rejection
+- no new domain event for stale rejection and no Game Integrity log entry
 - no duplicate event for replayed commands
-- optionally `DuplicateCommandDetected` as an internal audit/operations signal, not a domain event
+- structured operational/security audit record for each rejected command, including `commandId`, `correlationId`, session/player, room/tournament when known, rejection reason (for example duplicate recognition without reapplying state), submitted/current sequence when applicable, and timestamp; duplicate classification is a field/reason on that record only, never a domain or Game Integrity event
 
 ## 4. Partial Failures Between Contexts
 
@@ -134,7 +134,7 @@ A tournament round kickoff emits provisioning batches, but one shard repeatedly 
 
 - `PlayerMutedForAbuse` if the policy is domain-visible
 - `PlayerRemovedFromRoomForAbuse` if moderation escalates
-- otherwise no business event for each rejected spam request
+- otherwise no domain event for each rejected spam request; each rejection still emits a structured operational/security audit record and never appends a Game Integrity entry
 
 ### Sequence number spoofing and replay
 
@@ -142,12 +142,12 @@ A tournament round kickoff emits provisioning batches, but one shard repeatedly 
 
 - Sequence numbers are server-issued room versions, not client authority.
 - A forged future sequence number or replayed old sequence number is rejected before domain mutation.
-- The rejected command appends no game-log entry and cannot alter turn order, hands, or penalties.
+- The rejected command appends no game-log entry, emits no domain event, and cannot alter turn order, hands, or penalties.
 
 **Events**
 
-- no business event for the rejected command
-- optional internal `SuspiciousCommandDetected` audit signal
+- no domain event and no Game Integrity log entry for the rejected command
+- structured operational/security audit record with `commandId`, `correlationId`, session/player, room/tournament when known, rejection reason (for example spoofing or suspicious-command patterns), submitted/current sequence, and timestamp; suspicious classification is a field/reason on that record only, never a domain or Game Integrity event
 
 ## 6. Spectator Privacy Violations
 
@@ -156,6 +156,8 @@ A player attempts to subscribe through the spectator channel to infer another pl
 
 ### Expected domain behavior
 
+- Spectators may establish a new spectator connection while the room is `waiting`, `locked`, or `in_progress`, subject to public/private authorization.
+- Admission is denied after `RoomCompleted` or `RoomCancelled`; existing spectator streams close at that terminal room/match state. Terminal means the complete match/room, not the end of an individual game in a best-of-three match.
 - Spectator View publishes only filtered projections.
 - Private hand events never cross the Spectator View boundary.
 - A reconnecting player receives only their own private hand plus public room state, never opponent hands through any channel.
@@ -166,7 +168,8 @@ A player attempts to subscribe through the spectator channel to infer another pl
 ### Emitted events
 
 - `SpectatorEventDropped` when filtering blocks an unsafe update
-- `SpectatorAccessDenied` when the channel or token is invalid
+- `SpectatorAccessDenied` when the channel, token, or room terminal state denies admission
+- stream-close control signal when the room/match reaches `RoomCompleted` or `RoomCancelled`
 - no hand-revealing domain event is ever emitted to Spectator View
 
 ## 7. Conflicting Match Results
@@ -186,13 +189,30 @@ A player attempts to subscribe through the spectator channel to infer another pl
 
 ### Expected domain behavior
 
-- In an ad-hoc room, host ownership is reassigned if the room still has enough players to continue.
-- If no eligible host remains, the room can remain joinable, or the system may cancel it after timeout.
+- In an ad-hoc room before lock/start, if the host leaves and at least one player remains, host ownership transfers deterministically to the remaining player in the lowest occupied seat.
+- If nobody remains, the room cancels immediately; there is no host-timeout wait.
+- After lock/start, host reassignment has no gameplay authority; lock, start, and in-match decisions follow room and tournament policy rather than host privilege.
 
 ### Emitted events
 
-- `HostReassigned`
-- `RoomCancelled` if the room cannot continue
+- `PlayerLeftRoom`
+- `HostReassigned` when a remaining player becomes host before lock/start
+- `RoomCancelled` immediately if the room becomes empty before lock/start
+
+## 8.1 Uno Window Display Under Latency
+
+### Expected domain behavior
+
+- When an Uno window opens, Room Gameplay publishes absolute UTC `expiresAt` and the room sequence at which the window opened.
+- Client countdown or display, including the CLI, is advisory only.
+- The server exclusively decides whether `CallUno`, `ReportMissingUno`, or `ExpireUnoWindow` is timely.
+- A successful `CallUno` closes and resolves the challenge window; a later `ReportMissingUno` is rejected as inactive and never applies a challenger draw penalty.
+- SSE updates and command results correct any stale client display.
+
+### Emitted events
+
+- accepted call/challenge/expiry path: `UnoCalled`, `UnoChallengeIssued`/`UnoPenaltyApplied` (`cardsDrawn=2` on a valid challenge), or `UnoWindowExpired` as applicable
+- late, post-`CallUno`, or otherwise rejected call/challenge: no domain event, no challenger penalty, and no Game Integrity entry; structured operational/security audit record only
 
 ## 9. Integrity Replay Reveals Corruption
 

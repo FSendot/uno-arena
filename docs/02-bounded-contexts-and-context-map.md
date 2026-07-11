@@ -32,6 +32,8 @@ This is the core domain. It contains the highest-value business rules and the ti
 - game progression inside a match
 - best-of-three match score
 - authoritative acceptance or rejection of gameplay commands
+- deterministic ad-hoc host reassignment before lock/start
+- publication of absolute UTC Uno `expiresAt` and opening room sequence
 
 ## 3. Game Integrity
 
@@ -93,6 +95,7 @@ Spectators do not need the full internal model, and some information must never 
 - room spectator projection
 - visibility filtering rules
 - spectator-oriented event translation
+- spectator admission against non-terminal room/match status and public/private authorization
 
 ## 7. Analytics and Public Read Models
 
@@ -150,9 +153,11 @@ flowchart LR
 
 ## Spectator View Boundary
 
+Spectators may establish a new spectator connection while a room is `waiting`, `locked`, or `in_progress`, subject to public/private room authorization. Admission is denied once the room emits `RoomCompleted` or `RoomCancelled`, and existing spectator streams close at that terminal room/match state. Terminal refers to the complete match/room lifecycle, not the end of an individual game inside a best-of-three match.
+
 ## Information That Crosses Into Spectator View
 
-- room status: `waiting`, `in_progress`, `completed`
+- room status: `waiting`, `locked`, `in_progress`, `completed`, `cancelled`
 - player display names and seat positions
 - current turn owner
 - discard top card
@@ -160,6 +165,7 @@ flowchart LR
 - direction of play
 - public penalty stack
 - public card counts
+- open Uno window facts limited to absolute UTC `expiresAt` and the room sequence at which the window opened
 - game score within the match
 - match winner after completion
 - join/leave visibility for already-public participants
@@ -178,6 +184,8 @@ flowchart LR
 
 - `RoomCreated`
 - `PlayerJoinedRoom`
+- `PlayerLeftRoom`
+- `HostReassigned`
 - `RoomLocked`
 - `MatchStarted`
 - `GameStarted`
@@ -192,6 +200,7 @@ flowchart LR
 - `MatchScoreUpdated`
 - `MatchCompleted`
 - `RoomCompleted`
+- `RoomCancelled`
 
 ## Boundary Rule
 
@@ -202,7 +211,7 @@ The Spectator View context never subscribes to raw player-private events such as
 
 This prevents accidental leakage of hidden information through replay, logs, or transport-level fan-out.
 
-If an active player opens a second anonymous spectator connection, that connection is still treated as a spectator-only reader. It receives the same sanitized projection as any other observer and never gains access to that player's private hand, opponent hands, hidden deck state, or player-command privileges. The immutable game log may contain full private state for audit, but Spectator View cannot query that log directly.
+If an active player opens a second anonymous spectator connection, that connection is still treated as a spectator-only reader. It receives the same sanitized projection as any other observer and never gains access to that player's private hand, opponent hands, hidden deck state, or player-command privileges. The immutable game log may contain full private state for audit, but Spectator View cannot query that log directly. Rejected commands never appear in the Game Integrity log or as domain events; they are recorded only as structured operational/security audit records outside this projection boundary.
 
 ## Analytics Boundary
 

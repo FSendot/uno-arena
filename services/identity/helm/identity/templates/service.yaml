@@ -6,5 +6,5 @@ spec:
   selector:
     app: {{ .Release.Name }}
   ports:
-    - port: 80
+    - port: 8080
       targetPort: 8080

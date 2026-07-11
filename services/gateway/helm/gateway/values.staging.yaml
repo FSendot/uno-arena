@@ -1,4 +1,13 @@
 replicaCount: 1
 
 env:
-  API_URL: https://staging.unoarena.example.com
+  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
+  ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+  TOURNAMENT_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080
+  SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
+  RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
+  ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/0
+  # Staging rollout blocked: Redis rate-limit adapter absent → /ready stays not-ready.
+
+existingSecret: gateway-secrets

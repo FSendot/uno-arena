@@ -4,9 +4,24 @@ image:
   repository: registry.gitlab.com/group/uno-arena/tournament-orchestration
   digest: ""
 
+# Peer URLs use Service port 8080.
 env:
   SERVICE_NAME: tournament-orchestration
-  API_URL: ""
+  ROOM_GAMEPLAY_URL: http://room-gameplay:8080
+  REDIS_URL: redis://redis:6379/3
+  KAFKA_BROKERS: kafka:9092
+
+# BLOCKED: binary has no WORKER_ROLE=tournament-provisioning loop; production adapters absent.
+provisioningWorker:
+  enabled: false
+
+# Cross-chart: tournament-internal-credential == gateway gateway-service-credential
+#              == room tournament-internal-credential secret value (Room→Tournament).
+existingSecret: tournament-orchestration-secrets
+secretEnv:
+  TOURNAMENT_INTERNAL_CREDENTIAL: tournament-internal-credential
+  SERVICE_CREDENTIAL: tournament-internal-credential
+  DATABASE_URL: database-url
 
 resources:
   requests:

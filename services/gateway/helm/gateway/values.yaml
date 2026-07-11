@@ -4,9 +4,39 @@ image:
   repository: registry.gitlab.com/group/uno-arena/gateway
   digest: ""
 
+# Non-secret runtime config (exact names from services/gateway/src/main.go).
+# Peer URLs use Service port 8080 (cluster DNS).
 env:
   SERVICE_NAME: gateway
-  API_URL: ""
+  IDENTITY_URL: http://identity:8080
+  ROOM_GAMEPLAY_URL: http://room-gameplay:8080
+  TOURNAMENT_URL: http://tournament-orchestration:8080
+  SPECTATOR_VIEW_URL: http://spectator-view:8080
+  RANKING_URL: http://ranking:8080
+  ANALYTICS_URL: http://analytics:8080
+  REDIS_URL: redis://redis:6379/0
+  # Base architecture mode: do not set GATEWAY_ALLOW_FAKES / GATEWAY_CAPABILITY_MODE.
+  # With REDIS_URL set and no Redis rate-limit adapter, /ready reports
+  # redis_adapter_blocked (or equivalent) — intentional; staging/production rollout
+  # stays blocked until the durable Redis rate-limit adapter exists. Do not weaken /ready.
+
+# Credentials via existingSecret + secretKeyRef (never inline secrets).
+# Cross-chart equality (secret *values* must match; keys stay chart-local):
+#   gateway-service-credential   == identity identity-internal-credential
+#                                == room room-service-credential
+#                                == tournament tournament-internal-credential
+#                                == spectator-view spectator-view-internal-credential
+#     (Gateway outbound producer scope to those backends; Identity also accepts this
+#      for SessionInvalidated fan-in / invalidation URL auth with current binary.)
+#   gateway-identity-credential  == identity identity-internal-credential (same value today)
+#   gateway-room-credential      == room room-to-gateway-credential (Room→Gateway producer)
+#   gateway-spectator-credential == spectator producer into Gateway (when used)
+existingSecret: gateway-secrets
+secretEnv:
+  GATEWAY_SERVICE_CREDENTIAL: gateway-service-credential
+  GATEWAY_IDENTITY_CREDENTIAL: gateway-identity-credential
+  GATEWAY_ROOM_CREDENTIAL: gateway-room-credential
+  GATEWAY_SPECTATOR_CREDENTIAL: gateway-spectator-credential
 
 resources:
   requests:

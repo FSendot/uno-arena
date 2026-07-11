@@ -1,5 +1,9 @@
 # 04 Persistence by Context
 
+This document records the **required production persistence architecture** per bounded context. Postgres, Redis, EventStoreDB, Kafka (as the async transport paired with outbox), and ClickHouse remain the settled technology choices.
+
+The current offline-friendly capability implementation uses `GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` (real HTTP service paths with bounded in-memory limiters / memory session repo) plus explicit Game Integrity memory and HTTP bridges so services can run without production adapters. Isolated-test fakes remain behind `*_ALLOW_FAKES` only. That offline mode is intentional and must not be described as “Postgres/Kafka/Redis/EventStoreDB/ClickHouse are implemented.” Context-owned SQL under `services/*/migrations/` documents intended production schemas. Gateway Redis, Room Postgres, and GI EventStore readiness intentionally block staging/production until durable adapters exist.
+
 ## Identity
 
 **Authoritative store**
@@ -40,7 +44,7 @@
 - The outbox bridges committed room state to downstream consumers.
 - Consistency is strong inside one room aggregate: command dedupe, sequence-number checks, hand mutation, turn advancement, match score, timer deadline writes, and outbox rows are committed in the same room transaction after Game Integrity append confirmation.
 - Read models include the player feed and reconnect snapshot. Players may read their own private hand state plus public room state; spectators must use Spectator View instead.
-- Retention keeps operational snapshots until the room/match can no longer affect reconnect, tournament advancement, rating, or dispute windows; immutable audit history remains in Game Integrity.
+- Retention keeps operational snapshots until the room/match can no longer affect reconnect, tournament advancement, rating, or dispute windows; immutable committed gameplay/integrity history remains in Game Integrity. Structured rejected-command audit records live outside Game Integrity in operational/security observability.
 
 ## Game Integrity
 
@@ -59,7 +63,7 @@
 - Replay is deterministic from the log.
 - The store is not a cache and should not be treated like one.
 - Consistency is strong per room/game stream by expected revision; stale or replayed append attempts are rejected.
-- The immutable game log is retained for dispute resolution, replay verification, tournament audit, and integrity investigations.
+- The immutable game log holds committed gameplay/integrity history only and is retained for dispute resolution, replay verification, tournament audit, and integrity investigations. Structured rejected-command audit records are not Game Integrity entries; they live in operational/security observability.
 - Authorized operators, automated replay jobs, and compliance/audit tooling may query or export the log through internal-only APIs guarded by service credentials, role checks, correlation logging, and break-glass procedures for exceptional access.
 - Spectator View, Analytics, and public clients cannot query raw Game Integrity logs and must consume sanitized/public streams.
 

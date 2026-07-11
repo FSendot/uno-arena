@@ -1,4 +1,11 @@
 replicaCount: 1
 
 env:
-  API_URL: https://staging.unoarena.example.com
+  CLICKHOUSE_URL: http://clickhouse.uno-arena.svc.cluster.local:8123
+  CLICKHOUSE_DB: analytics
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+
+projectionRebuilder:
+  enabled: false
+
+existingSecret: analytics-secrets

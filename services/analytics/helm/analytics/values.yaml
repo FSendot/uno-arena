@@ -6,7 +6,27 @@ image:
 
 env:
   SERVICE_NAME: analytics
-  API_URL: ""
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_DB: analytics
+  KAFKA_BROKERS: kafka:9092
+
+# BLOCKED: binary has no WORKER_ROLE=analytics-projection-rebuilder loop; ClickHouse rebuild absent.
+projectionRebuilder:
+  enabled: false
+
+# Producer-scope credentials (distinct values; Room/Ranking/Tournament each present one):
+#   analytics-room-credential       — Room→Analytics only
+#   analytics-ranking-credential    — Ranking→Analytics only
+#   analytics-tournament-credential — Tournament→Analytics only
+#   analytics-ops-credential        — ops/rebuild only (not a gameplay producer)
+existingSecret: analytics-secrets
+secretEnv:
+  ANALYTICS_ROOM_CREDENTIAL: analytics-room-credential
+  ANALYTICS_RANKING_CREDENTIAL: analytics-ranking-credential
+  ANALYTICS_TOURNAMENT_CREDENTIAL: analytics-tournament-credential
+  ANALYTICS_OPS_CREDENTIAL: analytics-ops-credential
+  CLICKHOUSE_USER: clickhouse-user
+  CLICKHOUSE_PASSWORD: clickhouse-password
 
 resources:
   requests:

@@ -20,11 +20,26 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            - name: SERVICE_NAME
-              value: {{ .Values.env.SERVICE_NAME | quote }}
-            - name: API_URL
-              value: {{ .Values.env.API_URL | quote }}
+            {{- range $name, $val := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- if .Values.existingSecret }}
+            {{- range $envName, $key := .Values.secretEnv }}
+            - name: {{ $envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
           readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
             httpGet:
               path: /health
               port: 8080

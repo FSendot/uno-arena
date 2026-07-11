@@ -6,7 +6,18 @@ image:
 
 env:
   SERVICE_NAME: spectator-view
-  API_URL: ""
+  REDIS_URL: redis://redis:6379/5
+  KAFKA_BROKERS: kafka:9092
+
+# BLOCKED: binary has no WORKER_ROLE=spectator-projection-rebuilder loop; Kafka rebuild absent.
+projectionRebuilder:
+  enabled: false
+
+# Cross-chart: spectator-view-internal-credential == gateway gateway-service-credential
+#              == room spectator-view-internal-credential secret value (Room→Spectator).
+existingSecret: spectator-view-secrets
+secretEnv:
+  SPECTATOR_VIEW_INTERNAL_CREDENTIAL: spectator-view-internal-credential
 
 resources:
   requests:

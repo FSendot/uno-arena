@@ -1,0 +1,37 @@
+# Capability overlay for CLI / offline testing only.
+# Uses real-service HTTP paths (GATEWAY_CAPABILITY_MODE / ROOM_CAPABILITY_MODE),
+# not GATEWAY_ALLOW_FAKES / ROOM_ALLOW_FAKES backend fakes. Game Integrity stays
+# on explicit memory (EVENTSTORE_URL cleared + GAME_INTEGRITY_ALLOW_MEMORY).
+#
+# Usage (config only / no pull):
+#   docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example config
+#
+# Runtime (when intentionally testing capability mode):
+#   docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example up
+#
+# Flags set here only:
+#   GATEWAY_CAPABILITY_MODE     — real HTTP upstream clients + in-memory edge/principal limiters
+#   ROOM_CAPABILITY_MODE        — memory session repo only; real HTTP Identity/GI/publisher paths
+#   GAME_INTEGRITY_ALLOW_MEMORY — offline memory stream repo
+#   EVENTSTORE_URL cleared      — required so GI does not report eventstore_adapter_blocked
+
+name: uno-arena-local
+
+services:
+  gateway:
+    environment:
+      GATEWAY_CAPABILITY_MODE: "true"
+      # Do not set GATEWAY_ALLOW_FAKES / ALLOW_FAKES here — those fake backends and
+      # skip real Identity/Room/Tournament/Spectator/Ranking/Analytics HTTP paths.
+
+  room-gameplay:
+    environment:
+      ROOM_CAPABILITY_MODE: "true"
+      # Do not set ROOM_ALLOW_FAKES / ALLOW_FAKES here — those fake GI/session/audit
+      # adapters and prevent the CLI from traversing real service HTTP paths.
+
+  game-integrity:
+    environment:
+      # Clear EventStore URL so resolveRuntime can select memory when allowed.
+      EVENTSTORE_URL: ""
+      GAME_INTEGRITY_ALLOW_MEMORY: "true"

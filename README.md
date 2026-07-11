@@ -56,7 +56,60 @@ This repository contains the current UnoArena design package and the architectur
 - The design package defines domain language, bounded contexts, aggregates, commands, events, edge cases, consistency, and assumptions.
 - The architecture package translates those design decisions into deployable services, interfaces, persistence, communication patterns, capacity reasoning, and operational constraints.
 - Architectural adapters such as REST, SSE, Kafka, Redis, EventStoreDB, ClickHouse, and service deployment choices are documented where they affect assignment invariants or scaling constraints.
+- **Capability status:** capability mode (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` via `docker-compose.capability.yml`) uses real service HTTP paths with bounded in-memory limiters / memory session repo, plus explicit Game Integrity memory. `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` remain isolated-test fakes only. Production Postgres, Kafka, Redis, EventStoreDB, and ClickHouse adapters are **not** claimed as implemented. Those stores remain required architecture targets (see ADRs and `docs/architecture/04-persistence-by-context.md`); migrations under `services/*/migrations/` describe intended schemas, not a wired production runtime. Room **configured mode** `/ready` is always blocked with `postgres_adapter_blocked` until a durable Postgres session adapter exists (setting `DATABASE_URL` does not unblock). Gateway Redis and GI EventStore readiness likewise block staging/production rollout until durable adapters exist — do not weaken `/ready`.
+- Helm charts expose Service port **8080** (matching container/targetPort and peer URLs). Worker Deployments (timer / provisioning / projection-rebuilder) default to `enabled: false` because binaries do not implement `WORKER_ROLE` loops and production worker adapters are absent.
+- Cross-chart credential equality and producer-scope matrix (secret *values* must match across producer/consumer charts; never commit secret material): see the table under Local foundation below and matching comments in `services/*/helm/*/values.yaml`. Each row is a required equality of secret *values*; chart-local key names differ.
 - The modeling assumes Uno rooms support ad-hoc play and tournament-assigned play, and that tournament matches are best-of-three series.
+- Settled product decisions cover rejected-command operational/security audit records (no domain events or Game Integrity entries), spectator admission through `waiting`/`locked`/`in_progress` with terminal room/match closure on `RoomCompleted`/`RoomCancelled` (not individual `GameCompleted`), deterministic ad-hoc host reassignment before lock/start, and server-authoritative Uno `expiresAt` plus `openingSequence` with advisory client countdown.
+- BFF contracts include player/spectator snapshot routes and SSE `409 snapshot_required` when `Last-Event-ID` is unknown or evicted.
+- This implementation uses the repo-owned simple CLI under `client-checkpoint/` as the sole client and test interface. A graphical interface is deferred for later refactoring and does not change the BFF-only external boundary.
+
+## Client Checkpoint
+
+- [Client Checkpoint CLI](./client-checkpoint/README.md)
+
+## Local foundation (contracts + topology)
+
+Offline-friendly foundation targets (no automatic module or image fetch):
+
+```bash
+make check
+# or individually:
+make fmt-shared test-shared validate-yaml
+```
+
+Local Compose topology (BFF published on host; other services private). Copy `.env.example` before overriding image tags:
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.local.yml --env-file .env config
+# capability overlay (real HTTP paths; GI memory):
+docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env config
+# start when images are already available / built locally (this slice does not pull):
+# docker compose -f docker-compose.local.yml --env-file .env up -d --no-build
+```
+
+Contracts live under `contracts/openapi/bff-v1.yaml` and `contracts/asyncapi/kafka-v1.yaml`. Shared stdlib helpers live under `shared/`. Context-owned migrations live under `services/*/migrations/`.
+
+### Cross-chart credential equality / producer-scope matrix
+
+Helm uses `existingSecret` + `secretKeyRef` only (no hardcoded secrets). Operators must place **equal secret values** where the matrix says “same value”; secret *key names* stay chart-local. Mismatched values break producer auth even when key names look related.
+
+| Producer scope | Chart secret key (example) | Must equal (consumer chart key) | Notes |
+| --- | --- | --- | --- |
+| Gateway → Identity / Room / Tournament / Spectator | `gateway-service-credential` | `identity-internal-credential`, `room-service-credential`, `tournament-internal-credential`, `spectator-view-internal-credential` | One Gateway service credential value shared to each peer’s internal audience key |
+| Gateway → Identity (explicit) | `gateway-identity-credential` | `identity-internal-credential` | Same value as Gateway→Identity above with current Identity binary |
+| Room → Gateway | `room-to-gateway-credential` | `gateway-room-credential` | Room producer into Gateway control/ingest |
+| Room → Identity | `room-identity-credential` | `identity-internal-credential` | Distinct from Gateway→Identity only if operators choose separate values; default local compose may share |
+| Room → Game Integrity | `game-integrity-internal-credential` (room chart) | `game-integrity-internal-credential` (GI chart) | Same key name, equal values across charts |
+| Room → Ranking | `ranking-internal-credential` (room) | `ranking-internal-credential` (ranking) | Same key name, equal values |
+| Room → Analytics | `analytics-room-credential` (room) | `analytics-room-credential` (analytics) | Room→Analytics offline HTTP bridge credential |
+| Room timer only | `room-timer-service-credential` | (Room timer audience only; not Gateway) | Never reused as Gateway producer credential |
+| Ranking → Analytics | `analytics-ranking-credential` | analytics chart only | Ranking producer scope |
+| Tournament → Analytics | `analytics-tournament-credential` | analytics chart only | Tournament producer scope |
+| GI audit / Analytics ops | `game-integrity-audit-credential` / `analytics-ops-credential` | operator/compliance scope; not gameplay producers | Not interchangeable with room/ranking/tournament producer credentials |
+
+Kubernetes Services and peer URLs use port **8080** consistently.
 
 ## Suggested Reading Order
 
@@ -64,6 +117,7 @@ This repository contains the current UnoArena design package and the architectur
 2. Read the bounded contexts and context map to understand ownership and integration boundaries.
 3. Review aggregates and invariants before reading the command/event catalog.
 4. Use the event-flow and failure-path documents to validate the model under realistic conditions.
-5. Read the architecture overview and traceability document before the detailed architecture views.
-6. Review the ADRs for the major technology and boundary decisions.
-7. Review the raw EventStorming artifact for the event-first discovery tables, hotspots, and narrative flow evidence.
+5. Read open questions and assumptions for settled product decisions and remaining scope notes.
+6. Read the architecture overview and traceability document before the detailed architecture views.
+7. Review the ADRs for the major technology and boundary decisions.
+8. Review the raw EventStorming artifact for the event-first discovery tables, hotspots, and narrative flow evidence.

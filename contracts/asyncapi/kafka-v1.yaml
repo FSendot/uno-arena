@@ -1,0 +1,691 @@
+asyncapi: 2.6.0
+info:
+  title: UnoArena Bounded-Context Kafka Topics
+  version: 1.0.0
+  description: |
+    Async contracts for Kafka topics owned by UnoArena bounded contexts.
+    Every Kafka message payload carries the canonical EventMetadata fields
+    (`schemaVersion`, `eventId`, `eventType`, `correlationId`, optional `causationId`,
+    `occurredAt`) plus topic-specific body fields. Partition and idempotency keys are
+    documented per channel. Rejected commands are never published as domain events.
+
+    **Authoritative wire format:** this AsyncAPI Kafka envelope is the production
+    contract. Production topology requires Kafka adapters for these topics.
+
+    **Offline HTTP bridge (documented transform, not identical body):** the current
+    capability path publishes the same *event names* and *canonical domain fields*
+    over internal HTTP, but each sink receives a destination-specific HTTP body.
+    Do not treat HTTP bridge request bodies as byte-identical to Kafka payloads.
+    Canonical metadata/field mappings for the offline transform:
+
+    | Kafka topic / event | HTTP sink | Transform notes |
+    | --- | --- | --- |
+    | `room.game.completed` / `GameCompleted` | Ranking `POST .../games-results` | Maps EventMetadata + body into Ranking command fields (`commandId`, `eventId`, `gameId`, `roomId`, `roomType`, `isAbandoned`, `authoritative`, `completed`, `participants`). Does not forward unused Kafka-only nesting. |
+    | `room.game.completed` / `GameCompleted` | Analytics `POST .../room/events` | **Offline Room→Analytics transform:** rewrites Kafka `GameCompleted` into an Analytics `GameplayMetric` envelope (`eventType=GameplayMetric`, nested `payload` with `visibility`/`metricType=game_completed`/`roomId`/`gameId`). Not a byte-identical Kafka body. |
+    | `room.gameplay.metrics` / `GameplayMetric` | Analytics `POST .../room/events` | Forwards (or lightly normalizes) the GameplayMetric envelope to the same Analytics room ingest path. Distinct from the GameCompleted rewrite above. |
+    | `room.match.completed` / `MatchCompleted` | Tournament `POST .../match-results` | Forwards canonical match fields including `tournamentId`, `completionVersion`, `players`; requires `tournamentId`. |
+    | `room.spectator-safe.events` | Spectator ingest | Flattens to `{schemaVersion,eventId,stream,roomId,sequence,event,data}`; Kafka `sequenceNumber` → HTTP `sequence`; Kafka `eventType` → HTTP `event`; nested `payload`/`data` unwrapped into `data`. Uno window canonical field is `openingSequence` (`openingRoomSequence` accepted as ingest alias). |
+    | `room.player-feed.events` | Gateway stream ingest | Maps to `{schemaVersion,eventId,stream,roomId,sessionId?,playerId?,sequence,event,data}` for SSE fan-out; Kafka `sequenceNumber` → HTTP `sequence`. |
+
+    Kafka remains unwired until production adapters exist; the HTTP bridge is an
+    offline capability transform only.
+defaultContentType: application/json
+channels:
+  identity.session.invalidated:
+    description: Identity publishes when a session is superseded or revoked.
+    publish:
+      operationId: publishSessionInvalidated
+      message:
+        $ref: "#/components/messages/SessionInvalidated"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: identity.session.invalidated
+        partitions: 3
+        key:
+          type: string
+          description: Partition key = playerId
+        x-idempotencyKey: sessionId
+        x-partitionKey: playerId
+
+  room.game.completed:
+    description: Room Gameplay publishes casual/tournament game completion facts.
+    publish:
+      operationId: publishGameCompleted
+      message:
+        $ref: "#/components/messages/GameCompleted"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: room.game.completed
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: "(playerId, gameId) for Ranking consumers; eventId for Analytics"
+        x-partitionKey: roomId
+
+  room.match.completed:
+    description: Authoritative match facts for Tournament Orchestration and Analytics.
+    publish:
+      operationId: publishMatchCompleted
+      message:
+        $ref: "#/components/messages/MatchCompleted"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: room.match.completed
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: "(roomId, completionVersion)"
+        x-partitionKey: roomId
+
+  room.player-feed.events:
+    description: Player-safe room feed facts for BFF fan-out / recovery.
+    publish:
+      operationId: publishPlayerFeedEvent
+      message:
+        $ref: "#/components/messages/RoomFeedEvent"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: room.player-feed.events
+        partitions: 12
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: eventId
+        x-partitionKey: roomId
+
+  room.spectator-safe.events:
+    description: Privacy-filtered room events for Spectator View.
+    publish:
+      operationId: publishSpectatorSafeEvent
+      message:
+        $ref: "#/components/messages/SpectatorSafeEvent"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: room.spectator-safe.events
+        partitions: 12
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: eventId
+        x-partitionKey: roomId
+
+  room.gameplay.metrics:
+    description: Sanitized gameplay metrics for Analytics (ad-hoc anonymized).
+    publish:
+      operationId: publishGameplayMetric
+      message:
+        $ref: "#/components/messages/GameplayMetric"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: room.gameplay.metrics
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: eventId
+        x-partitionKey: roomId
+
+  tournament.match.assigned:
+    description: Tournament room-slot assignment facts.
+    publish:
+      operationId: publishMatchAssigned
+      message:
+        $ref: "#/components/messages/TournamentMatchAssigned"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: tournament.match.assigned
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = tournamentId
+        x-idempotencyKey: "(tournamentId, roundNumber, slotId)"
+        x-partitionKey: tournamentId
+
+  tournament.match.result_recorded:
+    description: Tournament recorded a validated match result.
+    publish:
+      operationId: publishMatchResultRecorded
+      message:
+        $ref: "#/components/messages/TournamentMatchResultRecorded"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: tournament.match.result_recorded
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = tournamentId
+        x-idempotencyKey: "(roomId, completionVersion)"
+        x-partitionKey: tournamentId
+
+  tournament.players.advanced:
+    description: Advancement decisions owned by Tournament Orchestration.
+    publish:
+      operationId: publishPlayersAdvanced
+      message:
+        $ref: "#/components/messages/PlayersAdvanced"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: tournament.players.advanced
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = tournamentId
+        x-idempotencyKey: "(tournamentId, roundNumber, sourceSlotId)"
+        x-partitionKey: tournamentId
+
+  tournament.round.completed:
+    description: Round completion facts.
+    publish:
+      operationId: publishRoundCompleted
+      message:
+        $ref: "#/components/messages/TournamentRoundCompleted"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: tournament.round.completed
+        partitions: 3
+        key:
+          type: string
+          description: Partition key = tournamentId
+        x-idempotencyKey: "(tournamentId, roundNumber)"
+        x-partitionKey: tournamentId
+
+  tournament.completed:
+    description: Tournament completion facts (champion / final placement).
+    publish:
+      operationId: publishTournamentCompleted
+      message:
+        $ref: "#/components/messages/TournamentCompleted"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: tournament.completed
+        partitions: 3
+        key:
+          type: string
+          description: Partition key = tournamentId
+        x-idempotencyKey: eventId
+        x-partitionKey: tournamentId
+
+  ranking.player_rating_updated:
+    description: Public rating update facts for Analytics and leaderboard rebuilds.
+    publish:
+      operationId: publishPlayerRatingUpdated
+      message:
+        $ref: "#/components/messages/PlayerRatingUpdated"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: ranking.player_rating_updated
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = playerId
+        x-idempotencyKey: "(playerId, gameId) or (playerId, tournamentId, placementEventId)"
+        x-partitionKey: playerId
+
+  ranking.leaderboard_snapshot_published:
+    description: Ordered public leaderboard snapshot publication for Analytics / BFF cache refresh.
+    publish:
+      operationId: publishLeaderboardSnapshotPublished
+      message:
+        $ref: "#/components/messages/LeaderboardSnapshotPublished"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: ranking.leaderboard_snapshot_published
+        partitions: 3
+        key:
+          type: string
+          description: Partition key = boardType
+        x-idempotencyKey: snapshotId
+        x-partitionKey: boardType
+
+  spectator.room_projection.updated:
+    description: Optional projection-updated signal from Spectator View.
+    publish:
+      operationId: publishSpectatorProjectionUpdated
+      message:
+        $ref: "#/components/messages/SpectatorProjectionUpdated"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: spectator.room_projection.updated
+        partitions: 6
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: eventId
+        x-partitionKey: roomId
+
+  analytics.public_projection.updated:
+    description: Optional public analytics projection update signal.
+    publish:
+      operationId: publishAnalyticsProjectionUpdated
+      message:
+        $ref: "#/components/messages/AnalyticsProjectionUpdated"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: analytics.public_projection.updated
+        partitions: 3
+        key:
+          type: string
+          description: Partition key = projectionKey
+        x-idempotencyKey: eventId
+        x-partitionKey: projectionKey
+
+components:
+  messages:
+    EventEnvelope:
+      name: EventEnvelope
+      title: Common event metadata
+      payload:
+        $ref: "#/components/schemas/EventMetadata"
+
+    SessionInvalidated:
+      name: SessionInvalidated
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [playerId, sessionId, reason]
+            properties:
+              playerId:
+                type: string
+              sessionId:
+                type: string
+              reason:
+                type: string
+
+    GameCompleted:
+      name: GameCompleted
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required:
+              - roomId
+              - gameId
+              - roomType
+              - isAbandoned
+              - authoritative
+              - completed
+              - placementOrder
+              - participants
+            properties:
+              roomId:
+                type: string
+              gameId:
+                type: string
+              roomType:
+                type: string
+                enum: [ad_hoc, tournament]
+              completionReason:
+                type: string
+              isAbandoned:
+                type: boolean
+              authoritative:
+                type: boolean
+                description: Ranking requires authoritative=true for casual Elo
+              completed:
+                type: boolean
+              commandId:
+                type: string
+                description: Originating command id; Ranking bridge uses this when present
+              placementOrder:
+                type: array
+                items:
+                  type: string
+                description: Ordered player ids (winner first)
+              participants:
+                type: array
+                description: Authoritative per-player placement facts for Ranking bridge
+                items:
+                  $ref: "#/components/schemas/GameCompletedParticipant"
+
+    MatchCompleted:
+      name: MatchCompleted
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [roomId, completionVersion, players, isAbandoned]
+            properties:
+              roomId:
+                type: string
+              tournamentId:
+                type: string
+                description: Required for Tournament Orchestration bridge; ad-hoc MatchCompleted has no tournament sink
+              roundNumber:
+                type: integer
+              slotId:
+                type: string
+              completionVersion:
+                type: integer
+              players:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MatchCompletedPlayer"
+              forfeits:
+                type: array
+                items:
+                  type: string
+              isAbandoned:
+                type: boolean
+
+    RoomFeedEvent:
+      name: RoomFeedEvent
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [roomId, sequenceNumber]
+            properties:
+              roomId:
+                type: string
+              gameId:
+                type: string
+              sequenceNumber:
+                type: integer
+                minimum: 1
+                description: Per-audience player-feed sequence (producer SequenceNumber)
+              sessionId:
+                type: string
+              playerId:
+                type: string
+              unoWindow:
+                $ref: "#/components/schemas/UnoWindow"
+              payload:
+                type: object
+                additionalProperties: true
+
+    SpectatorSafeEvent:
+      name: SpectatorSafeEvent
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [roomId, sequenceNumber]
+            properties:
+              roomId:
+                type: string
+              sequenceNumber:
+                type: integer
+                minimum: 1
+              eventType:
+                type: string
+                description: |
+                  Room spectator-safe producers emit SnapshotSanitized while the room is
+                  non-terminal, and RoomCompleted / RoomCancelled when the room reaches
+                  terminal match/room state. Individual GameCompleted does not close
+                  spectator admission while the room remains in_progress.
+              unoWindow:
+                $ref: "#/components/schemas/UnoWindow"
+              payload:
+                type: object
+                additionalProperties: true
+                description: Must not contain private hands or deck order
+
+    GameplayMetric:
+      name: GameplayMetric
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [roomId, visibility, metricType]
+            properties:
+              roomId:
+                type: string
+              gameId:
+                type: string
+              visibility:
+                type: string
+                enum: [anonymized_adhoc, public_tournament]
+              metricType:
+                type: string
+              publicCard:
+                type: string
+
+    TournamentMatchAssigned:
+      name: TournamentMatchAssigned
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [tournamentId, roundNumber, slotId, roomId]
+            properties:
+              tournamentId:
+                type: string
+              roundNumber:
+                type: integer
+              slotId:
+                type: string
+              roomId:
+                type: string
+
+    TournamentMatchResultRecorded:
+      name: TournamentMatchResultRecorded
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [tournamentId, roomId, completionVersion]
+            properties:
+              tournamentId:
+                type: string
+              roomId:
+                type: string
+              completionVersion:
+                type: integer
+              slotId:
+                type: string
+
+    PlayersAdvanced:
+      name: PlayersAdvanced
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [tournamentId, roundNumber, sourceSlotId, advancingPlayerIds]
+            properties:
+              tournamentId:
+                type: string
+              roundNumber:
+                type: integer
+              sourceSlotId:
+                type: string
+              advancingPlayerIds:
+                type: array
+                items:
+                  type: string
+              rule:
+                type: string
+
+    TournamentRoundCompleted:
+      name: TournamentRoundCompleted
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [tournamentId, roundNumber]
+            properties:
+              tournamentId:
+                type: string
+              roundNumber:
+                type: integer
+
+    TournamentCompleted:
+      name: TournamentCompleted
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [tournamentId]
+            properties:
+              tournamentId:
+                type: string
+              championId:
+                type: string
+              completionReason:
+                type: string
+
+    PlayerRatingUpdated:
+      name: PlayerRatingUpdated
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [playerId, previousRating, newRating]
+            properties:
+              playerId:
+                type: string
+              gameId:
+                type: string
+              tournamentId:
+                type: string
+              placementEventId:
+                type: string
+              previousRating:
+                type: integer
+              newRating:
+                type: integer
+
+    LeaderboardSnapshotPublished:
+      name: LeaderboardSnapshotPublished
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [snapshotId, boardType]
+            properties:
+              snapshotId:
+                type: string
+              boardType:
+                type: string
+                enum: [casual_elo, tournament_placement]
+              generatedAt:
+                type: string
+                format: date-time
+              entries:
+                type: array
+                items:
+                  type: object
+                  required: [playerId, rating, rank]
+                  properties:
+                    playerId:
+                      type: string
+                    rating:
+                      type: integer
+                    rank:
+                      type: integer
+                      minimum: 1
+
+    SpectatorProjectionUpdated:
+      name: SpectatorProjectionUpdated
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [roomId, projectionVersion]
+            properties:
+              roomId:
+                type: string
+              projectionVersion:
+                type: integer
+
+    AnalyticsProjectionUpdated:
+      name: AnalyticsProjectionUpdated
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [projectionKey, projectionVersion]
+            properties:
+              projectionKey:
+                type: string
+              projectionVersion:
+                type: integer
+
+  schemas:
+    EventMetadata:
+      type: object
+      required: [eventId, eventType, schemaVersion, correlationId, occurredAt]
+      properties:
+        eventId:
+          type: string
+        eventType:
+          type: string
+        schemaVersion:
+          type: integer
+          enum: [1]
+          description: Current event schema version; must equal 1
+        correlationId:
+          type: string
+        causationId:
+          type: string
+          description: Usually the originating commandId
+        occurredAt:
+          type: string
+          format: date-time
+
+    UnoWindow:
+      type: object
+      required: [playerId, openingSequence, expiresAt]
+      properties:
+        playerId:
+          type: string
+        triggeringGameEventId:
+          type: string
+        openingSequence:
+          type: integer
+          description: Room sequence at which the Uno window opened (canonical wire field)
+        openingRoomSequence:
+          type: integer
+          description: Accepted alias on spectator ingest; producers should emit openingSequence
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absolute UTC deadline; CLI countdown is advisory
+
+    GameCompletedParticipant:
+      type: object
+      required: [playerId, placement]
+      properties:
+        playerId:
+          type: string
+        placement:
+          type: integer
+          minimum: 1
+        cardPoints:
+          type: integer
+        outcome:
+          type: string
+          description: e.g. won or placed
+
+    MatchCompletedPlayer:
+      type: object
+      required: [playerId, matchWins, cumulativeCardPoints]
+      properties:
+        playerId:
+          type: string
+        matchWins:
+          type: integer
+        cumulativeCardPoints:
+          type: integer
+        finalGameCompletedAt:
+          type: string
+          format: date-time
+        forfeited:
+          type: boolean

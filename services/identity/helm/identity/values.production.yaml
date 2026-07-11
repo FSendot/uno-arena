@@ -1,7 +1,11 @@
 replicaCount: 2
 
 env:
-  API_URL: https://unoarena.example.com
+  IDENTITY_INVALIDATION_URL: http://gateway.uno-arena.svc.cluster.local:8080
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/1
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+
+existingSecret: identity-secrets
 
 resources:
   requests:

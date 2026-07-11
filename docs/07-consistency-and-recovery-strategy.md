@@ -42,18 +42,20 @@ Examples:
 - If Tournament Orchestration detects a conflicting room result, it emits `TournamentResultQuarantined` rather than overwriting the slot.
 - If Room Gameplay has an append confirmed by Game Integrity but fails before committing its operational snapshot, recovery emits `RoomStateReconciled` after rebuilding the missing state from the log offset.
 - If a player was advanced incorrectly due to a validated but later-disputed result, the correction should occur through explicit adjudication events, not silent mutation of history.
-- If an Uno challenge deadline expires, the room emits `UnoWindowExpired` exactly once using `(roomId, gameId, playerId, triggeringGameEventId)`; retries cannot close a newer window or apply penalties twice.
+- If an Uno challenge deadline expires, the room emits `UnoWindowExpired` exactly once using `(roomId, gameId, playerId, triggeringGameEventId)`; retries cannot close a newer window or apply penalties twice. The published window includes absolute UTC `expiresAt` and the opening room sequence so clients can display an advisory countdown without owning timeliness.
 - If a 60-second reconnect deadline expires, the room emits `PlayerForfeited` exactly once using `(roomId, playerId, disconnectVersion)`; retries cannot duplicate the forfeit.
 
 ## How Invariant Violations Are Prevented
 
 - room-level invariants are checked synchronously before event commit
 - stale sequence numbers block concurrent conflicting actions
-- Uno-window expiry commands re-check the persisted room state before emitting `UnoWindowExpired`, so delayed timer delivery cannot close a window that was already resolved or superseded
+- rejected commands never mutate state, never emit domain events, and never append Game Integrity entries; they emit structured operational/security audit records only
+- Uno-window expiry commands re-check persisted absolute UTC `expiresAt` and opening room sequence before emitting `UnoWindowExpired`, so delayed timer delivery or advisory client countdown cannot close a window that was already resolved or superseded
 - deck and log invariants are protected by single-writer semantics per aggregate
 - round invariants reject results from unassigned rooms
 - ranking invariants reject duplicate casual-game Elo applications and duplicate tournament-placement applications
-- spectator invariants block private data from entering the projection
+- spectator invariants block private data from entering the projection; new admission is allowed only in `waiting`, `locked`, or `in_progress`, and denied with stream close after `RoomCompleted` or `RoomCancelled`
+- ad-hoc host leave before lock/start reassigns to the lowest occupied seat or cancels immediately when empty; after lock/start host labels have no gameplay authority
 - session invariants reject commands from a previous active session after a new login invalidates it
 - rate-limit and input-validation policies reject abusive or malformed commands before domain mutation
 - sensitive published events that cross trust boundaries carry integrity protection, such as signatures or verifiable event identity
@@ -66,6 +68,7 @@ Examples:
 - Spectator View can detect events that violate its visibility policy and drop them
 - Analytics can detect private or unsanitized facts that violate its projection policy and drop them before public reporting
 - command-security checks can detect forged future sequence numbers and replayed old sequence numbers
+- structured operational/security audit records capture rejected-command attempts with `commandId`, `correlationId`, session/player, room/tournament, rejection reason, submitted/current sequence, and timestamp
 
 ## Recovery Paths
 
@@ -73,8 +76,9 @@ Examples:
 
 - rebuild the room from committed gameplay events and integrity log position
 - resume from the latest accepted sequence number
-- recover any open Uno deadline from persisted room state and reissue the idempotent expiry command if the deadline has passed
-- reject client commands that target an older state after recovery
+- recover any open Uno deadline from persisted room state, including absolute UTC `expiresAt` and opening room sequence, and reissue the idempotent expiry command if the deadline has passed
+- reject client commands that target an older state after recovery and emit structured operational/security audit records for those rejections without appending Game Integrity entries
+- close spectator streams and deny new spectator admission once the recovered room is terminal (`RoomCompleted` or `RoomCancelled`)
 
 ## Tournament Recovery
 
@@ -94,6 +98,7 @@ Examples:
 
 - rebuild projections from spectator-safe upstream events
 - re-filter historical events if the visibility policy changes
+- restore admission rules so new connections are allowed only while the projected room is `waiting`, `locked`, or `in_progress`, and close streams for terminal rooms
 
 ## Analytics Recovery
 

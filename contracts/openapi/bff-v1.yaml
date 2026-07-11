@@ -1,0 +1,1026 @@
+openapi: 3.0.3
+info:
+  title: UnoArena Realtime Gateway / BFF
+  version: 1.0.0
+  description: |
+    Sole external HTTP/SSE surface for UnoArena. Clients submit versioned command
+    envelopes, fetch reconnect/projection snapshots, and subscribe to SSE streams.
+    Microservices are not publicly reachable. For this implementation the repo-owned
+    simple CLI is the sole client/test interface; a graphical UI is deferred and must
+    continue to use only this BFF boundary. Rejected commands return `status=rejected`
+    with a structured operational/security audit record only (never domain events or
+    Game Integrity entries). Unknown or evicted `Last-Event-ID` values return HTTP 409
+    `snapshot_required` so clients resync via the snapshot routes before resuming SSE.
+servers:
+  - url: http://localhost:8080
+    description: Local compose BFF (gateway)
+tags:
+  - name: health
+  - name: auth
+  - name: commands
+  - name: snapshots
+  - name: streams
+  - name: reads
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: BFF health probe
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /ready:
+    get:
+      tags: [health]
+      summary: BFF readiness probe
+      description: |
+        Returns 200 only when the gateway is statically ready and required upstream
+        `/ready` probes succeed. Not the same as `/health`.
+      operationId: getReady
+      responses:
+        "200":
+          description: Gateway is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Not ready (missing adapters, upstream /ready failure, or blocked mode)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Register a player (proxied to Identity)
+      operationId: registerPlayer
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Identity upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Login and establish a single active session
+      operationId: loginPlayer
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Session established
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Identity upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/auth/whoami:
+    get:
+      tags: [auth]
+      summary: Resolve the current session principal
+      operationId: whoami
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      responses:
+        "200":
+          description: Current principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhoamiResponse"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Identity upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/commands:
+    post:
+      tags: [commands]
+      summary: Submit a versioned command envelope
+      description: |
+        Compact command entrypoint. `commandId` is the idempotency key.
+        `expectedSequenceNumber` is required for mutations of an existing room aggregate.
+        Domain rejection is HTTP 200 with `status=rejected` (not HTTP 409).
+      operationId: submitCommand
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - $ref: "#/components/parameters/CommandIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandEnvelope"
+      responses:
+        "200":
+          description: Command accepted or rejected (rejection is not a domain event)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Upstream command dispatch or invalid upstream result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/rooms/{roomId}/commands:
+    post:
+      tags: [commands]
+      summary: Submit a room-scoped command envelope
+      description: |
+        Domain rejection is HTTP 200 with `status=rejected` (not HTTP 409).
+      operationId: submitRoomCommand
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - $ref: "#/components/parameters/CommandIdHeader"
+        - name: roomId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandEnvelope"
+      responses:
+        "200":
+          description: Command outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Upstream command dispatch or invalid upstream result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/rooms/{roomId}/snapshot:
+    get:
+      tags: [snapshots]
+      summary: Player-private reconnect snapshot
+      description: |
+        Authoritative player reconnect snapshot after SSE `409 snapshot_required` or
+        reconnect. Includes that player's private hand as runtime `Card` objects
+        (`id`/`color`/`face`) when a game is active, public room/game facts, and open
+        Uno window fields (`expiresAt`, `openingSequence`) when applicable. Requires an
+        authenticated room member (or reconnect-eligible disconnected member).
+      operationId: getPlayerRoomSnapshot
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - name: roomId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Player-private room snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerRoomSnapshot"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+
+  /v1/spectator/rooms/{roomId}/snapshot:
+    get:
+      tags: [snapshots]
+      summary: Spectator-safe projection snapshot
+      description: |
+        Privacy-filtered spectator projection for initial load or resync after SSE
+        `409 snapshot_required`. Admission is allowed while room status is `waiting`,
+        `locked`, or `in_progress` subject to public/private authorization. Denied after
+        terminal `RoomCompleted` or `RoomCancelled` (not after individual `GameCompleted`
+        inside a best-of-three). Public rooms are anonymous-tolerant; private rooms need
+        participant session, `X-Room-Invite`, or operator scope. When `Authorization` is
+        present, an invalid bearer returns HTTP 401 (token is validated before admission).
+      operationId: getSpectatorRoomSnapshot
+      security:
+        - {}
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - $ref: "#/components/parameters/RoomInviteHeader"
+        - name: roomId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Spectator-safe room snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpectatorRoomSnapshot"
+        "401":
+          description: Authorization present but session bearer is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "403":
+          description: Spectator admission denied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+
+  /v1/streams/player:
+    get:
+      tags: [streams]
+      summary: Player SSE feed
+      operationId: playerStream
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Resume marker (event id). Unknown or evicted values yield 409 snapshot_required.
+        - name: roomId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            text/event-stream of player-safe room facts and control events.
+            Wire uses SSE `id`/`event` fields; JSON `data` includes injected `schemaVersion`.
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSEEvent"
+        "400":
+          description: Missing required roomId query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "409":
+          $ref: "#/components/responses/SnapshotRequired"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Upstream identity/admission failure while opening the stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/streams/spectator:
+    get:
+      tags: [streams]
+      summary: Spectator SSE feed (privacy-filtered)
+      description: |
+        Admission while room status is `waiting`, `locked`, or `in_progress`. Existing
+        streams close on terminal `RoomCompleted` / `RoomCancelled`
+        (not on individual `GameCompleted`). When `Authorization` is present, an invalid
+        bearer returns HTTP 401 before admission is evaluated.
+      operationId: spectatorStream
+      security:
+        - {}
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - $ref: "#/components/parameters/RoomInviteHeader"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Resume marker (event id). Unknown or evicted values yield 409 snapshot_required.
+        - name: roomId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            Spectator-safe SSE stream. Wire uses SSE `id`/`event` fields; JSON `data`
+            includes injected `schemaVersion`.
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSEEvent"
+        "400":
+          description: Missing required roomId query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Authorization present but session bearer is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "403":
+          description: Admission denied (terminal room or unauthorized)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "409":
+          $ref: "#/components/responses/SnapshotRequired"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Spectator admission upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/streams/control:
+    get:
+      tags: [streams]
+      summary: Control-plane SSE (session invalidation, reconnect hints)
+      operationId: controlStream
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Resume marker (event id). Unknown or evicted values yield 409 snapshot_required.
+      responses:
+        "200":
+          description: |
+            Control SSE stream. Wire uses SSE `id`/`event` fields; JSON `data`
+            includes injected `schemaVersion`.
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SSEEvent"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "409":
+          $ref: "#/components/responses/SnapshotRequired"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Upstream identity failure while opening the control stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/rankings/leaderboards:
+    get:
+      tags: [reads]
+      summary: Public leaderboard read model (proxied)
+      operationId: getLeaderboard
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      responses:
+        "200":
+          description: Leaderboard snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Ranking upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/analytics/public:
+    get:
+      tags: [reads]
+      summary: Public analytics read model (proxied)
+      operationId: getPublicAnalytics
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      responses:
+        "200":
+          description: Derived public analytics
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Analytics upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+components:
+  securitySchemes:
+    SessionBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-session-token
+      description: |
+        Identity-issued session token via BFF login. Required for player/command/control
+        routes. Optional on spectator routes; when present, invalid tokens yield 401.
+
+  parameters:
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema:
+        type: string
+    CommandIdHeader:
+      name: X-Command-Id
+      in: header
+      required: false
+      schema:
+        type: string
+    SessionTokenHeader:
+      name: Authorization
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Bearer session token issued by Identity via BFF login
+    RoomInviteHeader:
+      name: X-Room-Invite
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Invite capability token for private-room spectator admission
+
+  responses:
+    Error:
+      description: Structured error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    SnapshotRequired:
+      description: |
+        Last-Event-ID is unknown or evicted from the resume bound. Client must fetch
+        the matching snapshot route and resume SSE without claiming false continuity.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SnapshotRequiredError"
+          example:
+            code: snapshot_required
+            message: Last-Event-ID unknown or evicted; resync snapshot required
+            correlationId: corr_01HX...
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: gateway
+
+    RegisterRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+
+    RegisterResponse:
+      type: object
+      required: [status, username]
+      properties:
+        status:
+          type: string
+        username:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [sessionId, playerId, token]
+      properties:
+        sessionId:
+          type: string
+        playerId:
+          type: string
+        token:
+          type: string
+
+    WhoamiResponse:
+      type: object
+      required: [playerId, sessionId, username]
+      properties:
+        playerId:
+          type: string
+        sessionId:
+          type: string
+        username:
+          type: string
+
+    CommandEnvelope:
+      type: object
+      required: [commandId, type, schemaVersion, payload]
+      properties:
+        commandId:
+          type: string
+          description: Idempotency key
+        type:
+          type: string
+          description: Command name from the design catalog
+          enum:
+            - CreateRoom
+            - JoinRoom
+            - LeaveRoom
+            - LockRoom
+            - StartMatch
+            - CancelRoom
+            - PlayCard
+            - DrawCard
+            - ChooseColor
+            - CallUno
+            - ReportMissingUno
+            - ReconnectToRoom
+            - CreateTournament
+            - RegisterPlayer
+            - CloseRegistration
+        expectedSequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required for mutations of an existing room aggregate
+        schemaVersion:
+          type: integer
+          enum: [1]
+          description: Must equal 1 (current BFF command envelope version)
+        payload:
+          type: object
+          additionalProperties: true
+          description: Command-specific object payload (required; may be empty {})
+
+    CommandResult:
+      type: object
+      required: [commandId, type, status, schemaVersion]
+      properties:
+        commandId:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [accepted, rejected]
+        schemaVersion:
+          type: integer
+          enum: [1]
+        reason:
+          type: string
+          description: Present when status=rejected; pairs with operational audit record
+        sequenceNumber:
+          type: integer
+          format: int64
+        payload:
+          type: object
+          additionalProperties: true
+
+    SSEEvent:
+      description: |
+        Logical model of one SSE frame (not a single JSON object on the wire).
+        `id` and `event` are SSE wire fields (`id:` / `event:` lines). The `data:`
+        line is a JSON object; the gateway injects `schemaVersion` into that body.
+        OpenAPI cannot fully encode SSE framing; treat this as a documentation aid.
+      type: object
+      required: [data]
+      properties:
+        id:
+          type: string
+          description: SSE wire field `id:` (resume marker); not a JSON body field
+        event:
+          type: string
+          description: |
+            SSE wire field `event:` (domain or control name); not a JSON body field.
+            Spectator terminals include RoomCompleted and RoomCancelled.
+        data:
+          type: object
+          required: [schemaVersion]
+          additionalProperties: true
+          description: |
+            JSON object on the SSE `data:` line. Gateway injects `schemaVersion`.
+            Uno windows carry absolute UTC expiresAt + openingSequence when present.
+          properties:
+            schemaVersion:
+              type: integer
+              enum: [1]
+              description: Injected into the JSON data body (not an SSE wire field)
+
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        correlationId:
+          type: string
+        commandId:
+          type: string
+
+    SnapshotRequiredError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorBody"
+        - type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [snapshot_required]
+            message:
+              type: string
+              example: Last-Event-ID unknown or evicted; resync snapshot required
+
+    PublicUnoWindow:
+      type: object
+      required: [playerId, expiresAt, openingSequence]
+      properties:
+        playerId:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absolute UTC deadline; CLI countdown is advisory
+        openingSequence:
+          type: integer
+          format: int64
+          description: Room sequence at which the Uno window opened
+        called:
+          type: boolean
+          description: Present on spectator projection when the window owner has called Uno
+
+    Card:
+      type: object
+      description: |
+        Runtime card DTO (camelCase). Matches Game Integrity / Room DealSource CardDTO
+        and player-private snapshot hand / discardTop objects (`id`, `color`, `face`).
+      required: [id, color, face]
+      properties:
+        id:
+          type: string
+          description: Physical card instance id within a deal
+        color:
+          type: string
+          description: Canonical color; empty string for wild faces
+          enum: [red, yellow, green, blue, ""]
+        face:
+          type: string
+          description: Rank or action symbol
+          enum:
+            - "0"
+            - "1"
+            - "2"
+            - "3"
+            - "4"
+            - "5"
+            - "6"
+            - "7"
+            - "8"
+            - "9"
+            - skip
+            - reverse
+            - draw_two
+            - wild
+            - wild_draw_four
+
+    PlayerRoomSnapshot:
+      type: object
+      required: [roomId, status, sequenceNumber, visibility, hostId, roomType, playerId, roster]
+      properties:
+        roomId:
+          type: string
+        status:
+          type: string
+          enum: [waiting, locked, in_progress, completed, cancelled]
+        sequenceNumber:
+          type: integer
+          format: int64
+        visibility:
+          type: string
+          enum: [public, private]
+        hostId:
+          type: string
+        roomType:
+          type: string
+          enum: [ad_hoc, tournament]
+        playerId:
+          type: string
+          description: Authenticated player for whom the private hand is scoped
+        tournamentId:
+          type: string
+        roundNumber:
+          type: integer
+        slotId:
+          type: string
+        roster:
+          type: array
+          items:
+            type: object
+            required: [seatIndex, playerId]
+            properties:
+              seatIndex:
+                type: integer
+              playerId:
+                type: string
+        uno:
+          $ref: "#/components/schemas/PublicUnoWindow"
+        game:
+          type: object
+          properties:
+            gameId:
+              type: string
+            sequenceNumber:
+              type: integer
+              format: int64
+            discardTop:
+              $ref: "#/components/schemas/Card"
+            activeColor:
+              type: string
+            currentPlayer:
+              type: string
+            direction:
+              type: integer
+            handCounts:
+              type: object
+              additionalProperties:
+                type: integer
+            completed:
+              type: boolean
+        hand:
+          type: array
+          items:
+            $ref: "#/components/schemas/Card"
+          description: Private hand for playerId only (Card objects, not opaque strings)
+        disconnect:
+          type: object
+          properties:
+            disconnectVersion:
+              type: integer
+              format: int64
+            deadlineUtc:
+              type: string
+              format: date-time
+
+    SpectatorRoomSnapshot:
+      type: object
+      required:
+        - roomId
+        - status
+        - visibility
+        - sequence
+        - seats
+        - discard
+        - direction
+        - currentPlayerId
+        - penaltyAmount
+        - penaltyTarget
+        - gameScore
+        - matchWinner
+        - gameCompleted
+        - matchCompleted
+        - streamClosed
+      properties:
+        roomId:
+          type: string
+        status:
+          type: string
+          enum: [waiting, locked, in_progress, completed, cancelled]
+        visibility:
+          type: string
+          enum: [public, private]
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
+        seats:
+          type: array
+          items:
+            type: object
+            required: [seatIndex, playerId, displayName, cardCount, occupied]
+            properties:
+              seatIndex:
+                type: integer
+              playerId:
+                type: string
+              displayName:
+                type: string
+              cardCount:
+                type: integer
+              occupied:
+                type: boolean
+        discard:
+          type: object
+          required: [discardTop, activeColor]
+          properties:
+            discardTop:
+              type: string
+            activeColor:
+              type: string
+        direction:
+          type: string
+        currentPlayerId:
+          type: string
+        penaltyAmount:
+          type: integer
+        penaltyTarget:
+          type: string
+        gameScore:
+          type: object
+          additionalProperties:
+            type: integer
+        matchWinner:
+          type: string
+        gameCompleted:
+          type: boolean
+          description: Individual game end; does not deny spectator admission while room remains in_progress
+        matchCompleted:
+          type: boolean
+        uno:
+          $ref: "#/components/schemas/PublicUnoWindow"
+        streamClosed:
+          type: boolean
+          description: True after terminal RoomCompleted/RoomCancelled
+
+    RejectionAuditRecord:
+      type: object
+      description: Operational/security audit fields for rejected commands (not a domain event)
+      required: [commandId, correlationId, reason, timestamp]
+      properties:
+        commandId:
+          type: string
+        correlationId:
+          type: string
+        sessionId:
+          type: string
+        playerId:
+          type: string
+        roomId:
+          type: string
+        tournamentId:
+          type: string
+        reason:
+          type: string
+        submittedSequenceNumber:
+          type: integer
+          format: int64
+        currentSequenceNumber:
+          type: integer
+          format: int64
+        timestamp:
+          type: string
+          format: date-time

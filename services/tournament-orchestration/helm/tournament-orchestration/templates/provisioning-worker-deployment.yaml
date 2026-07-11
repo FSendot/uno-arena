@@ -1,3 +1,10 @@
+{{- /*
+  BLOCKED: tournament-orchestration binary does not implement a
+  WORKER_ROLE=tournament-provisioning loop, and production Kafka/outbox provisioning
+  adapters are absent. Default/staging/production keep provisioningWorker.enabled=false
+  so Helm does not launch a duplicate HTTP server.
+*/ -}}
+{{- if .Values.provisioningWorker.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,9 +29,22 @@ spec:
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
-            - name: API_URL
-              value: {{ .Values.env.API_URL | quote }}
             - name: WORKER_ROLE
               value: "tournament-provisioning"
+            - name: ROOM_GAMEPLAY_URL
+              value: {{ .Values.env.ROOM_GAMEPLAY_URL | quote }}
+            {{- if .Values.existingSecret }}
+            - name: TOURNAMENT_INTERNAL_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ index .Values.secretEnv "TOURNAMENT_INTERNAL_CREDENTIAL" | quote }}
+            - name: SERVICE_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ index .Values.secretEnv "SERVICE_CREDENTIAL" | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-func TestHealthHandler(t *testing.T) {
+func TestHealthHandlerLegacy(t *testing.T) {
+	srv := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	healthHandler("game-integrity")(w, req)
+	srv.routes().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}

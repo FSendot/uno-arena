@@ -1,7 +1,10 @@
 replicaCount: 2
 
 env:
-  API_URL: https://unoarena.example.com
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/4
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+
+existingSecret: ranking-secrets
 
 resources:
   requests:

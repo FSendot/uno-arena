@@ -34,12 +34,14 @@ One room hosts one match. All changes that affect roster, turn authority, match 
 4. A room hosts exactly one active game at a time and at most one active match.
 5. A match completes as soon as one player reaches two game wins, but tournament advancement uses the full ranked match result, not only the winner.
 6. No new players may join after the room is locked.
-7. Once the room is completed, no gameplay command can change state.
-8. The Uno challenge window closes exactly 5 seconds after the second-to-last card is played or as soon as the next player begins their turn, whichever comes first.
-9. A player who fails to call Uno and is successfully challenged draws 2 penalty cards; an invalid challenger draws 2 cards instead.
+7. Once the room is completed or cancelled, no gameplay command can change state, and new spectator admission is denied while existing spectator streams close.
+8. The Uno challenge window closes exactly 5 seconds after the second-to-last card is played or as soon as the next player begins their turn, whichever comes first. When opened, the room publishes absolute UTC `expiresAt` and the opening room sequence; client countdown is advisory and the server alone decides timeliness.
+9. A player who fails to call Uno and is successfully challenged draws 2 penalty cards (`UnoPenaltyApplied` with `cardsDrawn=2`). A successful `CallUno` closes and resolves the challenge window; any later `ReportMissingUno` is rejected as inactive with no domain facts and no challenger penalty.
 10. During a disconnection window, the disconnected player's turn is skipped for up to 60 seconds with no bot substitution; reconnecting within the window restores the original hand.
 11. A targeted player may respond to an unresolved draw penalty by stacking a `Draw Two` or legally playable `Wild Draw Four`; each stacked card adds its draw value and transfers the accumulated penalty to the next player. A player who does not stack draws the total and forfeits the rest of their turn.
 12. A jump-in is accepted only when the card exactly matches the discard by color and rank or action symbol, no mandatory resolution is pending, and the command wins sequence-number serialization. The jumper becomes the acting player and turn order resumes after the jumper's seat.
+13. If an ad-hoc host leaves before lock/start, the remaining player in the lowest occupied seat becomes host deterministically and `HostReassigned` is emitted. If nobody remains, the room cancels immediately with `RoomCancelled`. After lock/start, any host label has no gameplay authority.
+14. Rejected commands change no room state, emit no domain events, and append no Game Integrity log entries; observability uses structured operational/security audit records only.
 
 ## Game Integrity
 
@@ -182,6 +184,7 @@ Projection consistency only. This context does not decide game rules, but it doe
 1. No private hand data may appear in spectator projections.
 2. Projected order must be monotonic by upstream event sequence.
 3. If an event cannot be safely filtered, it is dropped and an internal audit signal is emitted.
+4. New spectator admission is allowed only while room status is `waiting`, `locked`, or `in_progress` and public/private authorization passes. After `RoomCompleted` or `RoomCancelled`, admission is denied and existing spectator streams close.
 
 ## Analytics and Public Read Models
 

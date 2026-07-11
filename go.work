@@ -1,0 +1,13 @@
+go 1.22
+
+use (
+	./shared
+	./services/analytics/src
+	./services/game-integrity/src
+	./services/gateway/src
+	./services/identity/src
+	./services/ranking/src
+	./services/room-gameplay/src
+	./services/spectator-view/src
+	./services/tournament-orchestration/src
+)

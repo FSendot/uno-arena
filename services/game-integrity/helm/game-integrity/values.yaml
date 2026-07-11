@@ -6,7 +6,19 @@ image:
 
 env:
   SERVICE_NAME: game-integrity
-  API_URL: ""
+  # Base architecture mode: EVENTSTORE_URL set => /ready reports eventstore_adapter_blocked.
+  # Staging/production rollout is intentionally blocked until the durable EventStoreDB
+  # adapter exists. Do not set GAME_INTEGRITY_ALLOW_MEMORY here (capability overlay only)
+  # and do not weaken /ready to fake production readiness.
+  EVENTSTORE_URL: esdb://eventstore:2113?tls=false
+  KAFKA_BROKERS: kafka:9092
+
+# Cross-chart: game-integrity-internal-credential == room GAME_INTEGRITY_INTERNAL_CREDENTIAL
+#              secret value (Room→GI). Audit credential is operator/compliance scope only.
+existingSecret: game-integrity-secrets
+secretEnv:
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
 
 resources:
   requests:

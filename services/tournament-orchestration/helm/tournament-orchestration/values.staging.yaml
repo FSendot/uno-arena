@@ -1,4 +1,11 @@
 replicaCount: 1
 
 env:
-  API_URL: https://staging.unoarena.example.com
+  ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/3
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+
+provisioningWorker:
+  enabled: false
+
+existingSecret: tournament-orchestration-secrets

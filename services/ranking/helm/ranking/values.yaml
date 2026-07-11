@@ -6,7 +6,15 @@ image:
 
 env:
   SERVICE_NAME: ranking
-  API_URL: ""
+  REDIS_URL: redis://redis:6379/4
+  KAFKA_BROKERS: kafka:9092
+
+# Cross-chart: ranking-internal-credential == room ranking-internal-credential secret value
+#              (Room→Ranking GameCompleted bridge). Distinct from analytics-ranking-credential.
+existingSecret: ranking-secrets
+secretEnv:
+  RANKING_INTERNAL_CREDENTIAL: ranking-internal-credential
+  DATABASE_URL: database-url
 
 resources:
   requests:

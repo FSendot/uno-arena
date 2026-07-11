@@ -5,7 +5,7 @@ This glossary defines the ubiquitous language used across the rest of the submis
 ## Core Competition Terms
 
 - **Player**: authenticated participant allowed to join rooms, play games, and register for tournaments.
-- **Spectator**: read-only observer of a room or tournament who receives filtered updates but cannot submit gameplay commands or see private hands, hidden deck order, or player-only decisions.
+- **Spectator**: read-only observer of a room or tournament who receives filtered updates but cannot submit gameplay commands or see private hands, hidden deck order, or player-only decisions. A new spectator connection may be established while the room is `waiting`, `locked`, or `in_progress`, subject to public/private authorization; admission is denied after `RoomCompleted` or `RoomCancelled`, and existing spectator streams close at that terminal room/match state (not at the end of an individual game inside a best-of-three match).
 - **Room**: the bounded play space where a roster of players and spectators connect. A room hosts exactly one match.
 - **Game**: one single Uno game, starting from the initial deal and ending when one player empties their hand or another terminating rule applies.
 - **Match**: a best-of-three series played inside one room. A match contains up to three games, can end early once a player wins two games, and produces an authoritative ranked result by match wins for advancement.
@@ -15,7 +15,7 @@ This glossary defines the ubiquitous language used across the rest of the submis
 ## Room Gameplay Terms
 
 - **Seat**: a player's assigned position inside a room roster.
-- **Host**: the player with authority to configure or lock an ad-hoc room before the match starts.
+- **Host**: the player with authority to configure or lock an ad-hoc room before the match starts. If the host leaves before lock/start, the remaining player in the lowest occupied seat becomes host deterministically; if nobody remains, the room cancels immediately. After lock/start, host reassignment has no gameplay authority.
 - **Roster**: the set of seats assigned to a room.
 - **Turn**: the current right to act.
 - **Turn Order**: the ordered sequence of seats and the current direction of play.
@@ -24,15 +24,16 @@ This glossary defines the ubiquitous language used across the rest of the submis
 - **Penalty Stack**: the accumulated draw penalty created by consecutively stacked `Draw Two` and `Wild Draw Four` cards. The player targeted by the current penalty may add either draw-card type, subject to ordinary card-legality rules, and transfer the increased penalty to the next player. The first targeted player who does not stack must draw the full accumulated penalty and forfeits the rest of their turn.
 - **Jump-In**: an out-of-turn play of a card that exactly matches the current discard by both color and rank or action symbol. An accepted jump-in makes the jumper the acting player, resolves the card normally, and continues turn order from the seat after the jumper. Jump-ins cannot bypass an unresolved penalty stack, a pending wild-color choice, or any other mandatory resolution; only the player targeted by a penalty may stack a draw card.
 - **Hand**: private set of cards held by one player in a game; only that player may see and play those cards.
-- **Uno Window**: the rule window in which a player who reached one remaining card must successfully call Uno or be penalized; it closes after 5 seconds or as soon as the next player begins their turn, whichever comes first.
-- **Challenge Window**: the period in which an opponent may challenge a missing Uno call; a successful challenge makes the target draw 2 cards, while an invalid challenge makes the challenger draw 2 cards.
+- **Uno Window**: the rule window in which a player who reached one remaining card must successfully call Uno or be penalized; it closes after 5 seconds or as soon as the next player begins their turn, whichever comes first. When opened, the room publishes an absolute UTC `expiresAt` and the room sequence at which the window opened. Client countdown or display is advisory; the server exclusively decides timeliness, and SSE/command results correct clients.
+- **Challenge Window**: the period in which an opponent may challenge a missing Uno call; a successful challenge makes the target draw 2 cards. A successful `CallUno` closes and resolves the window; a later `ReportMissingUno` is rejected as inactive with no challenger penalty and no domain facts.
 - **Game Scoreboard**: the match-level score tracking how many games each player has won in the current best-of-three match.
 
 ## Integrity and Audit Terms
 
 - **Deck Seed**: immutable seed used to derive the authoritative shuffle for a game.
 - **Authoritative Deck**: the only valid source of dealt and drawn cards for a game.
-- **Game Log Entry**: immutable record of one committed state transition affecting room gameplay.
+- **Game Log Entry**: immutable record of one committed state transition affecting room gameplay. Rejected commands never produce Game Log entries.
+- **Command Rejection Audit Record**: structured operational/security audit record emitted when a command is rejected. It includes `commandId`, `correlationId`, session/player identity, room/tournament identity when known, rejection reason, submitted and current sequence numbers when applicable, and timestamp. It is not a domain event and is not written to the Game Integrity log.
 - **Replay Position**: pointer into the ordered game log used to rebuild state.
 - **Idempotency Key**: stable command identifier used to detect duplicated submissions.
 

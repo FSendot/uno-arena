@@ -8,7 +8,7 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | --- | --- | --- | --- | --- |
 | `CreateRoom` | Player | `RoomCreated` | Player starts an ad-hoc room; event payload includes `roomId`, `hostPlayerId`, and `status` | Duplicate client retries collapse by request key |
 | `JoinRoom` | Player | `PlayerJoinedRoom` | Player joins an open room | Idempotent by `(roomId, playerId)` while already seated |
-| `LeaveRoom` | Player | `PlayerLeftRoom` | Player exits before lock or disconnect policy removes them | Idempotent if player is already absent |
+| `LeaveRoom` | Player | `PlayerLeftRoom`, optionally `HostReassigned` or `RoomCancelled` | Player exits before lock or disconnect policy removes them. In an ad-hoc room before lock/start, if the leaving player was host and at least one player remains, the remaining player in the lowest occupied seat becomes host and `HostReassigned` is emitted; if nobody remains, `RoomCancelled` is emitted immediately. After lock/start, host reassignment has no gameplay authority | Idempotent if player is already absent |
 | `LockRoom` | Host or system | `RoomLocked` | Host starts readiness cutoff, or tournament assignment seals roster | Duplicate lock commands ignored after first success |
 | `StartMatch` | Host or system | `MatchStarted`, `GameStarted` | Triggered once roster is valid and initial game is created | Idempotent by room version and match status |
 | `CancelRoom` | Host or system | `RoomCancelled` | Waiting room is abandoned before match start | Idempotent once cancelled |
@@ -20,16 +20,16 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | `PlayCard` | Player | `CardPlayed`, optionally `PenaltyStackIncreased` or `TurnAdvanced` | Accepted when sequence, session, rate-limit, and hand ownership are valid and the player either owns the turn, legally stacks a draw card as the targeted player, or makes an exact-match jump-in. Payload includes `roomId`, `gameId`, `playerId`, `card`, `sequenceNumber`, and `playMode` (`turn`, `stack`, or `jump_in`). A stack adds 2 or 4 and transfers the penalty; a jump-in makes the jumper the acting player and continues turn order after that seat | Command deduped by command id; sequence serialization selects one winner among concurrent turn and jump-in attempts |
 | `DrawCard` | Player | `CardDrawn`, optionally `PenaltyStackResolved`, then `TurnAdvanced` or `DrawTurnRetained` | Used when a player cannot or chooses not to play. If the player is targeted by a penalty stack and does not stack, the command draws the accumulated total and forfeits the rest of the turn | Duplicate submissions return the previously decided outcome |
 | `ChooseColor` | Player | `ColorChosen` | Follows a wild-card play that requires a color decision | Same command id must not apply twice |
-| `CallUno` | Player | `UnoCalled` | Allowed only before the 5-second Uno window closes or the next player begins their turn | Duplicate calls after success are ignored |
-| `ReportMissingUno` | Opponent or system | `UnoChallengeIssued`, `UnoPenaltyApplied` | Triggered when eligible target failed to call Uno before the challenge window closed; penalty event includes `roomId`, `targetPlayerId`, `challengerPlayerId`, and `cardsDrawn=2` | Idempotent by `(targetPlayerId, triggeringGameEventId)` |
-| `ExpireUnoWindow` | Room Gameplay policy | `UnoWindowExpired` | Internal timer command triggered when the persisted Uno deadline is reached and the window was not already closed by `CallUno`, `ReportMissingUno`, or `TurnAdvanced` | Idempotent by `(roomId, gameId, playerId, triggeringGameEventId)` |
+| `CallUno` | Player | `UnoCalled` | Allowed only before the 5-second Uno window closes or the next player begins their turn. A successful call closes and resolves the challenge window so later `ReportMissingUno` is inactive. Window openness is decided solely by server state using absolute UTC `expiresAt` and `openingSequence`; client countdown is advisory | Duplicate calls after success are ignored |
+| `ReportMissingUno` | Opponent or system | `UnoChallengeIssued`, `UnoPenaltyApplied` | Valid only while the challenge window is still open and the target has not successfully called Uno; penalty event includes `roomId`, `targetPlayerId`, `challengerPlayerId`, and `cardsDrawn=2`. After a successful `CallUno`, expiry, or turn advance, the command is rejected with no facts and no challenger penalty | Idempotent by `(targetPlayerId, triggeringGameEventId)` |
+| `ExpireUnoWindow` | Room Gameplay policy | `UnoWindowExpired` | Internal timer command triggered when the persisted absolute UTC Uno deadline is reached and the window was not already closed by `CallUno`, `ReportMissingUno`, or `TurnAdvanced`. Opening the window publishes `expiresAt` and `openingSequence` to clients | Idempotent by `(roomId, gameId, playerId, triggeringGameEventId)` |
 | `EndTurn` | System policy | `TurnAdvanced` | Triggered after the accepted action fully resolves | Internal command; ignored if turn already advanced |
 
 ## Game and Match Completion
 
 | Command | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
-| `CompleteGame` | Room Gameplay policy | `GameCompleted`, `MatchScoreUpdated` | Triggered when a player empties their hand or wins by rule; event payload includes `gameId`, `roomId`, `placementOrder`, and `isAbandoned` | Same winning state must not be recorded twice |
+| `CompleteGame` | Room Gameplay policy | `GameCompleted`, `MatchScoreUpdated` | Triggered when a player empties their hand or wins by rule; event payload includes `gameId`, `roomId`, `placementOrder`, authoritative `participants`, and `isAbandoned` | Same winning state must not be recorded twice |
 | `StartNextGame` | Room Gameplay policy | `GameStarted` | Triggered if no player has yet won the best-of-three match | Idempotent if next game already exists |
 | `CompleteMatch` | Room Gameplay policy | `MatchCompleted`, `RoomCompleted` | Triggered when a player reaches two game wins | Idempotent by `(roomId, matchNumber)` |
 
@@ -73,7 +73,9 @@ This catalog lists the main commands, their primary emitted events, causality, a
 
 | Projection Handler | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
-| `ProjectRoomEventForSpectators` | Spectator projection policy | `SpectatorRoomProjectionUpdated` | Consumes spectator-safe room events | Idempotent by upstream event id |
+| `AdmitSpectatorConnection` | Spectator admission policy | none as domain event; stream opens or admission is denied | New spectator connections are admitted while room status is `waiting`, `locked`, or `in_progress` and public/private authorization passes; denied after `RoomCompleted` or `RoomCancelled`. Terminal means the complete match/room, not an individual game in a best-of-three | Idempotent by `(roomId, spectatorConnectionId)` for reconnect within the same non-terminal room |
+| `CloseSpectatorStreamsOnTerminalRoom` | Spectator projection policy | stream-close control signal | Triggered by `RoomCompleted` or `RoomCancelled`; closes existing spectator streams for that room/match | Idempotent by `(roomId, terminalEventId)` |
+| `ProjectRoomEventForSpectators` | Spectator projection policy | `SpectatorRoomProjectionUpdated` | Consumes spectator-safe room events, including public Uno `expiresAt` and opening room sequence when a window opens | Idempotent by upstream event id |
 | `DropUnsafeSpectatorEvent` | Spectator visibility policy | `SpectatorEventDropped` | Triggered when an event cannot be safely exposed | Idempotent by upstream event id |
 
 ## Analytics and Public Read Model Projection Policies
@@ -108,7 +110,20 @@ The following cases are intentionally treated as command outcomes rather than do
 - command from expired or revoked session
 - `JoinRoom` after lock or capacity reached
 - `CallUno` after the Uno window has already closed
+- `ReportMissingUno` after a successful `CallUno`, after `UnoWindowExpired`, or after the next turn has begun (window inactive; no challenger penalty)
 - command from a displaced session after a newer login invalidated it
 - forged future sequence number or replayed old sequence number
 
-These outcomes should still be observable operationally through logs or metrics, but they do not belong in the business event stream unless audit requirements explicitly demand rejection events.
+Terminal spectator admission denial after `RoomCompleted` or `RoomCancelled` is connection/control behavior outside the command envelope. It produces no domain event and is outside rejected-command audit requirements.
+
+Rejected commands never produce domain events and never append Game Integrity log entries. They must emit a structured operational/security audit record that includes:
+
+- `commandId`
+- `correlationId`
+- session/player identity when known
+- room/tournament identity when known
+- rejection reason
+- submitted and current sequence numbers when applicable
+- timestamp
+
+These audit records are observability and security artifacts, not business events, and they do not belong in the Game Integrity stream.

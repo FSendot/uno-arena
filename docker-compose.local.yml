@@ -1,0 +1,375 @@
+# Local topology skeleton for UnoArena (architecture mode).
+# Image tags come from .env / environment (see .env.example). Do not assume :latest.
+# Only the BFF (gateway) publishes a host port. All other services stay on the private network.
+#
+# Probes: compose healthcheck maps to readiness (/ready). Liveness is /health in Helm only.
+# Base mode keeps Redis/Postgres/Kafka/EventStore/ClickHouse wired and does NOT set
+# GATEWAY_CAPABILITY_MODE / ROOM_CAPABILITY_MODE / GATEWAY_ALLOW_FAKES /
+# ROOM_ALLOW_FAKES / GAME_INTEGRITY_ALLOW_MEMORY.
+# Gateway stays not-ready without a Redis rate-limit adapter; Room stays not-ready
+# without a Postgres session adapter; Game Integrity stays not-ready while
+# EVENTSTORE_URL is set (adapter blocked). For CLI capability mode (real HTTP paths,
+# GI explicit memory):
+#   docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example config
+
+name: uno-arena-local
+
+networks:
+  uno_private:
+    driver: bridge
+    # Private core network: no egress. Only gateway publishes a host port.
+    internal: true
+    name: uno-arena-private
+
+volumes:
+  pg_identity_data:
+  pg_room_data:
+  pg_tournament_data:
+  pg_ranking_data:
+  kafka_data:
+  eventstore_data:
+  redis_data:
+  clickhouse_data:
+
+x-app-healthcheck: &app_ready
+  test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ready || exit 1"]
+  interval: 5s
+  timeout: 3s
+  retries: 10
+  start_period: 5s
+
+services:
+  postgres-identity:
+    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-uno}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
+      POSTGRES_DB: identity
+    volumes:
+      - pg_identity_data:/var/lib/postgresql/data
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d identity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-room-gameplay:
+    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-uno}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
+      POSTGRES_DB: room_gameplay
+    volumes:
+      - pg_room_data:/var/lib/postgresql/data
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d room_gameplay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-tournament:
+    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-uno}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
+      POSTGRES_DB: tournament
+    volumes:
+      - pg_tournament_data:/var/lib/postgresql/data
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d tournament"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-ranking:
+    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-uno}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
+      POSTGRES_DB: ranking
+    volumes:
+      - pg_ranking_data:/var/lib/postgresql/data
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d ranking"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: ${KAFKA_IMAGE:-apache/kafka:3.8.0}
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  eventstore:
+    image: ${EVENTSTORE_IMAGE:-eventstore/eventstore:24.10.0-bookworm-slim}
+    environment:
+      EVENTSTORE_CLUSTER_SIZE: 1
+      EVENTSTORE_RUN_PROJECTIONS: None
+      EVENTSTORE_START_STANDARD_PROJECTIONS: "false"
+      EVENTSTORE_INSECURE: "true"
+      EVENTSTORE_ENABLE_ATOM_PUB_OVER_HTTP: "true"
+    volumes:
+      - eventstore_data:/var/lib/eventstore
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:2113/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.2.5-alpine}
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - redis_data:/data
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8.4}
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-uno}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-uno}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks: [uno_private]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  gateway:
+    image: ${GATEWAY_IMAGE:-uno-arena/gateway:local}
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: gateway
+      IDENTITY_URL: http://identity:8080
+      ROOM_GAMEPLAY_URL: http://room-gameplay:8080
+      TOURNAMENT_URL: http://tournament-orchestration:8080
+      SPECTATOR_VIEW_URL: http://spectator-view:8080
+      ANALYTICS_URL: http://analytics:8080
+      RANKING_URL: http://ranking:8080
+      GATEWAY_SERVICE_CREDENTIAL: ${GATEWAY_SERVICE_CREDENTIAL:-local-gw-backend}
+      GATEWAY_IDENTITY_CREDENTIAL: ${GATEWAY_IDENTITY_CREDENTIAL:-local-gw-backend}
+      GATEWAY_ROOM_CREDENTIAL: ${GATEWAY_ROOM_CREDENTIAL:-local-room-to-gw}
+      GATEWAY_SPECTATOR_CREDENTIAL: ${GATEWAY_SPECTATOR_CREDENTIAL:-local-spectator-to-gw}
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BROKERS: kafka:9092
+    ports:
+      - "${BFF_HOST_PORT:-8080}:8080"
+    networks: [uno_private]
+    # Infra only here to avoid cycles with Identity/Room/Tournament URL peers.
+    # Base architecture mode leaves Gateway not-ready (Redis rate-limit adapter
+    # unimplemented; GATEWAY_CAPABILITY_MODE / GATEWAY_ALLOW_FAKES unset).
+    # Staging/production rollout is intentionally blocked until that adapter exists.
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  identity:
+    image: ${IDENTITY_IMAGE:-uno-arena/identity:local}
+    build:
+      context: ./services/identity
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: identity
+      IDENTITY_INTERNAL_CREDENTIAL: ${IDENTITY_INTERNAL_CREDENTIAL:-local-gw-backend}
+      # URL wiring only — no depends_on gateway (avoids cycle; readiness is config-based).
+      IDENTITY_INVALIDATION_URL: http://gateway:8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-identity:5432/identity?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379/1
+    networks: [uno_private]
+    depends_on:
+      postgres-identity:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  room-gameplay:
+    image: ${ROOM_GAMEPLAY_IMAGE:-uno-arena/room-gameplay:local}
+    build:
+      context: ./services/room-gameplay
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: room-gameplay
+      SERVICE_CREDENTIAL: ${ROOM_SERVICE_CREDENTIAL:-local-gw-backend}
+      ROOM_SERVICE_CREDENTIAL: ${ROOM_SERVICE_CREDENTIAL:-local-gw-backend}
+      ROOM_TIMER_SERVICE_CREDENTIAL: ${ROOM_TIMER_SERVICE_CREDENTIAL:-local-room-timer}
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_SERVICE_CREDENTIAL: ${ROOM_TO_GATEWAY_CREDENTIAL:-local-room-to-gw}
+      IDENTITY_URL: http://identity:8080
+      IDENTITY_SERVICE_CREDENTIAL: ${ROOM_IDENTITY_CREDENTIAL:-local-gw-backend}
+      ROOM_IDENTITY_CREDENTIAL: ${ROOM_IDENTITY_CREDENTIAL:-local-gw-backend}
+      SPECTATOR_VIEW_URL: http://spectator-view:8080
+      SPECTATOR_VIEW_SERVICE_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-gw-backend}
+      RANKING_URL: http://ranking:8080
+      RANKING_SERVICE_CREDENTIAL: ${RANKING_INTERNAL_CREDENTIAL:-local-ranking-internal}
+      ANALYTICS_URL: http://analytics:8080
+      ANALYTICS_SERVICE_CREDENTIAL: ${ANALYTICS_ROOM_CREDENTIAL:-local-analytics-room}
+      TOURNAMENT_URL: http://tournament-orchestration:8080
+      TOURNAMENT_SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
+      GAME_INTEGRITY_URL: http://game-integrity:8080
+      GAME_INTEGRITY_INTERNAL_CREDENTIAL: ${ROOM_GI_CREDENTIAL:-local-gi-room}
+      DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-room-gameplay:5432/room_gameplay?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379/2
+    networks: [uno_private]
+    # Peer service URLs are wired above; depends_on avoids cycles with gateway/tournament.
+    depends_on:
+      postgres-room-gameplay:
+        condition: service_healthy
+      identity:
+        condition: service_started
+      game-integrity:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  game-integrity:
+    image: ${GAME_INTEGRITY_IMAGE:-uno-arena/game-integrity:local}
+    build:
+      context: ./services/game-integrity
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: game-integrity
+      # EVENTSTORE_URL present => readiness blocked (eventstore_adapter_blocked) until real adapter exists.
+      EVENTSTORE_URL: ${EVENTSTORE_URL:-esdb://eventstore:2113?tls=false}
+      GAME_INTEGRITY_INTERNAL_CREDENTIAL: ${GAME_INTEGRITY_INTERNAL_CREDENTIAL:-local-gi-room}
+      GAME_INTEGRITY_AUDIT_CREDENTIAL: ${GAME_INTEGRITY_AUDIT_CREDENTIAL:-local-gi-operator}
+      KAFKA_BROKERS: kafka:9092
+    networks: [uno_private]
+    depends_on:
+      eventstore:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  tournament-orchestration:
+    image: ${TOURNAMENT_IMAGE:-uno-arena/tournament-orchestration:local}
+    build:
+      context: ./services/tournament-orchestration
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: tournament-orchestration
+      TOURNAMENT_INTERNAL_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
+      SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
+      ROOM_GAMEPLAY_URL: http://room-gameplay:8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-tournament:5432/tournament?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379/3
+    networks: [uno_private]
+    depends_on:
+      postgres-tournament:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  ranking:
+    image: ${RANKING_IMAGE:-uno-arena/ranking:local}
+    build:
+      context: ./services/ranking
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: ranking
+      RANKING_INTERNAL_CREDENTIAL: ${RANKING_INTERNAL_CREDENTIAL:-local-ranking-internal}
+      DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-ranking:5432/ranking?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379/4
+    networks: [uno_private]
+    depends_on:
+      postgres-ranking:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  spectator-view:
+    image: ${SPECTATOR_VIEW_IMAGE:-uno-arena/spectator-view:local}
+    build:
+      context: ./services/spectator-view
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: spectator-view
+      SPECTATOR_VIEW_INTERNAL_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-gw-backend}
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379/5
+    networks: [uno_private]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *app_ready
+
+  analytics:
+    image: ${ANALYTICS_IMAGE:-uno-arena/analytics:local}
+    build:
+      context: ./services/analytics
+      dockerfile: Dockerfile
+    environment:
+      SERVICE_NAME: analytics
+      ANALYTICS_ROOM_CREDENTIAL: ${ANALYTICS_ROOM_CREDENTIAL:-local-analytics-room}
+      ANALYTICS_RANKING_CREDENTIAL: ${ANALYTICS_RANKING_CREDENTIAL:-local-analytics-ranking}
+      ANALYTICS_TOURNAMENT_CREDENTIAL: ${ANALYTICS_TOURNAMENT_CREDENTIAL:-local-analytics-tournament}
+      ANALYTICS_OPS_CREDENTIAL: ${ANALYTICS_OPS_CREDENTIAL:-local-analytics-ops}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-uno}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-uno}
+      KAFKA_BROKERS: kafka:9092
+    networks: [uno_private]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck: *app_ready

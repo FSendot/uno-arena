@@ -6,7 +6,19 @@ image:
 
 env:
   SERVICE_NAME: identity
-  API_URL: ""
+  # Gateway base URL for SessionInvalidated fan-out (Service port 8080).
+  IDENTITY_INVALIDATION_URL: http://gateway:8080
+  REDIS_URL: redis://redis:6379/1
+  KAFKA_BROKERS: kafka:9092
+
+# Credentials and DSN via existingSecret + secretKeyRef (never inline secrets).
+# Cross-chart: identity-internal-credential == gateway gateway-service-credential
+#              == gateway gateway-identity-credential
+#              == room room-identity-credential (Room→Identity session validate).
+existingSecret: identity-secrets
+secretEnv:
+  IDENTITY_INTERNAL_CREDENTIAL: identity-internal-credential
+  DATABASE_URL: database-url
 
 resources:
   requests:

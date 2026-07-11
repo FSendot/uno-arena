@@ -22,7 +22,7 @@ Authenticate players, maintain internal session state and ACLs, and expose revoc
 **Interfaces**
 
 - Synchronous: internal session validation and eligibility APIs used by the BFF and selected services.
-- Asynchronous: `identity.session.invalidated`, produced by Identity and consumed by BFF/gateway instances and service-side invalidation caches.
+- Asynchronous: `identity.session.invalidated`, produced by Identity and consumed by BFF/gateway instances and service-side invalidation caches. Kafka topic shape is owned by AsyncAPI; live stream close is delivered as BFF control/SSE (OpenAPI), not as an AsyncAPI SSE frame.
 - External dependency: external IdP behind an anti-corruption layer that maps provider claims to `PlayerId`, `SessionId`, roles, and eligibility.
 
 **Synchronous interface authorization**
@@ -60,8 +60,10 @@ Own the room lifecycle, Uno rules, turn sequencing, command validation, and oper
 
 - Room Gameplay is the rule engine.
 - It calls Game Integrity before public broadcast.
-- Postgres holds the operational snapshot and timer deadlines.
+- Postgres holds the operational snapshot and timer deadlines, including absolute UTC Uno `expiresAt` values and the opening room sequence for each open window.
 - Redis may accelerate timer dispatch, but does not own room truth.
+- Rejected commands never append to Game Integrity and never produce domain events; they emit structured operational/security audit records only.
+- Before lock/start, an ad-hoc host leave reassigns host to the remaining player in the lowest occupied seat or cancels immediately if empty. After lock/start, host reassignment has no gameplay authority.
 
 **Interfaces**
 
@@ -77,10 +79,10 @@ The BFF validates the external session first, then forwards the internal request
 | Interface | Required principal |
 | --- | --- |
 | `POST /v1/rooms` | Authenticated player; Identity eligibility must allow ad-hoc play or the tournament assignment being requested. |
-| `POST /v1/rooms/{roomId}/commands` | Authenticated player with active room membership; command is rejected if `SessionId`, membership, turn ownership, or `expectedSequenceNumber` is stale. |
-| `GET /v1/rooms/{roomId}/snapshot` | Authenticated player with current or reconnect-eligible membership; response may include only that player's private hand/draw facts. |
-| `GET /v1/rooms/{roomId}/events` | Authenticated player SSE stream through the BFF; membership and last-seen sequence are checked before resume. |
-| `POST /internal/v1/rooms/{roomId}/timer-commands` | Room Timer Worker service credential; Room Gameplay rechecks persisted deadline keys before applying `ExpireUnoWindow` or `ForfeitPlayer`. |
+| `POST /v1/rooms/{roomId}/commands` | Authenticated player with active room membership; command is rejected if `SessionId`, membership, turn ownership, or `expectedSequenceNumber` is stale. Rejection emits a structured operational/security audit record and never appends Game Integrity. |
+| `GET /v1/rooms/{roomId}/snapshot` | Authenticated player with current or reconnect-eligible membership; response may include only that player's private hand/draw facts plus public Uno absolute UTC `expiresAt` and `openingSequence` when a window is open. Used after SSE `409 snapshot_required` or reconnect. |
+| `GET /v1/rooms/{roomId}/events` | Authenticated player SSE stream through the BFF; membership and last-seen sequence are checked before resume. Unknown/evicted `Last-Event-ID` returns `409 snapshot_required`. SSE corrects advisory CLI countdown using server `expiresAt` and `openingSequence`. |
+| `POST /internal/v1/rooms/{roomId}/timer-commands` | Room Timer Worker service credential; Room Gameplay rechecks timer keys before applying outcomes. `ExpireUnoWindow` rechecks absolute UTC `expiresAt` plus the opening room sequence; `ForfeitPlayer` rechecks the persisted reconnect deadline keyed by `(roomId, playerId, disconnectVersion)` and does not gain an Uno opening-sequence field. |
 | `POST /internal/v1/rooms/provision` | Tournament Orchestration/provisioning-worker service credential; idempotent by `(tournamentId, roundNumber, slotId)`. |
 
 **Dependencies**
@@ -108,6 +110,7 @@ Own technical integrity only: append-only game history, replay, auditability, an
 - EventStoreDB is the authoritative store.
 - The service is internal-only.
 - Audit and replay APIs are not public gameplay APIs.
+- Rejected commands never reach Game Integrity; only accepted gameplay mutations and timer outcomes that pass Room Gameplay validation may append.
 
 **Interfaces**
 
@@ -158,7 +161,7 @@ Own tournament lifecycle, registration, provisioning, room assignment, round clo
 - Synchronous through BFF: tournament creation, registration, compact tournament command envelopes, bracket/read APIs.
 - Internal synchronous: provisioning workers call Room Gameplay idempotently to create tournament rooms using `(tournamentId, roundNumber, slotId)`.
 - Asynchronous input: `room.match.completed`.
-- Asynchronous output: `tournament.match.assigned`, `tournament.match.result_recorded`, `tournament.players.advanced`, `tournament.round.completed`, `tournament.completed`.
+- Asynchronous output: `tournament.match.assigned`, `tournament.match.result_recorded`, `tournament.players.advanced`, `tournament.round.completed`, `tournament.completed` (AsyncAPI Kafka channels; offline HTTP bridges remain destination-specific transforms).
 
 **Synchronous interface authorization**
 
@@ -203,7 +206,7 @@ Maintain persistent ranking state and rating history.
 
 - Synchronous through BFF: leaderboard and rating-history queries.
 - Asynchronous input: eligible `room.game.completed` for casual Elo and tournament placement facts from Tournament Orchestration.
-- Asynchronous output: `ranking.player_rating_updated`, `ranking.leaderboard_snapshot_published`.
+- Asynchronous output: `ranking.player_rating_updated`, `ranking.leaderboard_snapshot_published` (AsyncAPI Kafka channels).
 
 **Synchronous interface authorization**
 
@@ -238,6 +241,7 @@ Serve privacy-filtered room projections to anonymous observers and read-only con
 - Redis is the materialized projection store.
 - It is rebuilt from committed safe events and sanitized snapshots.
 - It never becomes the source of truth for private gameplay data.
+- New spectator connections are allowed while the room is `waiting`, `locked`, or `in_progress`, subject to public/private authorization. Admission is denied in `completed`/`cancelled` after `RoomCompleted` or `RoomCancelled`, and existing spectator streams close at that terminal room/match state (not at individual game end in a best-of-three).
 
 **Interfaces**
 
@@ -251,8 +255,8 @@ Spectator View is anonymous-tolerant only because it serves a separate privacy-f
 
 | Interface | Required principal |
 | --- | --- |
-| `GET /v1/spectator/rooms/{roomId}/snapshot` | Anonymous-tolerant when the room is public/spectatable; private rooms require an authorized invite, participant, or operator context. |
-| `GET /v1/spectator/rooms/{roomId}/events` | Anonymous-tolerant SSE stream through the BFF for public rooms; rate-limited by IP and optional session. |
+| `GET /v1/spectator/rooms/{roomId}/snapshot` | Anonymous-tolerant when the room is public/spectatable and non-terminal (`waiting`, `locked`, or `in_progress`); private rooms require an authorized invite, participant, or operator context. Denied after `RoomCompleted` or `RoomCancelled`. Used after SSE `409 snapshot_required` or initial load. |
+| `GET /v1/spectator/rooms/{roomId}/events` | Anonymous-tolerant SSE stream through the BFF for public non-terminal rooms; rate-limited by IP and optional session. Unknown/evicted `Last-Event-ID` returns `409 snapshot_required`. Existing streams close when the room reaches terminal room/match state. |
 | `GET /internal/v1/spectator/rooms/{roomId}/rebuild-status` | Spectator projection worker or operator/service role only. |
 
 **Dependencies**

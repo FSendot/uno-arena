@@ -4,9 +4,50 @@ image:
   repository: registry.gitlab.com/group/uno-arena/room-gameplay
   digest: ""
 
+# Peer URLs use Service port 8080 (cluster DNS). See README credential matrix.
 env:
   SERVICE_NAME: room-gameplay
-  API_URL: ""
+  GATEWAY_URL: http://gateway:8080
+  IDENTITY_URL: http://identity:8080
+  SPECTATOR_VIEW_URL: http://spectator-view:8080
+  RANKING_URL: http://ranking:8080
+  ANALYTICS_URL: http://analytics:8080
+  TOURNAMENT_URL: http://tournament-orchestration:8080
+  GAME_INTEGRITY_URL: http://game-integrity:8080
+  REDIS_URL: redis://redis:6379/2
+  KAFKA_BROKERS: kafka:9092
+  # Configured mode (no ROOM_ALLOW_FAKES / ROOM_CAPABILITY_MODE): /ready is always
+  # blocked with postgres_adapter_blocked until a durable Postgres session adapter
+  # exists — regardless of whether DATABASE_URL is set. Do not weaken readiness.
+
+# BLOCKED: binary has no WORKER_ROLE=room-timer loop; production timer adapters absent.
+timerWorker:
+  enabled: false
+
+existingSecret: room-gameplay-secrets
+# Cross-chart equality (secret *values* must match; keys stay chart-local — no hardcoded secrets):
+#   room-service-credential          == gateway gateway-service-credential (Gateway→Room)
+#   room-to-gateway-credential       == gateway gateway-room-credential (Room→Gateway)
+#   room-identity-credential         == identity identity-internal-credential (Room→Identity)
+#   spectator-view-internal-credential == spectator-view chart (Room→Spectator)
+#   ranking-internal-credential      == ranking chart (Room→Ranking)
+#   analytics-room-credential        == analytics chart (Room→Analytics)
+#   tournament-internal-credential   == tournament chart (Room→Tournament)
+#   game-integrity-internal-credential == game-integrity chart (Room→GI)
+# Producer scope: ROOM_TIMER_SERVICE_CREDENTIAL is Room-timer-only (not Gateway).
+secretEnv:
+  SERVICE_CREDENTIAL: room-service-credential
+  ROOM_SERVICE_CREDENTIAL: room-service-credential
+  ROOM_TIMER_SERVICE_CREDENTIAL: room-timer-service-credential
+  GATEWAY_SERVICE_CREDENTIAL: room-to-gateway-credential
+  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
+  ROOM_IDENTITY_CREDENTIAL: room-identity-credential
+  SPECTATOR_VIEW_SERVICE_CREDENTIAL: spectator-view-internal-credential
+  RANKING_SERVICE_CREDENTIAL: ranking-internal-credential
+  ANALYTICS_SERVICE_CREDENTIAL: analytics-room-credential
+  TOURNAMENT_SERVICE_CREDENTIAL: tournament-internal-credential
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  DATABASE_URL: database-url
 
 resources:
   requests:

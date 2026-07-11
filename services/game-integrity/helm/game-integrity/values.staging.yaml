@@ -1,4 +1,8 @@
 replicaCount: 1
 
 env:
-  API_URL: https://staging.unoarena.example.com
+  EVENTSTORE_URL: esdb://eventstore.uno-arena.svc.cluster.local:2113?tls=false
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  # Staging rollout blocked: EventStoreDB adapter absent → /ready eventstore_adapter_blocked.
+
+existingSecret: game-integrity-secrets

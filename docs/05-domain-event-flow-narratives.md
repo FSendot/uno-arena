@@ -9,29 +9,33 @@ This document describes end-to-end event flows with both synchronous decision po
 1. A player submits `CreateRoom`.
 2. Room Gameplay validates the authenticated session synchronously through Identity and Session.
 3. `RoomCreated` is committed.
-4. Additional players submit `JoinRoom`; each accepted command emits `PlayerJoinedRoom`.
-5. The host submits `LockRoom`; Room Gameplay checks roster size and emits `RoomLocked`.
-6. Room Gameplay synchronously requests deck initialization from Game Integrity for Game 1.
-7. Game Integrity commits the deck seed and confirms authoritative deal material.
-8. Room Gameplay emits `MatchStarted` and `GameStarted`.
-9. Players submit gameplay commands. Each accepted command is synchronously validated against room invariants and then committed as domain events such as `CardPlayed`, `PenaltyStackIncreased`, `PenaltyStackResolved`, `CardDrawn`, `ColorChosen`, `UnoCalled`, `UnoWindowExpired`, `UnoPenaltyApplied`, and `TurnAdvanced`. A targeted player may stack `Draw Two` or a legally playable `Wild Draw Four`, transferring the accumulated draw penalty; a player who declines or cannot stack draws the total and loses the rest of the turn. Outside mandatory-resolution states, any player may jump in with an exact color-and-rank-or-symbol match; the first valid command serialized at the current sequence number wins, the jumper becomes the acting player, and play continues after the jumper's seat.
-10. In parallel with each accepted gameplay decision, Game Integrity appends the immutable log entry.
-11. If a player plays their second-to-last card, the Uno challenge window opens and closes after 5 seconds or when the next player begins their turn. If the persisted deadline is reached first, Room Gameplay emits `UnoWindowExpired`; a later missing-Uno challenge is rejected because the window is closed. A successful missing-Uno challenge before expiry emits `UnoPenaltyApplied` with a 2-card draw.
-12. After each committed gameplay event, Spectator View receives only public projection facts such as discard state, active color, turn, public roster, and card counts.
-13. When a player empties their hand, Room Gameplay emits `GameCompleted`.
-14. Room Gameplay updates the best-of-three score by emitting `MatchScoreUpdated`.
-15. If no player has yet reached two game wins, Room Gameplay emits another `GameStarted` for the next game.
-16. Once a player reaches two game wins, Room Gameplay emits `MatchCompleted`.
-17. The room transitions to terminal status and emits `RoomCompleted`.
+4. Additional players submit `JoinRoom`; each accepted command emits `PlayerJoinedRoom`. Spectators may open spectator connections while the room is `waiting`, `locked`, or later `in_progress`, subject to public/private authorization.
+5. If the ad-hoc host leaves before lock/start, Room Gameplay emits `PlayerLeftRoom` and either `HostReassigned` to the remaining player in the lowest occupied seat or `RoomCancelled` immediately when nobody remains. `RoomCancelled` denies new spectator admission and closes existing spectator streams. After lock/start, host reassignment has no gameplay authority.
+6. The host submits `LockRoom`; Room Gameplay checks roster size and emits `RoomLocked`.
+7. Room Gameplay synchronously requests deck initialization from Game Integrity for Game 1.
+8. Game Integrity commits the deck seed and confirms authoritative deal material.
+9. Room Gameplay emits `MatchStarted` and `GameStarted`.
+10. Players submit gameplay commands. Each accepted command is synchronously validated against room invariants and then committed as domain events such as `CardPlayed`, `PenaltyStackIncreased`, `PenaltyStackResolved`, `CardDrawn`, `ColorChosen`, `UnoCalled`, `UnoWindowExpired`, `UnoPenaltyApplied`, and `TurnAdvanced`. A targeted player may stack `Draw Two` or a legally playable `Wild Draw Four`, transferring the accumulated draw penalty; a player who declines or cannot stack draws the total and loses the rest of the turn. Outside mandatory-resolution states, any player may jump in with an exact color-and-rank-or-symbol match; the first valid command serialized at the current sequence number wins, the jumper becomes the acting player, and play continues after the jumper's seat. Rejected commands emit no domain events and append no Game Integrity entries; they produce structured operational/security audit records only.
+11. In parallel with each accepted gameplay decision, Game Integrity appends the immutable log entry.
+12. If a player plays their second-to-last card, the Uno challenge window opens and publishes absolute UTC `expiresAt` plus the opening room sequence. The window closes after 5 seconds, when the next player begins their turn, or when the player successfully `CallUno`s. Client countdown is advisory; the server exclusively decides timeliness, and SSE/command results correct clients. A successful `CallUno` resolves the window; any later `ReportMissingUno` is rejected as inactive with no challenger penalty and no domain facts. If the persisted deadline is reached first, Room Gameplay emits `UnoWindowExpired`; a later missing-Uno challenge is likewise rejected because the window is closed. A successful missing-Uno challenge while the window is still open emits `UnoPenaltyApplied` with `cardsDrawn=2`.
+13. After each committed gameplay event, Spectator View receives only public projection facts such as discard state, active color, turn, public roster, card counts, and public Uno `expiresAt` when applicable.
+14. When a player empties their hand, Room Gameplay emits `GameCompleted`. Individual game completion does not close spectator admission for the room/match.
+15. Room Gameplay updates the best-of-three score by emitting `MatchScoreUpdated`.
+16. If no player has yet reached two game wins, Room Gameplay emits another `GameStarted` for the next game.
+17. Once a player reaches two game wins, Room Gameplay emits `MatchCompleted`.
+18. The room transitions to terminal status and emits `RoomCompleted`. New spectator admission is denied and existing spectator streams close.
 
 ### Synchronous decision points
 
 - session validity for every player command
 - room capacity and lock eligibility
+- ad-hoc host leave before lock/start: lowest occupied seat becomes host, or immediate cancel if empty
+- spectator admission against room status and public/private authorization; deny and close streams at `RoomCompleted` or `RoomCancelled`
+- rejected commands produce structured operational/security audit records only; never domain events or Game Integrity appends
 - turn ownership or exact-match jump-in eligibility, plus sequence-number validation
 - draw-card stacking eligibility, accumulated-penalty calculation, and mandatory penalty resolution
 - hand ownership of the played card
-- whether the 5-second Uno window is still open and whether the next player has begun their turn
+- whether the 5-second Uno window is still open using absolute UTC `expiresAt` plus opening room sequence, and whether the next player has begun their turn; client countdown is advisory and the server alone decides timeliness
 - whether an `UnoWindowExpired` timer command still corresponds to the currently open Uno window
 - whether `GameCompleted` also implies `MatchCompleted`
 

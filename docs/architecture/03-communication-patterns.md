@@ -7,8 +7,10 @@ Clients use the BFF only.
 - Commands are sent via compact REST envelopes.
 - Realtime updates are received via SSE from the same logical gateway.
 - Clients never call Room Gameplay, Tournament Orchestration, or any other microservice directly.
-- OpenAPI should define the BFF HTTP surface.
-- AsyncAPI should define the event and streaming contract surface.
+- This implementation uses the repo-owned simple CLI as the sole client/test interface; a graphical interface is deferred and must preserve the BFF-only REST/SSE boundary.
+- OpenAPI should define the BFF HTTP surface, including player/spectator snapshot routes (player hand/`discardTop` as camelCase `Card` DTOs), SessionBearer auth requirements, spectator invalid-token `401`, and SSE `409 snapshot_required`.
+- AsyncAPI should define the Kafka topic contracts (including `tournament.completed` and `ranking.leaderboard_snapshot_published`). The Kafka envelope is authoritative for production; the offline HTTP bridge is a documented destination-specific transform of the same event names and canonical domain fields, not an identical body. SSE framing belongs in OpenAPI, not AsyncAPI.
+- Production requires Kafka adapters for those topics; the current offline capability path does not claim Kafka is wired.
 
 ### Command Envelope
 
@@ -37,6 +39,8 @@ Clients use the BFF only.
 - Preserve correlation headers across all internal hops.
 - Fan out SSE updates for player streams and spectator streams.
 - Close streams on `SessionInvalidated` or equivalent control events.
+- Close spectator streams when Room Gameplay reaches `RoomCompleted` or `RoomCancelled`.
+- Emit or forward structured operational/security audit records for rejected commands without treating them as domain events.
 
 ## Rate Limiting
 
@@ -45,20 +49,22 @@ Rate limiting is multi-layered and happens after authentication where player or 
 | Layer | Deployable | Scope source | Store / mechanism | Failure behavior |
 | --- | --- | --- | --- | --- |
 | Edge abuse | Realtime Gateway / BFF | IP address, user agent, unauthenticated route | local counters plus Redis-backed buckets | reject before auth/service dispatch with a retryable throttling response |
-| Authenticated user commands | BFF after Identity validation | `PlayerId`, `SessionId`, roles from Identity claims/introspection | Redis token bucket keyed by user/session/action family | reject before bounded-context command dispatch; no domain event is emitted |
-| Room gameplay actions | Room Gameplay command middleware | authenticated `PlayerId`, `roomId`, command `type`, room membership | Redis acceleration plus room-local guard in the command transaction | reject before mutation, append, or broadcast; suspicious bursts are audit/ops signals |
+| Authenticated user commands | BFF after Identity validation | `PlayerId`, `SessionId`, roles from Identity claims/introspection | Redis token bucket keyed by user/session/action family | reject before bounded-context command dispatch; structured operational/security audit record only; no domain event and no Game Integrity append |
+| Room gameplay actions | Room Gameplay command middleware | authenticated `PlayerId`, `roomId`, command `type`, room membership | Redis acceleration plus room-local guard in the command transaction | reject before mutation, append, or broadcast; structured operational/security audit record only; suspicious bursts are audit/ops signals |
 | Tournament actions | Tournament Orchestration command middleware | authenticated `PlayerId`, `tournamentId`, role/eligibility | Redis bucket keyed by tournament/action plus Postgres eligibility checks for authoritative gates | reject or queue according to tournament policy; provisioning workers use backpressure rather than client retries |
 | Adaptive surge protection | BFF, Room Gameplay, Tournament workers | consumer lag, timer lag, queue depth, shard health | dynamic limits driven by metrics, with conservative defaults | shed non-critical spectator/reporting traffic before player command writes |
 
-Redis accelerates counters but does not become authority for sessions, room state, or tournament state. Rate-limit rejections are command rejections, not domain events, unless the business process explicitly removes or sanctions a player.
+Redis accelerates counters but does not become authority for sessions, room state, or tournament state. Rate-limit rejections are command rejections, not domain events, unless the business process explicitly removes or sanctions a player. Every rejected command still emits a structured operational/security audit record with `commandId`, `correlationId`, session/player, room/tournament when known, rejection reason, submitted/current sequence when applicable, and timestamp, and never appends a Game Integrity entry.
 
 ## Internal Command and Event Flow
 
 - Room Gameplay accepts the command and performs domain validation.
+- If the command is rejected, Room Gameplay emits a structured operational/security audit record and returns the rejection outcome. No domain event is published and Game Integrity is not called.
 - If the command is valid, Room Gameplay requests an append from Game Integrity.
 - Game Integrity confirms the durable append.
 - Only then does Room Gameplay publish the resulting room state outward.
 - Downstream projections consume the published facts asynchronously.
+- When an Uno window opens, published player/spectator-safe facts include absolute UTC `expiresAt` and the opening room sequence; CLI countdown remains advisory and the server exclusively decides timeliness.
 
 ## Kafka Topology
 
@@ -81,7 +87,9 @@ Examples:
 - `tournament.match.result_recorded`
 - `tournament.players.advanced`
 - `tournament.round.completed`
+- `tournament.completed`
 - `ranking.player_rating_updated`
+- `ranking.leaderboard_snapshot_published`
 - `spectator.room_projection.updated`
 - `analytics.public_projection.updated`
 
@@ -93,13 +101,13 @@ Examples:
 | Realtime Gateway / BFF | Redis rate-limit buckets | Per-IP and authenticated per-user throttling | Protect public edge before services receive abusive traffic | Fail closed for abusive bursts; fail open only for low-risk spectator/reporting reads if policy allows |
 | BFF | Identity | Synchronous validation/read | Establish internal `PlayerId`, `SessionId`, roles, and eligibility | Fail closed if identity cannot be validated |
 | Identity | BFF | `identity.session.invalidated` control event | Close old SSE streams for single-active-session | Broadcast to gateway instances; stale streams are closed on receipt and old commands are rejected |
-| BFF | Room Gameplay | Synchronous command dispatch | Room commands need immediate validation/rejection | Idempotent by `commandId`; stale by `expectedSequenceNumber`; no blind retries after unknown mutation |
-| Room Gameplay | Redis rate-limit buckets | Per-room/per-user action limits after membership validation | Stop command floods without moving room truth to Redis | Rejection happens before domain mutation, Game Integrity append, or broadcast |
-| Room Gameplay | Room Timer Worker | Durable Uno deadline plus Redis scheduling index | Own the 5-second Uno window without process-local timers | Room persists `(roomId, gameId, playerId, triggeringGameEventId)`; worker triggers `ExpireUnoWindow`; Room rechecks, appends, publishes, and ignores duplicate or stale expiry |
+| BFF | Room Gameplay | Synchronous command dispatch | Room commands need immediate validation/rejection | Idempotent by `commandId`; stale by `expectedSequenceNumber`; rejected commands emit structured operational/security audit records only and never append Game Integrity; no blind retries after unknown mutation |
+| Room Gameplay | Redis rate-limit buckets | Per-room/per-user action limits after membership validation | Stop command floods without moving room truth to Redis | Rejection happens before domain mutation, Game Integrity append, or broadcast; audit record only |
+| Room Gameplay | Room Timer Worker | Durable Uno deadline plus Redis scheduling index | Own the 5-second Uno window without process-local timers | Room persists absolute UTC `expiresAt` with `(roomId, gameId, playerId, triggeringGameEventId)` and opening room sequence; worker triggers `ExpireUnoWindow`; Room rechecks, appends, publishes, and ignores duplicate or stale expiry; CLI countdown is advisory and server timing is exclusive |
 | Room Gameplay | Room Timer Worker | Durable reconnect deadline plus Redis scheduling index | Own the 60-second reconnect window across restarts | Room persists `(roomId, playerId, disconnectVersion)`; worker triggers `ForfeitPlayer`; Room rechecks, appends, publishes, and ignores duplicate or stale expiry |
 | Room Gameplay | Game Integrity | Synchronous append/deck API | Log-before-broadcast requires durable append before publication | If append fails, command fails before broadcast; if local commit fails after append, recovery reconciles from EventStoreDB |
 | Room Gameplay | BFF/player feed | Sanitized stream/query | Players receive public state plus only their own private hand/draw facts | Resume from sequence/log offset; no raw Game Integrity access |
-| Room Gameplay | Spectator View | `room.spectator-safe.events` | Spectator projection is rebuilt from already safe room facts | Consumers dedupe by event id and sequence; unsafe events are dropped |
+| Room Gameplay | Spectator View | `room.spectator-safe.events` | Spectator projection is rebuilt from already safe room facts | Consumers dedupe by event id and sequence; unsafe events are dropped; new admission allowed in `waiting`/`locked`/`in_progress`; denied in `completed`/`cancelled`; existing streams close on `RoomCompleted`/`RoomCancelled` for the complete match/room |
 | Room Gameplay | Analytics | `room.gameplay.metrics` | Gameplay-level metrics without private facts | Ad-hoc metrics are anonymized; public tournament metrics may be more granular |
 | Room Gameplay | Ranking | `room.game.completed` | Casual Elo source for completed non-abandoned ad-hoc games | Ranking filters by `roomType`, `isAbandoned`, and processed event id |
 | Room Gameplay | Tournament Orchestration | `room.match.completed` | Tournament advancement consumes authoritative match facts asynchronously | Tournament validates room-slot mapping and dedupes by `(roomId, completionVersion)` |
@@ -145,6 +153,9 @@ This keeps Kafka-heavy saga flows explicit without polluting the domain event ca
 - Streams should be resumable using the last known sequence marker.
 - Stream closure is a first-class control signal, not a side effect of random disconnect handling.
 - `SessionInvalidated` must terminate live streams through the BFF control plane.
+- Spectator SSE admission is allowed only while the room is `waiting`, `locked`, or `in_progress` subject to public/private authorization.
+- Spectator admission is denied after `RoomCompleted` or `RoomCancelled`, and existing spectator streams close at that terminal room/match state (not at individual game end in a best-of-three).
+- Uno window SSE payloads expose absolute UTC `expiresAt` and the opening room sequence; CLI display is advisory and server timing is exclusive.
 
 ## Internal APIs
 
@@ -155,8 +166,8 @@ This keeps Kafka-heavy saga flows explicit without polluting the domain event ca
 
 ## Contract Intent
 
-- OpenAPI is for command envelopes, status responses, and control-plane endpoints on the BFF.
-- AsyncAPI is for Kafka topics, projection-event consumers, and SSE payload contracts where schema discipline matters.
+- OpenAPI is for command envelopes, snapshot responses, status responses, SSE stream endpoints, and control-plane endpoints on the BFF, including SSE `409 snapshot_required`. SSE wire framing (`id`/`event`/`data`) is documented in OpenAPI, not AsyncAPI.
+- AsyncAPI is for Kafka topics and projection-event consumers only. It does not define SSE wire frames. The Kafka envelope is authoritative; offline HTTP bridges apply documented transforms of canonical fields and must not be described as identical Kafka bodies.
 - The contract documents should track `schemaVersion` and compatibility expectations per bounded context.
 
 ## Representative Event Payloads
@@ -179,7 +190,8 @@ This keeps Kafka-heavy saga flows explicit without polluting the domain event ca
       "playerId": "p1",
       "matchWins": 2,
       "cumulativeCardPoints": 12,
-      "finalGameCompletedAt": "2026-05-17T12:00:00Z"
+      "finalGameCompletedAt": "2026-05-17T12:00:00Z",
+      "forfeited": false
     }
   ],
   "forfeits": [],
@@ -188,19 +200,28 @@ This keeps Kafka-heavy saga flows explicit without polluting the domain event ca
 }
 ```
 
-`room.game.completed` is produced by Room Gameplay and consumed by Ranking only for casual Elo when `roomType=ad_hoc` and `isAbandoned=false`.
+`room.game.completed` is produced by Room Gameplay and consumed by Ranking only for casual Elo when `roomType=ad_hoc` and `isAbandoned=false`. The Ranking bridge body requires authoritative participants (placement, card points, outcome), not winner-only facts.
 
 ```json
 {
   "eventId": "evt_...",
   "eventType": "GameCompleted",
   "schemaVersion": 1,
+  "correlationId": "corr_...",
+  "commandId": "cmd_...",
   "roomId": "room_123",
   "gameId": "game_456",
   "roomType": "ad_hoc",
   "completionReason": "normal",
   "isAbandoned": false,
+  "authoritative": true,
+  "completed": true,
   "placementOrder": ["p1", "p2", "p3"],
+  "participants": [
+    {"playerId": "p1", "placement": 1, "cardPoints": 0, "outcome": "won"},
+    {"playerId": "p2", "placement": 2, "cardPoints": 12, "outcome": "placed"},
+    {"playerId": "p3", "placement": 3, "cardPoints": 40, "outcome": "placed"}
+  ],
   "occurredAt": "2026-05-17T12:00:01Z"
 }
 ```
@@ -251,10 +272,31 @@ This keeps Kafka-heavy saga flows explicit without polluting the domain event ca
 }
 ```
 
+Uno window facts on player and spectator-safe streams expose absolute UTC `expiresAt` and `openingSequence` (the opening room sequence). They travel with the accepted gameplay publication that opened the window (for example after `CardPlayed`), not as a separate Game Integrity-only concern. CLI countdown is advisory; the server exclusively decides timeliness. Spectator ingest may accept `openingRoomSequence` as an alias; producers emit `openingSequence`.
+
+```json
+{
+  "eventId": "evt_...",
+  "eventType": "CardPlayed",
+  "schemaVersion": 1,
+  "roomId": "room_123",
+  "gameId": "game_456",
+  "roomSequence": 42,
+  "unoWindow": {
+    "playerId": "p1",
+    "triggeringGameEventId": "evt_play_...",
+    "openingSequence": 42,
+    "expiresAt": "2026-05-17T12:00:09Z"
+  },
+  "occurredAt": "2026-05-17T12:00:04Z"
+}
+```
+
 ## Reliability Rules
 
 - Commands must be idempotent at the envelope layer.
 - Existing room mutations must be sequence-checked.
+- Rejected commands emit structured operational/security audit records only; they never publish domain events or append Game Integrity entries.
 - Duplicate event delivery must be safe for consumers.
 - Projection rebuilds must be possible from authoritative upstream facts.
 

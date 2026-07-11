@@ -1,3 +1,10 @@
+{{- /*
+  BLOCKED: analytics binary does not implement a
+  WORKER_ROLE=analytics-projection-rebuilder loop, and production ClickHouse/Kafka
+  rebuild adapters are absent. Default/staging/production keep
+  projectionRebuilder.enabled=false so Helm does not launch a duplicate HTTP server.
+*/ -}}
+{{- if .Values.projectionRebuilder.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,9 +29,29 @@ spec:
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
-            - name: API_URL
-              value: {{ .Values.env.API_URL | quote }}
             - name: WORKER_ROLE
               value: "analytics-projection-rebuilder"
+            - name: CLICKHOUSE_URL
+              value: {{ .Values.env.CLICKHOUSE_URL | quote }}
+            - name: CLICKHOUSE_DB
+              value: {{ .Values.env.CLICKHOUSE_DB | quote }}
+            {{- if .Values.existingSecret }}
+            - name: ANALYTICS_OPS_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ index .Values.secretEnv "ANALYTICS_OPS_CREDENTIAL" | quote }}
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ index .Values.secretEnv "CLICKHOUSE_USER" | quote }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ index .Values.secretEnv "CLICKHOUSE_PASSWORD" | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

@@ -2,6 +2,75 @@
 
 This changelog records design-package updates made while shaping the architecture checkpoint. It is limited to changes that affect traceability between the original design deliverables and the architecture.
 
+## Final Contract-Review Corrections
+
+- `contracts/openapi/bff-v1.yaml` - Documented `GET /ready`; removed impossible command HTTP `409` (domain rejection is `200` + `status=rejected`); added actual auth/command/stream/read `429`/`502` responses; `schemaVersion` enum `1`; SSE terminals documented as `RoomCompleted`/`RoomCancelled` without an unemitted spectator-safe `SpectatorStreamsClose` claim.
+- `contracts/asyncapi/kafka-v1.yaml` - Aligned `RoomFeedEvent.sequenceNumber` with producers; clarified Room→Analytics offline transforms (`GameCompleted`→`GameplayMetric` rewrite vs `room.gameplay.metrics`); removed unemitted spectator `SpectatorStreamsClose` eventType claim; added `tournament.completed` and `ranking.leaderboard_snapshot_published` channels/schemas.
+- `services/identity` - SessionInvalidated HTTP control body matches Gateway versioned contract (`schemaVersion=1`, stable outbox `eventId`, `eventType`, path/body `sessionId`, reason when present).
+- `client-checkpoint/**` - Advisory countdown accepts canonical `openingSequence` and legacy `openingRoomSequence`; `schemaVersion` must equal `1`; `--json` only meaningful for countdown; tests assert real `openingSequence` field.
+- `Makefile` - `validate-yaml` includes `docker-compose.capability.yml`.
+- `README.md`, room Helm values comments - Configured-mode readiness always blocked until Postgres adapter; credential matrix notes clarified.
+- `docs/architecture/02-bounded-context-architecture.md`, `03-communication-patterns.md` - AsyncAPI is Kafka-only; SSE framing belongs in OpenAPI; topic lists include tournament/ranking completion/snapshot channels.
+
+## Settled Uno Challenge Semantics Lock-In
+
+- `docs/01-domain-glossary.md` - Deliverable 1: Challenge Window now states the settled rule — successful `CallUno` closes/resolves the window; later `ReportMissingUno` is rejected inactive with no challenger penalty/facts; valid challenges still make the target draw 2.
+- `docs/raw/Design Assignment.md` - Raw Challenge Window (and scenario) wording updated to the same settled rule; the earlier “invalid challenge → challenger draws 2” deviation is marked superseded.
+- `docs/03-aggregates-entities-value-objects.md` - Deliverable 3: replaced the stale “invalid challenger draws 2” claim with settled behavior — successful `CallUno` closes/resolves the window; later `ReportMissingUno` is rejected inactive with no challenger penalty; valid challenges still apply `cardsDrawn=2` to the target.
+- `docs/04-commands-and-domain-events.md` - Deliverable 4: documented `CallUno` window resolution, post-call/`ReportMissingUno` rejection with no facts, and rejection catalog coverage for inactive challenges.
+- `docs/05-domain-event-flow-narratives.md` - Deliverable 5: clarified that `CallUno` is a window-closing path alongside expiry and turn advance.
+- `docs/06-edge-cases-and-failure-path-analysis.md` - Deliverable 6 §8.1: recorded post-`CallUno` challenge rejection without challenger draw penalty.
+- `services/room-gameplay/src/game` - Removed unreachable `HasCalled` challenger-penalty branch from `ReportMissingUno` (window already closed after `CallUno`); valid missing-Uno target draw-2 retained.
+
+No Design Checkpoint non-negotiable guarantee was weakened or dropped. The 5-second Uno window, server-authoritative timeliness, and 2-card penalty on a valid missing-Uno challenge remain; only the unreachable post-call challenger-penalty wording/code was corrected to match close-on-`CallUno` reject semantics.
+
+## Settled Interface Sync and Capability Implementation Status
+
+- `contracts/openapi/bff-v1.yaml` - Added BFF `GET /v1/rooms/{roomId}/snapshot` and `GET /v1/spectator/rooms/{roomId}/snapshot` with player/spectator snapshot schemas; player hand/`discardTop` use camelCase `Card` DTOs (`id`/`color`/`face`); documented SSE `409 snapshot_required`; recorded SessionBearer security requirements and spectator invalid-token `401`; recorded CLI-as-sole-client and rejection-audit-only notes on the BFF surface. Modeled SSE accurately: `id`/`event` are wire fields, `schemaVersion` is injected inside the JSON `data` body; listed applicable stream `400`/`401`/`409`/`429`/`502` without overclaiming wire exactness.
+- `contracts/asyncapi/kafka-v1.yaml` - Declared the production Kafka envelope authoritative; documented offline HTTP bridge as a destination-specific transform (not identical body) with canonical metadata/field mappings; aligned `GameCompleted` / `MatchCompleted` / Uno window schemas (`participants`, `authoritative`, `completed`, `openingSequence`); fixed GameplayMetric visibility spelling to canonical `anonymized_adhoc`.
+- `services/gateway` - Capability upstream readiness probes hit `/ready` (never `/health`); upstream not-ready blocks gateway `/ready`.
+- `services/room-gameplay` - `game.Card` marshals camelCase `id`/`color`/`face` to match OpenAPI player snapshot DTOs.
+- `README.md`, `client-checkpoint/README.md` - Documented CLI as sole capability interface with GUI deferred; snapshot routes and `409 snapshot_required`; capability mode (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE`) vs fake backends; cross-chart credential equality matrix without hardcoded secrets; Service port 8080; worker Deployments disabled pending `WORKER_ROLE` loops.
+- `docker-compose.capability.yml`, `.env.example` - Capability overlay uses real-service capability modes + GI explicit memory (not `ALLOW_FAKES` backend fakes).
+- `services/*/helm/**` - Service port 8080; peer URLs on `:8080`; timer/provisioning/rebuilder `enabled: false` by default/staging/production; readiness comments state Gateway Redis, Room Postgres, and GI EventStore intentionally block staging/production until durable adapters exist.
+- `docs/08-open-questions-and-assumptions.md`, `docs/architecture/00-overview-and-traceability.md`, `01-context-and-container-view.md`, `02-bounded-context-architecture.md`, `03-communication-patterns.md`, `04-persistence-by-context.md`, `06-cross-cutting-concerns.md` - Preserved settled architecture/technology requirements while recording snapshot/SSE contracts, spectator admission, absolute `expiresAt`/`openingSequence`, rejection audit-only, Kafka-authoritative vs HTTP-transform wording, and offline-vs-production adapter status.
+
+### Capability implementation status (docs claim)
+
+| Capability | Status in this checkpoint |
+| --- | --- |
+| BFF REST command envelopes + SSE (player/spectator/control) | Implemented (gateway; capability mode uses real HTTP upstreams) |
+| BFF player/spectator snapshot routes + `409 snapshot_required` | Implemented; OpenAPI synchronized (`Card` DTOs + auth/`401`) |
+| CLI as sole client/test interface; GUI deferred | Documented and enforced as scope |
+| Rejected-command operational/security audit records only | Implemented and documented |
+| Spectator admission `waiting`/`locked`/`in_progress`; terminal close on `RoomCompleted`/`RoomCancelled` | Implemented and documented |
+| Absolute UTC Uno `expiresAt` + `openingSequence` | Implemented and documented |
+| Room completion event names + canonical fields (`GameCompleted`, `MatchCompleted`, spectator-safe) | Kafka envelope authoritative in AsyncAPI; offline HTTP bridge is a documented transform (not identical body); Kafka adapters **not** claimed wired |
+| Production Postgres adapters | Required; **not** implemented — Room configured-mode `/ready` is always `postgres_adapter_blocked` until a durable Postgres session adapter exists (`DATABASE_URL` does not unblock); staging/production rollout blocked |
+| Production Kafka adapters | Required; **not** implemented — offline HTTP bridges only |
+| Production Redis adapters | Required; **not** implemented — Gateway `/ready` stays not-ready with `REDIS_URL` and no rate-limit adapter; staging/production rollout blocked |
+| Production EventStoreDB adapter | Required; **not** implemented — capability overlay uses explicit memory; with `EVENTSTORE_URL` set, `/ready` reports `eventstore_adapter_blocked`; staging/production rollout blocked |
+| Production ClickHouse adapter | Required; **not** claimed implemented (offline memory analytics store) |
+| Helm worker Deployments (timer / provisioning / projection-rebuilder) | **Blocked / disabled** (`enabled: false`) — binaries do not implement `WORKER_ROLE` loops; production worker adapters absent |
+
+No Design Checkpoint non-negotiable guarantee was weakened or dropped. `/ready` is not weakened to fake production readiness.
+
+## Product Decisions from Grilling and Implementation-Client Scope
+
+- `docs/08-open-questions-and-assumptions.md` - Deliverable 8: moved the four previously open product questions into validated requirements, recorded the CLI-only client scope, and left no residual open wording for those items.
+- `docs/01-domain-glossary.md` - Deliverable 1: clarified Host pre-start authority, spectator admission against room/match terminal state, Uno window `expiresAt` plus room sequence, and command-rejection operational/security audit records.
+- `docs/02-bounded-contexts-and-context-map.md` - Deliverable 2: documented spectator admission for `waiting`/`locked`/`in_progress`, terminal stream closure on `RoomCompleted`/`RoomCancelled`, and rejection-audit vs Game Integrity separation.
+- `docs/03-aggregates-entities-value-objects.md` - Deliverable 3: added Room invariants for deterministic ad-hoc host reassignment, immediate empty-room cancel, post-lock host authority loss, and published Uno `expiresAt`.
+- `docs/04-commands-and-domain-events.md` - Deliverable 4: recorded rejection outcomes as structured operational/security audit records only, host-leave causality, and Uno window publication of absolute UTC `expiresAt` with room sequence.
+- `docs/05-domain-event-flow-narratives.md` - Deliverable 5: added host-leave and spectator-admission narratives and clarified server-authoritative Uno deadline correction via SSE/command results.
+- `docs/06-edge-cases-and-failure-path-analysis.md` - Deliverable 6: replaced ambiguous host-timeout wording with deterministic lowest-seat host reassignment and immediate cancel when empty; aligned rejection and spectator edge cases with the settled decisions.
+- `docs/07-consistency-and-recovery-strategy.md` - Deliverable 7: aligned recovery and invariant checks with rejection-audit records and absolute UTC Uno deadlines.
+- `docs/architecture/00-overview-and-traceability.md`, `01-context-and-container-view.md`, `02-bounded-context-architecture.md`, `03-communication-patterns.md`, `06-cross-cutting-concerns.md`, `07-sequence-diagrams.md` - Architecture package: recorded CLI-as-sole-client scope without changing the BFF-only boundary, spectator admission/terminal closure, rejection audit fields, host reassignment, and advisory client countdown semantics.
+- `README.md` - Root index: noted the settled product decisions and CLI-only implementation-client scope.
+- `client-checkpoint/README.md` - Client checkpoint: stated that the repo-owned simple CLI is the sole client/test interface for this implementation; graphical UI is deferred.
+
+No Design Checkpoint non-negotiable guarantee was weakened or dropped. Rejected commands still do not mutate domain state or append Game Integrity entries; Spectator View remains privacy-filtered; Room Gameplay remains the owner of Uno and reconnect deadlines; and clients still reach the platform only through the BFF.
+
 ## DevOps Checkpoint Boundary Preservation
 
 The DevOps Checkpoint preserves the Architecture Checkpoint service boundaries unchanged: its eight service placeholders map one-to-one to the architecture services and introduce no new bounded contexts or shared platform service.

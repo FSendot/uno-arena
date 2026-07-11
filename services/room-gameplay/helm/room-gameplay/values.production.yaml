@@ -1,7 +1,22 @@
 replicaCount: 2
 
 env:
-  API_URL: https://unoarena.example.com
+  GATEWAY_URL: http://gateway.uno-arena.svc.cluster.local:8080
+  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
+  SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
+  RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
+  ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
+  TOURNAMENT_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080
+  GAME_INTEGRITY_URL: http://game-integrity.uno-arena.svc.cluster.local:8080
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  # Production configured-mode rollout blocked: /ready always postgres_adapter_blocked
+  # until a durable Postgres session adapter exists (DATABASE_URL does not unblock).
+
+timerWorker:
+  enabled: false
+
+existingSecret: room-gameplay-secrets
 
 resources:
   requests:
