@@ -1,6 +1,6 @@
 test:game-integrity:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/game-integrity/src && go vet ./... && go test ./...
   rules: &game_integrity_validation_rules
@@ -8,17 +8,19 @@ test:game-integrity:
       changes:
         - services/game-integrity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/game-integrity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "game-integrity")'
 
 build:game-integrity:
   stage: build
   needs: ["test:game-integrity"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/game-integrity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/game-integrity/
+    - docker build -f services/game-integrity/Dockerfile -t $CI_REGISTRY_IMAGE/game-integrity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *game_integrity_validation_rules
 
 deliver:game-integrity:
@@ -39,6 +41,7 @@ deliver:game-integrity:
       changes:
         - services/game-integrity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "game-integrity")'
 
 deploy-staging:game-integrity:

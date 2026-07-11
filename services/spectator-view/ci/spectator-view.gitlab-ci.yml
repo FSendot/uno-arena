@@ -1,6 +1,6 @@
 test:spectator-view:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/spectator-view/src && go vet ./... && go test ./...
   rules: &spectator_view_validation_rules
@@ -8,11 +8,13 @@ test:spectator-view:
       changes:
         - services/spectator-view/**
         - ci/templates/**
+        - .dockerignore
         - services/room-gameplay/contracts/**
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/spectator-view/**
         - ci/templates/**
+        - .dockerignore
         - services/room-gameplay/contracts/**
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "spectator-view")'
 
@@ -20,7 +22,7 @@ build:spectator-view:
   stage: build
   needs: ["test:spectator-view"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/spectator-view:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/spectator-view/
+    - docker build -f services/spectator-view/Dockerfile -t $CI_REGISTRY_IMAGE/spectator-view:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *spectator_view_validation_rules
 
 deliver:spectator-view:
@@ -41,6 +43,7 @@ deliver:spectator-view:
       changes:
         - services/spectator-view/**
         - ci/templates/**
+        - .dockerignore
         - services/room-gameplay/contracts/**
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "spectator-view")'
 

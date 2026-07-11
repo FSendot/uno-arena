@@ -1,6 +1,6 @@
 test:identity:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/identity/src && go vet ./... && go test ./...
   rules: &identity_validation_rules
@@ -8,17 +8,19 @@ test:identity:
       changes:
         - services/identity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/identity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
 
 build:identity:
   stage: build
   needs: ["test:identity"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/identity/
+    - docker build -f services/identity/Dockerfile -t $CI_REGISTRY_IMAGE/identity:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *identity_validation_rules
 
 deliver:identity:
@@ -46,6 +48,7 @@ deliver:identity:
       changes:
         - services/identity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
 
 deploy-staging:identity:
@@ -71,11 +74,12 @@ deploy-staging:identity:
       changes:
         - services/identity/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "identity")'
 
 integration-staging:identity:
   stage: integration-staging
-  image: alpine:3.19
+  image: alpine:3.24.1
   needs: ["deploy-staging:identity"]
   retry: 1
   variables:

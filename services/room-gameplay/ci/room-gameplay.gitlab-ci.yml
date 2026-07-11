@@ -1,24 +1,30 @@
 test:room-gameplay:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/room-gameplay/src && go vet ./... && go test ./...
   rules: &room_gameplay_validation_rules
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
       changes:
         - services/room-gameplay/**
+        - shared/**
+        - services/spectator-view/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/room-gameplay/**
+        - shared/**
+        - services/spectator-view/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "room-gameplay")'
 
 build:room-gameplay:
   stage: build
   needs: ["test:room-gameplay"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/room-gameplay:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/room-gameplay/
+    - docker build -f services/room-gameplay/Dockerfile -t $CI_REGISTRY_IMAGE/room-gameplay:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *room_gameplay_validation_rules
 
 deliver:room-gameplay:
@@ -38,7 +44,10 @@ deliver:room-gameplay:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/room-gameplay/**
+        - shared/**
+        - services/spectator-view/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "room-gameplay")'
 
 deploy-staging:room-gameplay:

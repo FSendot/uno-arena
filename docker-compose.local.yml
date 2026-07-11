@@ -1,6 +1,15 @@
 # Local topology skeleton for UnoArena (architecture mode).
 # Image tags come from .env / environment (see .env.example). Do not assume :latest.
-# Only the BFF (gateway) publishes a host port. All other services stay on the private network.
+# Networking: gateway attaches to a non-internal edge bridge (host publish) and to
+# the internal private bridge (interservice). Backends and infra stay on private
+# only — never on edge. A container attached only to an internal network does not
+# materialize NetworkSettings.Ports even when HostConfig.PortBindings is set.
+#
+# Postgres 18+ official images mount the named volume at /var/lib/postgresql (not
+# .../data). Named volumes use explicit *_v18 keys so prior PG16 volumes
+# (pg_*_data without _v18) stay preserved and are never silently reused. Reset =
+# new empty *_v18 volumes; migrate = dump/restore into *_v18. Do not delete
+# volumes from this file.
 #
 # Probes: compose healthcheck maps to readiness (/ready). Liveness is /health in Helm only.
 # Base mode keeps Redis/Postgres/Kafka/EventStore/ClickHouse wired and does NOT set
@@ -9,23 +18,28 @@
 # Gateway stays not-ready without a Redis rate-limit adapter; Room stays not-ready
 # without a Postgres session adapter; Game Integrity stays not-ready while
 # EVENTSTORE_URL is set (adapter blocked). For CLI capability mode (real HTTP paths,
-# GI explicit memory):
+# GI explicit memory; EventStore omitted via capability overlay profile):
 #   docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example config
 
 name: uno-arena-local
 
 networks:
+  # Non-internal edge: required for host port publish (NetworkSettings.Ports).
+  # Only gateway attaches here.
+  uno_edge:
+    driver: bridge
+    name: uno-arena-edge
+  # Private core: internal (no host publish / no egress). All services including gateway.
   uno_private:
     driver: bridge
-    # Private core network: no egress. Only gateway publishes a host port.
     internal: true
     name: uno-arena-private
 
 volumes:
-  pg_identity_data:
-  pg_room_data:
-  pg_tournament_data:
-  pg_ranking_data:
+  pg_identity_data_v18:
+  pg_room_data_v18:
+  pg_tournament_data_v18:
+  pg_ranking_data_v18:
   kafka_data:
   eventstore_data:
   redis_data:
@@ -40,13 +54,13 @@ x-app-healthcheck: &app_ready
 
 services:
   postgres-identity:
-    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    image: ${POSTGRES_IMAGE:-postgres:18.4-alpine3.24}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-uno}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
       POSTGRES_DB: identity
     volumes:
-      - pg_identity_data:/var/lib/postgresql/data
+      - pg_identity_data_v18:/var/lib/postgresql
     networks: [uno_private]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d identity"]
@@ -55,13 +69,13 @@ services:
       retries: 10
 
   postgres-room-gameplay:
-    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    image: ${POSTGRES_IMAGE:-postgres:18.4-alpine3.24}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-uno}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
       POSTGRES_DB: room_gameplay
     volumes:
-      - pg_room_data:/var/lib/postgresql/data
+      - pg_room_data_v18:/var/lib/postgresql
     networks: [uno_private]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d room_gameplay"]
@@ -70,13 +84,13 @@ services:
       retries: 10
 
   postgres-tournament:
-    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    image: ${POSTGRES_IMAGE:-postgres:18.4-alpine3.24}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-uno}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
       POSTGRES_DB: tournament
     volumes:
-      - pg_tournament_data:/var/lib/postgresql/data
+      - pg_tournament_data_v18:/var/lib/postgresql
     networks: [uno_private]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d tournament"]
@@ -85,13 +99,13 @@ services:
       retries: 10
 
   postgres-ranking:
-    image: ${POSTGRES_IMAGE:-postgres:16.3-alpine}
+    image: ${POSTGRES_IMAGE:-postgres:18.4-alpine3.24}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-uno}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-uno}
       POSTGRES_DB: ranking
     volumes:
-      - pg_ranking_data:/var/lib/postgresql/data
+      - pg_ranking_data_v18:/var/lib/postgresql
     networks: [uno_private]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d ranking"]
@@ -100,7 +114,7 @@ services:
       retries: 10
 
   kafka:
-    image: ${KAFKA_IMAGE:-apache/kafka:3.8.0}
+    image: ${KAFKA_IMAGE:-apache/kafka:4.3.1}
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -125,7 +139,7 @@ services:
       start_period: 20s
 
   eventstore:
-    image: ${EVENTSTORE_IMAGE:-eventstore/eventstore:24.10.0-bookworm-slim}
+    image: ${EVENTSTORE_IMAGE:-eventstore/eventstore:24.10.14}
     environment:
       EVENTSTORE_CLUSTER_SIZE: 1
       EVENTSTORE_RUN_PROJECTIONS: None
@@ -143,7 +157,7 @@ services:
       start_period: 15s
 
   redis:
-    image: ${REDIS_IMAGE:-redis:7.2.5-alpine}
+    image: ${REDIS_IMAGE:-redis:8.8.0-alpine}
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     volumes:
       - redis_data:/data
@@ -155,7 +169,7 @@ services:
       retries: 10
 
   clickhouse:
-    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8.4}
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:26.6.1.1193}
     environment:
       CLICKHOUSE_DB: analytics
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-uno}
@@ -174,8 +188,8 @@ services:
   gateway:
     image: ${GATEWAY_IMAGE:-uno-arena/gateway:local}
     build:
-      context: ./services/gateway
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/gateway/Dockerfile
     environment:
       SERVICE_NAME: gateway
       IDENTITY_URL: http://identity:8080
@@ -192,7 +206,8 @@ services:
       KAFKA_BROKERS: kafka:9092
     ports:
       - "${BFF_HOST_PORT:-8080}:8080"
-    networks: [uno_private]
+    # Edge for host publish; private for interservice. Never attach backends to edge.
+    networks: [uno_edge, uno_private]
     # Infra only here to avoid cycles with Identity/Room/Tournament URL peers.
     # Base architecture mode leaves Gateway not-ready (Redis rate-limit adapter
     # unimplemented; GATEWAY_CAPABILITY_MODE / GATEWAY_ALLOW_FAKES unset).
@@ -207,8 +222,8 @@ services:
   identity:
     image: ${IDENTITY_IMAGE:-uno-arena/identity:local}
     build:
-      context: ./services/identity
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/identity/Dockerfile
     environment:
       SERVICE_NAME: identity
       IDENTITY_INTERNAL_CREDENTIAL: ${IDENTITY_INTERNAL_CREDENTIAL:-local-gw-backend}
@@ -230,8 +245,8 @@ services:
   room-gameplay:
     image: ${ROOM_GAMEPLAY_IMAGE:-uno-arena/room-gameplay:local}
     build:
-      context: ./services/room-gameplay
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/room-gameplay/Dockerfile
     environment:
       SERVICE_NAME: room-gameplay
       SERVICE_CREDENTIAL: ${ROOM_SERVICE_CREDENTIAL:-local-gw-backend}
@@ -273,8 +288,8 @@ services:
   game-integrity:
     image: ${GAME_INTEGRITY_IMAGE:-uno-arena/game-integrity:local}
     build:
-      context: ./services/game-integrity
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/game-integrity/Dockerfile
     environment:
       SERVICE_NAME: game-integrity
       # EVENTSTORE_URL present => readiness blocked (eventstore_adapter_blocked) until real adapter exists.
@@ -291,8 +306,8 @@ services:
   tournament-orchestration:
     image: ${TOURNAMENT_IMAGE:-uno-arena/tournament-orchestration:local}
     build:
-      context: ./services/tournament-orchestration
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/tournament-orchestration/Dockerfile
     environment:
       SERVICE_NAME: tournament-orchestration
       TOURNAMENT_INTERNAL_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-gw-backend}
@@ -314,8 +329,8 @@ services:
   ranking:
     image: ${RANKING_IMAGE:-uno-arena/ranking:local}
     build:
-      context: ./services/ranking
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/ranking/Dockerfile
     environment:
       SERVICE_NAME: ranking
       RANKING_INTERNAL_CREDENTIAL: ${RANKING_INTERNAL_CREDENTIAL:-local-ranking-internal}
@@ -335,8 +350,8 @@ services:
   spectator-view:
     image: ${SPECTATOR_VIEW_IMAGE:-uno-arena/spectator-view:local}
     build:
-      context: ./services/spectator-view
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/spectator-view/Dockerfile
     environment:
       SERVICE_NAME: spectator-view
       SPECTATOR_VIEW_INTERNAL_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-gw-backend}
@@ -353,8 +368,8 @@ services:
   analytics:
     image: ${ANALYTICS_IMAGE:-uno-arena/analytics:local}
     build:
-      context: ./services/analytics
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/analytics/Dockerfile
     environment:
       SERVICE_NAME: analytics
       ANALYTICS_ROOM_CREDENTIAL: ${ANALYTICS_ROOM_CREDENTIAL:-local-analytics-room}

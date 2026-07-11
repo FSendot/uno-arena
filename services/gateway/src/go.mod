@@ -1,6 +1,8 @@
 module unoarena/services/gateway
 
-go 1.22
+go 1.26.0
+
+toolchain go1.26.5
 
 require unoarena/shared v0.0.0
 

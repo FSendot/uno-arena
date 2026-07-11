@@ -1,24 +1,28 @@
 test:tournament-orchestration:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/tournament-orchestration/src && go vet ./... && go test ./...
   rules: &tournament_orchestration_validation_rules
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
       changes:
         - services/tournament-orchestration/**
+        - shared/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/tournament-orchestration/**
+        - shared/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "tournament-orchestration")'
 
 build:tournament-orchestration:
   stage: build
   needs: ["test:tournament-orchestration"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/tournament-orchestration:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/tournament-orchestration/
+    - docker build -f services/tournament-orchestration/Dockerfile -t $CI_REGISTRY_IMAGE/tournament-orchestration:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *tournament_orchestration_validation_rules
 
 deliver:tournament-orchestration:
@@ -38,7 +42,9 @@ deliver:tournament-orchestration:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/tournament-orchestration/**
+        - shared/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "tournament-orchestration")'
 
 deploy-staging:tournament-orchestration:

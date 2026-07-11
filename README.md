@@ -78,15 +78,30 @@ make check
 make fmt-shared test-shared validate-yaml
 ```
 
-Local Compose topology (BFF published on host; other services private). Copy `.env.example` before overriding image tags:
+Verified runtime pins (as of 2026-07-11; see `.env.example` and service Dockerfiles/CI): Go `1.26.0` with toolchain `go1.26.5`; builders `golang:1.26.5-alpine3.24`; runtime/CI Alpine `3.24.1`; local infra `postgres:18.4-alpine3.24`, `apache/kafka:4.3.1`, `eventstore/eventstore:24.10.14`, `redis:8.8.0-alpine`, `clickhouse/clickhouse-server:26.6.1.1193`. OpenAPI 3.0.3 / AsyncAPI 2.6.0 / JSON Schema draft stay unchanged (contract migrations, not runtime pins).
+
+Local Compose topology uses two bridges: a non-internal **edge** network (`uno_edge`, only gateway) for host port publish, and an **internal private** network (`uno_private`, all services including gateway) for interservice traffic. Backends and infra must not attach to edge — a container on an internal-only network does not materialize `NetworkSettings.Ports` even when `HostConfig.PortBindings` is set. The capability overlay project-scopes both network names (`<project>_edge` / `<project>_private`) for `docker compose -p` isolation. Copy `.env.example` before overriding image tags. Postgres 18 uses named volumes `pg_*_data_v18` mounted at `/var/lib/postgresql`; prior PG16 volumes (`pg_*_data`) stay preserved and are not reused — reset with empty `*_v18` volumes or migrate via dump/restore (compose does not delete volumes). `eventstore/eventstore:24.10.14` is amd64-only and remains in base architecture mode; the capability overlay profiles it out (`architecture-eventstore`) because GI uses explicit memory:
 
 ```bash
 cp .env.example .env
 docker compose -f docker-compose.local.yml --env-file .env config
-# capability overlay (real HTTP paths; GI memory):
+# capability overlay (real HTTP paths; GI memory; EventStore omitted):
 docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env config
+docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env config --services
+make validate-yaml validate-compose test-compose-topology
 # start when images are already available / built locally (this slice does not pull):
 # docker compose -f docker-compose.local.yml --env-file .env up -d --no-build
+```
+
+Service images build from the **repository root** context (`docker build -f services/<svc>/Dockerfile .`) so local `replace` modules resolve (`shared` for gateway/tournament; `shared` + spectator-view for room-gameplay). Compose `build.context` is `.` for every service. `GOWORK=off` and `CGO_ENABLED=0` produce static binaries; Go/Alpine pins stay at the verified versions above.
+
+Repeatable capability integration (isolated compose project, CLI/BFF only;
+teardown only for stacks this harness started):
+
+```bash
+make test-capability-stack
+# KEEP_STACK=1 make test-capability-stack   # leave harness-started stack up
+# CAP_SKIP_UP=1 UNOARENA_API_URL=http://127.0.0.1:8080 make test-capability-stack
 ```
 
 Contracts live under `contracts/openapi/bff-v1.yaml` and `contracts/asyncapi/kafka-v1.yaml`. Shared stdlib helpers live under `shared/`. Context-owned migrations live under `services/*/migrations/`.

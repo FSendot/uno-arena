@@ -1,6 +1,6 @@
 test:analytics:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/analytics/src && go vet ./... && go test ./...
   rules: &analytics_validation_rules
@@ -8,17 +8,19 @@ test:analytics:
       changes:
         - services/analytics/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/analytics/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "analytics")'
 
 build:analytics:
   stage: build
   needs: ["test:analytics"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/analytics:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/analytics/
+    - docker build -f services/analytics/Dockerfile -t $CI_REGISTRY_IMAGE/analytics:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *analytics_validation_rules
 
 deliver:analytics:
@@ -39,6 +41,7 @@ deliver:analytics:
       changes:
         - services/analytics/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "analytics")'
 
 deploy-staging:analytics:

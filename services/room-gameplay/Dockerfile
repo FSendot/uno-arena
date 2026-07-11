@@ -1,10 +1,17 @@
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
-COPY src/ .
-RUN go build -o service .
+# Build from repository root:
+#   docker build -f services/room-gameplay/Dockerfile -t uno-arena/room-gameplay:local .
+FROM golang:1.26.5-alpine3.24 AS builder
+WORKDIR /src
+COPY services/room-gameplay/src/ ./services/room-gameplay/src/
+COPY shared/ ./shared/
+COPY services/spectator-view/src/ ./services/spectator-view/src/
+WORKDIR /src/services/room-gameplay/src
+ENV GOWORK=off
+ENV CGO_ENABLED=0
+RUN go build -o /service .
 
-FROM alpine:3.19
+FROM alpine:3.24.1
 WORKDIR /app
-COPY --from=builder /app/service .
+COPY --from=builder /service .
 EXPOSE 8080
 CMD ["./service"]

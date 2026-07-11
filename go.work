@@ -1,7 +1,8 @@
-go 1.22
+go 1.26.0
+
+toolchain go1.26.5
 
 use (
-	./shared
 	./services/analytics/src
 	./services/game-integrity/src
 	./services/gateway/src
@@ -10,4 +11,5 @@ use (
 	./services/room-gameplay/src
 	./services/spectator-view/src
 	./services/tournament-orchestration/src
+	./shared
 )

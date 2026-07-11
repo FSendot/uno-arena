@@ -1,6 +1,6 @@
 test:ranking:
   stage: test
-  image: golang:1.22-alpine
+  image: golang:1.26.5-alpine3.24
   script:
     - cd services/ranking/src && go vet ./... && go test ./...
   rules: &ranking_validation_rules
@@ -8,17 +8,19 @@ test:ranking:
       changes:
         - services/ranking/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
         - services/ranking/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "ranking")'
 
 build:ranking:
   stage: build
   needs: ["test:ranking"]
   script:
-    - docker build -t $CI_REGISTRY_IMAGE/ranking:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA services/ranking/
+    - docker build -f services/ranking/Dockerfile -t $CI_REGISTRY_IMAGE/ranking:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA .
   rules: *ranking_validation_rules
 
 deliver:ranking:
@@ -39,6 +41,7 @@ deliver:ranking:
       changes:
         - services/ranking/**
         - ci/templates/**
+        - .dockerignore
     - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "main" && ($RUN_SERVICE == null || $RUN_SERVICE == "" || $RUN_SERVICE == "all" || $RUN_SERVICE == "ranking")'
 
 deploy-staging:ranking:

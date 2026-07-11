@@ -119,6 +119,75 @@ Ephemeral stdlib fake gateway (no persistent servers, no external packages):
 ./client-checkpoint/tests/run-tests.sh
 ```
 
+## Capability stack integration harness
+
+Repeatable Docker Compose integration against the capability overlay
+(`docker-compose.local.yml` + `docker-compose.capability.yml`). Speaks only to the
+CLI/BFF edge. Requires `bash`, `curl`, `python3`, and Docker (no `jq`, no GNU
+`timeout`).
+
+```bash
+make test-capability-stack
+# or:
+./client-checkpoint/tests/run-capability-stack.sh
+```
+
+Behavior:
+
+- Unique `docker compose -p` project name per run; capability overlay scopes
+  both `uno_edge` and `uno_private` network names to the project. Gateway
+  attaches to non-internal edge (host publish) plus internal private
+  (interservice); backends stay private-only. Gateway host port is a concrete
+  free localhost port by default (Python `socket` bind; override with
+  `CAP_BFF_HOST_PORT`). Bind conflicts retry with another free port — never
+  published `0` (Compose 5.x leaves HostPort unbound). After `compose up`, the
+  harness polls `compose ps` + `docker inspect` until the published host port
+  matches the selected nonzero port, up to `CAP_READY_TIMEOUT_S` (default 180s
+  in the harness; 60s in the helper alone). On failure it prints `compose ps`
+  diagnostics
+- Capability overlay omits EventStore (amd64-only); harness `up` uses resolved
+  `config --services` so EventStore is never selected (GI explicit memory)
+- Polls raw BFF `GET /health` before the first CLI call, then waits for `GET /ready`
+- Covers health/ready, register/login/whoami, session takeover with control SSE
+  subscribed first and exact `event: session_invalidated` + `data:` framing
+  (not a 401 JSON substring), public room create/join/lock/start, anonymous
+  spectator snapshots (`waiting`/`locked`/`in_progress`), spectator SSE
+  subscribed before `DrawCard` then exact canonical `event: SnapshotSanitized` +
+  non-empty `data:` (gateway forwards Room event type unchanged),
+  stale-sequence reject, tournament create/register/close with idempotent replay
+  (same-command-id responses compared on status/type/schemaVersion/sequenceNumber/payload),
+  leaderboard/analytics schema reads validated against
+  `fixtures/public-read-schema.json` (empty projections allowed), unknown
+  `Last-Event-ID` → `snapshot_required` (raw stream HTTP 409 + CLI evidence;
+  bounded so an open-SSE regression cannot hang), and `CancelRoom` as the deterministic
+  live representative of terminal spectator denial (raw stream HTTP 403 + CLI
+  evidence `403` or `spectator_denied`; no hang). `RoomCompleted` denial is
+  covered by existing room-gameplay / spectator-view domain and service tests —
+  this harness does not invent a nondeterministic full-game completion path
+- Background CLI streams run in their own process groups; trap cleanup reaps
+  descendants (pipelines / non-exec children) and is idempotent across INT→EXIT
+- Tears down with `down -v --remove-orphans` only for a stack this harness started
+- `KEEP_STACK=1` leaves a harness-started stack up (background PIDs are still reaped)
+- `CAP_SKIP_UP=1` reuses an existing stack at the caller’s `UNOARENA_API_URL`
+  (preserved; never synthesized). Does not tear down external projects/volumes
+  unless `CAP_TEARDOWN_EXTERNAL=1` and `CAP_COMPOSE_PROJECT` are set explicitly
+
+Helpers live under `client-checkpoint/tests/lib/`; schema fixtures under
+`client-checkpoint/tests/fixtures/` (used to validate live public-read responses,
+not merely asserted present on disk). Focused helper checks (no Docker stack):
+
+```bash
+./client-checkpoint/tests/test-capability-helpers.sh
+```
+
+Compose topology checks (resolved `config` only; no stack up):
+
+```bash
+make test-compose-topology
+# or:
+./client-checkpoint/tests/test-compose-topology.sh
+```
+
 ## GUI status
 
 Graphical UI is deferred. This CLI is the sole current client interface.

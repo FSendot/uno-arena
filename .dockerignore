@@ -1,0 +1,19 @@
+# Keep Docker build contexts small when building from the repository root.
+.git
+.cursor
+**/.DS_Store
+**/*_test.go
+**/testdata/
+docs/
+devops-checkpoint/
+client-checkpoint/
+contracts/
+*.md
+.env
+.env.*
+!.env.example
+go.work
+go.work.sum
+**/helm/
+**/ci/
+**/migrations/
