@@ -226,8 +226,9 @@ func (p *PlayerRating) ApplyCasualEloUpdate(cmd ApplyCasualEloUpdateCommand) Com
 	return out
 }
 
-// ApplyTournamentPlacementUpdate updates tournament placement rating from placement/final standing facts.
-// Never mutates casual Elo.
+// ApplyTournamentPlacementUpdate updates tournament placement rating from advancement/final facts.
+// Ranking computes the non-negative award from reason + round/placement. Never mutates casual Elo.
+// Zero awards still record history and emit a zero-delta PlayerRatingUpdated fact.
 func (p *PlayerRating) ApplyTournamentPlacementUpdate(cmd ApplyTournamentPlacementUpdateCommand) CommandOutcome {
 	if prior, ok := p.outcomes[cmd.CommandID]; ok {
 		return duplicateOutcome(prior)
@@ -256,29 +257,46 @@ func (p *PlayerRating) ApplyTournamentPlacementUpdate(cmd ApplyTournamentPlaceme
 			Message: "command playerId does not match aggregate",
 		})
 	}
-	if cmd.Placement < 1 {
-		return p.reject(cmd.CommandID, Rejection{
-			Code:    RejectInvalidPlacement,
-			Message: "placement must be >= 1",
-		})
-	}
 	reason := cmd.Reason
 	if reason == "" {
-		reason = ReasonTournamentPlacement
-	}
-	if reason != ReasonTournamentPlacement && reason != ReasonTournamentFinalStanding {
 		return p.reject(cmd.CommandID, Rejection{
 			Code:    RejectInvalidCommand,
-			Message: "reason must be tournament_placement or tournament_final_standing",
+			Message: "reason must be tournament_advancement or tournament_final_standing",
+		})
+	}
+	if reason != ReasonTournamentAdvancement && reason != ReasonTournamentFinalStanding {
+		return p.reject(cmd.CommandID, Rejection{
+			Code:    RejectInvalidCommand,
+			Message: "reason must be tournament_advancement or tournament_final_standing",
+		})
+	}
+
+	award, err := ComputeTournamentAward(reason, cmd.Placement, cmd.RoundNumber)
+	if err != nil {
+		code := RejectInvalidCommand
+		if reason == ReasonTournamentFinalStanding && (cmd.Placement < 1 || cmd.Placement > len(TournamentFinalStandingAwards)) {
+			code = RejectInvalidPlacement
+		}
+		if reason == ReasonTournamentAdvancement && cmd.RoundNumber < 1 {
+			code = RejectInvalidPlacement
+		}
+		return p.reject(cmd.CommandID, Rejection{
+			Code:    code,
+			Message: err.Error(),
+		})
+	}
+	if award < 0 {
+		return p.reject(cmd.CommandID, Rejection{
+			Code:    RejectInvalidCommand,
+			Message: "tournament award cannot be negative",
 		})
 	}
 
 	previous := p.tournamentPlacementRating
-	next := ApplyFloor(previous+cmd.Delta, p.config.Floor)
+	next := ApplyFloor(previous+award, p.config.Floor)
 	appliedDelta := next - previous
 
-	p.tournamentPlacementRating = next
-	p.history = append(p.history, RatingHistoryEntry{
+	entry := RatingHistoryEntry{
 		SourceType:       SourceTournamentPlacement,
 		PreviousRating:   previous,
 		NewRating:        next,
@@ -287,8 +305,15 @@ func (p *PlayerRating) ApplyTournamentPlacementUpdate(cmd ApplyTournamentPlaceme
 		EventID:          cmd.EventID,
 		TournamentID:     cmd.TournamentID,
 		PlacementEventID: cmd.PlacementEventID,
-		Placement:        cmd.Placement,
-	})
+	}
+	if reason == ReasonTournamentAdvancement {
+		entry.AdvancementDepth = cmd.RoundNumber
+	} else {
+		entry.Placement = cmd.Placement
+	}
+
+	p.tournamentPlacementRating = next
+	p.history = append(p.history, entry)
 
 	fact := newFact(FactTournamentPlacementRatingUpdated, map[string]string{
 		"playerId":         string(p.playerID),
@@ -297,10 +322,14 @@ func (p *PlayerRating) ApplyTournamentPlacementUpdate(cmd ApplyTournamentPlaceme
 		"previousRating":   strconv.Itoa(previous),
 		"newRating":        strconv.Itoa(next),
 		"delta":            strconv.Itoa(appliedDelta),
-		"placement":        strconv.Itoa(cmd.Placement),
 		"sourceType":       string(SourceTournamentPlacement),
 		"reason":           string(reason),
 	})
+	if reason == ReasonTournamentAdvancement {
+		fact.Data["advancementDepth"] = strconv.Itoa(cmd.RoundNumber)
+	} else {
+		fact.Data["placement"] = strconv.Itoa(cmd.Placement)
+	}
 	if cmd.EventID.Valid() {
 		fact.Data["eventId"] = string(cmd.EventID)
 	}

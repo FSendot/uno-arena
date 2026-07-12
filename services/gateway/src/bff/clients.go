@@ -54,11 +54,19 @@ type RoomClient interface {
 	SubmitCommand(ctx context.Context, req CommandDispatch) (envelope.Result, error)
 	// PlayerSnapshot returns the authoritative player-private reconnect snapshot.
 	PlayerSnapshot(ctx context.Context, roomID, playerID string, corr correlation.Headers) (json.RawMessage, error)
+	// PublicList proxies GET /internal/v1/rooms/public-list with safe query params.
+	PublicList(ctx context.Context, rawQuery string, corr correlation.Headers) (json.RawMessage, error)
 }
 
-// TournamentClient dispatches tournament commands.
+// TournamentClient dispatches tournament commands and proxies tournament reads.
 type TournamentClient interface {
 	SubmitCommand(ctx context.Context, req CommandDispatch) (envelope.Result, error)
+	// Bracket proxies GET /v1/tournaments/{id}/bracket, forwarding rawQuery unchanged.
+	Bracket(ctx context.Context, tournamentID, rawQuery string, corr correlation.Headers, principal *Principal) (json.RawMessage, error)
+	// Standings proxies GET /v1/tournaments/{id}/standings.
+	Standings(ctx context.Context, tournamentID string, corr correlation.Headers, principal *Principal) (json.RawMessage, error)
+	// Assignment proxies GET /v1/tournaments/{id}/players/{playerId}/assignment.
+	Assignment(ctx context.Context, tournamentID, playerID string, corr correlation.Headers, principal *Principal) (json.RawMessage, error)
 }
 
 // ReadModelClient serves public read proxies (rankings/analytics).

@@ -69,7 +69,7 @@ func TestExistingAggregateCommitFailureDoesNotLeakIngestMutation(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot0 := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, body)[0].(map[string]any)
 	base := time.Date(2026, 7, 10, 23, 0, 0, 0, time.UTC)
 	ingest := map[string]any{
 		"eventId":           "evt-commit-fail",
@@ -104,7 +104,7 @@ func TestExistingAggregateCommitFailureDoesNotLeakIngestMutation(t *testing.T) {
 
 	bracket = getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot := bracketSlots(t, body)[0].(map[string]any)
 	if slot["status"] == "result_recorded" || slot["status"] == "advanced" {
 		t.Fatalf("ingest mutation leaked before commit: status=%v", slot["status"])
 	}
@@ -129,7 +129,7 @@ func TestAcceptedMatchCompletedReplayPreservesRecordedDisposition(t *testing.T) 
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot0 := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, body)[0].(map[string]any)
 	base := time.Date(2026, 7, 10, 23, 30, 0, 0, time.UTC)
 	ingest := map[string]any{
 		"eventId":           "evt-recorded-1",
@@ -179,7 +179,7 @@ func TestMatchResultPathTournamentIdMismatchRejectedWithoutMutation(t *testing.T
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot0 := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, body)[0].(map[string]any)
 	beforeEvents := h.repo.OutboxLen()
 	base := time.Date(2026, 7, 10, 23, 45, 0, 0, time.UTC)
 
@@ -228,15 +228,16 @@ func TestProvisionFailureExactReplayPreservesNextRetryWork(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/t-retry-replay/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	b0 := body["rounds"].([]any)[0].(map[string]any)["batches"].([]any)[0].(map[string]any)
-	batchID := b0["batchId"].(string)
+	_ = body
+	b0 := bracketBatches(t, h, "t-retry-replay", 1)[0]
+	batchID := string(b0.BatchID)
 	firstCmd := provisioningAttemptCommandID("t-retry-replay", 1, batchID, 0)
 	batchBody := map[string]any{
 		"commandId":    firstCmd,
 		"batchId":      batchID,
-		"slotFrom":     b0["slotFrom"],
-		"slotTo":       b0["slotTo"],
-		"slotSize":     b0["slotSize"],
+		"slotFrom":     string(b0.SlotFrom),
+		"slotTo":       string(b0.SlotTo),
+		"slotSize":     len(b0.SlotIndexes),
 		"retryAttempt": 0,
 	}
 
@@ -294,17 +295,18 @@ func TestProvisioningRetryAttemptIdentityAllowsRetryAfterRoomFailure(t *testing.
 	bracket := getJSON(t, mux, "/v1/tournaments/t-retry-id/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	b0 := body["rounds"].([]any)[0].(map[string]any)["batches"].([]any)[0].(map[string]any)
-	batchID := b0["batchId"].(string)
+	_ = body
+	b0 := bracketBatches(t, h, "t-retry-id", 1)[0]
+	batchID := string(b0.BatchID)
 
 	h.rooms.FailOnCall = 1
 	firstCmd := provisioningAttemptCommandID("t-retry-id", 1, batchID, 0)
 	w = postJSON(t, mux, "/internal/v1/tournaments/t-retry-id/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId":    firstCmd,
 		"batchId":      batchID,
-		"slotFrom":     b0["slotFrom"],
-		"slotTo":       b0["slotTo"],
-		"slotSize":     b0["slotSize"],
+		"slotFrom":     string(b0.SlotFrom),
+		"slotTo":       string(b0.SlotTo),
+		"slotSize":     len(b0.SlotIndexes),
 		"retryAttempt": 0,
 	}, corr)
 	res := decodeResult(t, w)
@@ -331,9 +333,9 @@ func TestProvisioningRetryAttemptIdentityAllowsRetryAfterRoomFailure(t *testing.
 	w = postJSON(t, mux, "/internal/v1/tournaments/t-retry-id/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId":    firstCmd,
 		"batchId":      batchID,
-		"slotFrom":     b0["slotFrom"],
-		"slotTo":       b0["slotTo"],
-		"slotSize":     b0["slotSize"],
+		"slotFrom":     string(b0.SlotFrom),
+		"slotTo":       string(b0.SlotTo),
+		"slotSize":     len(b0.SlotIndexes),
 		"retryAttempt": 0,
 	}, corr)
 	if decodeResult(t, w).Status != envelope.StatusAccepted {
@@ -349,9 +351,9 @@ func TestProvisioningRetryAttemptIdentityAllowsRetryAfterRoomFailure(t *testing.
 	w = postJSON(t, mux, "/internal/v1/tournaments/t-retry-id/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId":    nextCmd,
 		"batchId":      batchID,
-		"slotFrom":     b0["slotFrom"],
-		"slotTo":       b0["slotTo"],
-		"slotSize":     b0["slotSize"],
+		"slotFrom":     string(b0.SlotFrom),
+		"slotTo":       string(b0.SlotTo),
+		"slotSize":     len(b0.SlotIndexes),
 		"retryAttempt": nextAttempt,
 	}, corr)
 	if decodeResult(t, w).Status != envelope.StatusAccepted {
@@ -373,9 +375,9 @@ func TestProvisioningRetryAttemptIdentityAllowsRetryAfterRoomFailure(t *testing.
 	w = postJSON(t, mux, "/internal/v1/tournaments/t-retry-id/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId":    nextCmd,
 		"batchId":      batchID,
-		"slotFrom":     b0["slotFrom"],
-		"slotTo":       b0["slotTo"],
-		"slotSize":     b0["slotSize"],
+		"slotFrom":     string(b0.SlotFrom),
+		"slotTo":       string(b0.SlotTo),
+		"slotSize":     len(b0.SlotIndexes),
 		"retryAttempt": nextAttempt,
 	}, corr)
 	if decodeResult(t, w).Status != envelope.StatusAccepted {

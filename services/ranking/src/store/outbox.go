@@ -209,6 +209,7 @@ func outboxFromFact(f domain.Fact, meta outboxMeta) (OutboxEvent, error) {
 		payload["snapshotId"] = f.Data["snapshotId"]
 		payload["boardType"] = f.Data["boardType"]
 		payload["generatedAt"] = now.Format(time.RFC3339Nano)
+		payload["entries"] = leaderboardEntriesFromFact(f.Data)
 		return OutboxEvent{
 			EventID: eventID, EventType: msgLeaderboardSnapshotPublished,
 			Topic: topicLeaderboardSnapshotPublished, PartitionKey: f.Data["boardType"],
@@ -217,6 +218,57 @@ func outboxFromFact(f domain.Fact, meta outboxMeta) (OutboxEvent, error) {
 	default:
 		return OutboxEvent{}, fmt.Errorf("unknown fact %s", f.Name)
 	}
+}
+
+// stampPlayerRatingProjectionVersion sets the board dirty_version fence on all
+// PlayerRatingUpdated outbox payloads produced in the same score-changing transaction.
+func stampPlayerRatingProjectionVersion(events []OutboxEvent, projectionVersion int64) {
+	if projectionVersion <= 0 {
+		return
+	}
+	for i := range events {
+		if events[i].EventType != msgPlayerRatingUpdated || events[i].Payload == nil {
+			continue
+		}
+		events[i].Payload["projectionVersion"] = projectionVersion
+	}
+}
+
+// leaderboardEntriesFromFact rebuilds AsyncAPI entries[] from domain rank_N / rating_N fact keys.
+// Caps at LeaderboardSnapshotTopN (AsyncAPI maxItems: 100).
+func leaderboardEntriesFromFact(data map[string]string) []map[string]any {
+	n := 0
+	if pc, err := strconv.Atoi(data["playerCount"]); err == nil && pc > 0 {
+		n = pc
+	}
+	if n <= 0 {
+		// Discover contiguous ranks starting at 1.
+		for i := 1; i <= LeaderboardSnapshotTopN; i++ {
+			if _, ok := data["rank_"+strconv.Itoa(i)]; !ok {
+				break
+			}
+			n = i
+		}
+	}
+	if n > LeaderboardSnapshotTopN {
+		n = LeaderboardSnapshotTopN
+	}
+	entries := make([]map[string]any, 0, n)
+	for i := 1; i <= n; i++ {
+		rankKey := "rank_" + strconv.Itoa(i)
+		ratingKey := "rating_" + strconv.Itoa(i)
+		pid := data[rankKey]
+		if pid == "" {
+			break
+		}
+		rating, _ := strconv.Atoi(data[ratingKey])
+		entries = append(entries, map[string]any{
+			"playerId": pid,
+			"rating":   rating,
+			"rank":     i,
+		})
+	}
+	return entries
 }
 
 type gameCompletedDTO struct {

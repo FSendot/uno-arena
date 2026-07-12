@@ -18,7 +18,9 @@ const (
 	topicPlayerRatingUpdated          = "ranking.player_rating_updated"
 	topicLeaderboardSnapshotPublished = "ranking.leaderboard_snapshot_published"
 	topicCasualIngest                 = "room.game.completed" // AsyncAPI upstream topic for processed_upstream_events
-	topicTournamentIngest             = "tournament.placement"
+	topicTournamentIngest             = "tournament.players.advanced"
+	casualKeyDispositionApplied       = "applied"
+	casualKeyDispositionIgnored       = "ignored"
 )
 
 // RankingStore is the durable Postgres adapter for Ranking.
@@ -131,21 +133,50 @@ func (s *RankingStore) GetPlayerRating(ctx context.Context, id domain.PlayerID) 
 	return casual, tournament, true, nil
 }
 
-// Leaderboard returns ordered entries from Postgres player_ratings (authoritative).
-func (s *RankingStore) Leaderboard(ctx context.Context, boardType domain.RatingSourceType) ([]domain.LeaderboardEntry, error) {
+// LeaderboardKeysetPage returns a bounded authoritative page ordered by rating DESC, player_id ASC.
+// after is an exclusive keyset boundary; nil starts at the top. Used for Redis rebuild and
+// Postgres HTTP fallback — never an unbounded full-table scan.
+func (s *RankingStore) LeaderboardKeysetPage(
+	ctx context.Context,
+	boardType domain.RatingSourceType,
+	after *LeaderboardCursor,
+	limit int,
+) ([]domain.LeaderboardEntry, error) {
+	if boardType != domain.SourceCasualElo && boardType != domain.SourceTournamentPlacement {
+		return nil, fmt.Errorf("boardType must be casual_elo or tournament_placement")
+	}
+	if limit < 1 {
+		limit = DefaultLeaderboardPageLimit
+	}
 	col := "casual_elo"
 	if boardType == domain.SourceTournamentPlacement {
 		col = "tournament_placement_rating"
 	}
-	//nolint:gosec // col is fixed enum branch only
-	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
-		SELECT player_id, %s FROM player_ratings ORDER BY %s DESC, player_id ASC
-	`, col, col))
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if after == nil {
+		//nolint:gosec // col is fixed enum branch only
+		rows, err = s.pool.Query(ctx, fmt.Sprintf(`
+			SELECT player_id, %s FROM player_ratings
+			ORDER BY %s DESC, player_id ASC
+			LIMIT $1
+		`, col, col), limit)
+	} else {
+		//nolint:gosec // col is fixed enum branch only
+		rows, err = s.pool.Query(ctx, fmt.Sprintf(`
+			SELECT player_id, %s FROM player_ratings
+			WHERE (%s < $1) OR (%s = $1 AND player_id > $2)
+			ORDER BY %s DESC, player_id ASC
+			LIMIT $3
+		`, col, col, col, col), after.Rating, after.PlayerID, limit)
+	}
 	if err != nil {
 		return nil, wrapUnavailable(err)
 	}
 	defer rows.Close()
-	var entries []domain.LeaderboardEntry
+	entries := make([]domain.LeaderboardEntry, 0, limit)
 	for rows.Next() {
 		var id string
 		var rating int
@@ -160,7 +191,87 @@ func (s *RankingStore) Leaderboard(ctx context.Context, boardType domain.RatingS
 	if err := rows.Err(); err != nil {
 		return nil, wrapUnavailable(err)
 	}
-	return domain.OrderLeaderboard(entries), nil
+	return entries, nil
+}
+
+// LeaderboardPage returns a bounded authoritative page with ranks and optional nextCursor.
+// Prefer Redis for live public reads; this is the fail-open Postgres fallback path.
+func (s *RankingStore) LeaderboardPage(ctx context.Context, q LeaderboardPageQuery) (LeaderboardPage, error) {
+	limit := ClampLeaderboardLimit(q.Limit)
+	var after *LeaderboardCursor
+	if strings.TrimSpace(q.Cursor) != "" {
+		c, err := DecodeLeaderboardCursor(q.Cursor)
+		if err != nil {
+			return LeaderboardPage{}, err
+		}
+		after = &c
+	}
+	batch, err := s.LeaderboardKeysetPage(ctx, q.BoardType, after, limit+1)
+	if err != nil {
+		return LeaderboardPage{}, err
+	}
+	rankBase := 1
+	if after != nil {
+		rankBase, err = s.leaderboardRankAfter(ctx, q.BoardType, *after)
+		if err != nil {
+			return LeaderboardPage{}, err
+		}
+	}
+	entries := make([]RankedLeaderboardEntry, 0, min(len(batch), limit))
+	for i, e := range batch {
+		if i >= limit {
+			break
+		}
+		entries = append(entries, RankedLeaderboardEntry{
+			PlayerID: e.PlayerID,
+			Rating:   e.Rating,
+			Rank:     rankBase + i,
+		})
+	}
+	pub, err := s.GetPublicationState(ctx, q.BoardType)
+	if err != nil {
+		return LeaderboardPage{}, err
+	}
+	generatedAt := time.Now().UTC()
+	if pub.LastDirtyAt != nil {
+		generatedAt = pub.LastDirtyAt.UTC()
+	}
+	page := LeaderboardPage{
+		BoardType:         q.BoardType,
+		ProjectionVersion: pub.DirtyVersion,
+		GeneratedAt:       generatedAt,
+		Entries:           entries,
+	}
+	if len(batch) > limit {
+		last := entries[len(entries)-1]
+		enc, err := EncodeLeaderboardCursor(LeaderboardCursor{
+			Rating: last.Rating, PlayerID: string(last.PlayerID),
+		})
+		if err != nil {
+			return LeaderboardPage{}, err
+		}
+		page.NextCursor = enc
+	}
+	return page, nil
+}
+
+func (s *RankingStore) leaderboardRankAfter(ctx context.Context, boardType domain.RatingSourceType, after LeaderboardCursor) (int, error) {
+	col := "casual_elo"
+	if boardType == domain.SourceTournamentPlacement {
+		col = "tournament_placement_rating"
+	}
+	// Authoritative HTTP fallback rank primitive: indexed COUNT over (col DESC, player_id ASC)
+	// keyset prefix — not an unbounded row hydrate / API full-table scan.
+	var n int
+	//nolint:gosec // col is fixed enum branch only
+	err := s.pool.QueryRow(ctx, fmt.Sprintf(`
+		SELECT count(*)::int FROM player_ratings
+		WHERE (%s > $1) OR (%s = $1 AND player_id <= $2)
+	`, col, col), after.Rating, after.PlayerID).Scan(&n)
+	if err != nil {
+		return 0, wrapUnavailable(err)
+	}
+	return n + 1, nil
 }
 
 // History returns rating history for a known player from Postgres.
@@ -174,7 +285,8 @@ func (s *RankingStore) History(ctx context.Context, playerID domain.PlayerID) ([
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT source_type, previous_rating, new_rating, delta, COALESCE(reason, ''),
-		       game_id, room_id, tournament_id, placement_event_id, COALESCE(placement, 0), upstream_event_id
+		       game_id, room_id, tournament_id, placement_event_id, COALESCE(placement, 0),
+		       COALESCE(advancement_depth, 0), upstream_event_id
 		FROM rating_history
 		WHERE player_id = $1
 		ORDER BY history_id ASC
@@ -187,19 +299,20 @@ func (s *RankingStore) History(ctx context.Context, playerID domain.PlayerID) ([
 	for rows.Next() {
 		var (
 			source, reason                      string
-			prev, next, delta, placement        int
+			prev, next, delta, placement, depth int
 			gameID, roomID, tid, peid, upstream *string
 		)
-		if err := rows.Scan(&source, &prev, &next, &delta, &reason, &gameID, &roomID, &tid, &peid, &placement, &upstream); err != nil {
+		if err := rows.Scan(&source, &prev, &next, &delta, &reason, &gameID, &roomID, &tid, &peid, &placement, &depth, &upstream); err != nil {
 			return nil, false, wrapUnavailable(err)
 		}
 		entry := domain.RatingHistoryEntry{
-			SourceType:     domain.RatingSourceType(source),
-			PreviousRating: prev,
-			NewRating:      next,
-			Delta:          delta,
-			Reason:         domain.RatingHistoryReason(reason),
-			Placement:      placement,
+			SourceType:       domain.RatingSourceType(source),
+			PreviousRating:   prev,
+			NewRating:        next,
+			Delta:            delta,
+			Reason:           domain.RatingHistoryReason(reason),
+			Placement:        placement,
+			AdvancementDepth: depth,
 		}
 		if gameID != nil {
 			entry.GameID = domain.GameID(*gameID)
@@ -224,21 +337,15 @@ func (s *RankingStore) History(ctx context.Context, playerID domain.PlayerID) ([
 	return out, true, nil
 }
 
-// RebuildStatus returns durable rebuild diagnostics from Postgres.
+// RebuildStatus returns durable rebuild diagnostics from Postgres without loading the full board.
 func (s *RankingStore) RebuildStatus(ctx context.Context) (playerCount int, top *domain.LeaderboardEntry, err error) {
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM player_ratings`).Scan(&playerCount); err != nil {
 		return 0, nil, wrapUnavailable(err)
 	}
-	entries, err := s.Leaderboard(ctx, domain.SourceCasualElo)
+	entries, err := s.LeaderboardKeysetPage(ctx, domain.SourceCasualElo, nil, 1)
 	if err != nil {
 		return 0, nil, err
 	}
-	_ = domain.PublishLeaderboardSnapshot(domain.PublishLeaderboardSnapshotCommand{
-		CommandID:  domain.CommandID("rebuild-status"),
-		SnapshotID: domain.SnapshotID("durable-rebuild"),
-		BoardType:  domain.SourceCasualElo,
-		Entries:    entries,
-	})
 	if len(entries) > 0 {
 		e := entries[0]
 		top = &e
@@ -272,8 +379,9 @@ func (s *RankingStore) ApplyCasualGameCompleted(ctx context.Context, req GameCom
 	}
 
 	if rej := validateCasualEligibility(req); rej != nil {
-		// Rejected facts write no state, dedupe, history, or outbox.
-		return GameCompletedResult{Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: rej}, nil
+		// Eligibility-filtered but structurally valid: durable ignored disposition +
+		// processed event + (playerId, gameId) keys; no ratings/history/outbox.
+		return s.commitCasualIgnored(ctx, tx, req, rej)
 	}
 
 	ids := make([]string, 0, len(req.Participants))
@@ -342,6 +450,7 @@ func (s *RankingStore) ApplyCasualGameCompleted(ctx context.Context, req GameCom
 	var perPlayer []domain.CommandOutcome
 	now := time.Now().UTC()
 	var outbox []OutboxEvent
+	scoreChanged := false
 
 	for _, id := range ids {
 		pid := domain.PlayerID(id)
@@ -376,6 +485,9 @@ func (s *RankingStore) ApplyCasualGameCompleted(ctx context.Context, req GameCom
 		}
 		allFacts = append(allFacts, out.Facts...)
 		snap := aggregates[id].PublicSnapshot()
+		if snap.CasualElo != ratings[id] {
+			scoreChanged = true
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE player_ratings
 			SET casual_elo = $2, casual_games_played = casual_games_played + 1, updated_at = now()
@@ -400,9 +512,9 @@ func (s *RankingStore) ApplyCasualGameCompleted(ctx context.Context, req GameCom
 			return s.casualConflictOrUnavailable(ctx, tx, req, err)
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO processed_casual_elo_keys (player_id, game_id, upstream_event_id, processed_at)
-			VALUES ($1, $2, $3, $4)
-		`, id, string(req.GameID), string(req.EventID), now); err != nil {
+			INSERT INTO processed_casual_elo_keys (player_id, game_id, upstream_event_id, disposition, processed_at)
+			VALUES ($1, $2, $3, $4, $5)
+		`, id, string(req.GameID), string(req.EventID), casualKeyDispositionApplied, now); err != nil {
 			return s.casualConflictOrUnavailable(ctx, tx, req, err)
 		}
 		causation := strings.TrimSpace(req.CausationID)
@@ -421,6 +533,14 @@ func (s *RankingStore) ApplyCasualGameCompleted(ctx context.Context, req GameCom
 			}
 			outbox = append(outbox, ev)
 		}
+	}
+
+	if scoreChanged {
+		ver, err := markBoardDirty(ctx, tx, domain.SourceCasualElo)
+		if err != nil {
+			return GameCompletedResult{}, err
+		}
+		stampPlayerRatingProjectionVersion(outbox, ver)
 	}
 
 	if req.EventID.Valid() {
@@ -580,6 +700,7 @@ func (s *RankingStore) ApplyTournamentPlacement(ctx context.Context, req Tournam
 
 	now := time.Now().UTC()
 	snap := agg.PublicSnapshot()
+	scoreChanged := snap.TournamentPlacementRating > tournament
 	if _, err := tx.Exec(ctx, `
 		UPDATE player_ratings
 		SET tournament_placement_rating = $2,
@@ -591,13 +712,20 @@ func (s *RankingStore) ApplyTournamentPlacement(ctx context.Context, req Tournam
 	}
 	hist := agg.History()
 	last := hist[len(hist)-1]
+	var placement any
+	var depth any
+	if last.Reason == domain.ReasonTournamentAdvancement {
+		depth = last.AdvancementDepth
+	} else if last.Placement > 0 {
+		placement = last.Placement
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO rating_history (
 			player_id, source_type, previous_rating, new_rating, delta, reason,
-			tournament_id, placement_event_id, placement, upstream_event_id, applied_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			tournament_id, placement_event_id, placement, advancement_depth, upstream_event_id, applied_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`, pid, string(domain.SourceTournamentPlacement), last.PreviousRating, last.NewRating, last.Delta,
-		string(last.Reason), string(cmd.TournamentID), string(cmd.PlacementEventID), cmd.Placement,
+		string(last.Reason), string(cmd.TournamentID), string(cmd.PlacementEventID), placement, depth,
 		string(cmd.EventID), now); err != nil {
 		return s.placementConflictOrUnavailable(ctx, tx, cmd, placementKey, err)
 	}
@@ -633,6 +761,13 @@ func (s *RankingStore) ApplyTournamentPlacement(ctx context.Context, req Tournam
 			return domain.CommandOutcome{}, err
 		}
 		outbox = append(outbox, ev)
+	}
+	if scoreChanged {
+		ver, err := markBoardDirty(ctx, tx, domain.SourceTournamentPlacement)
+		if err != nil {
+			return domain.CommandOutcome{}, err
+		}
+		stampPlayerRatingProjectionVersion(outbox, ver)
 	}
 	if err := insertOutboxEvents(ctx, tx, outbox); err != nil {
 		if isUniqueViolation(err) {
@@ -718,6 +853,54 @@ func (s *RankingStore) placementConflictOrUnavailable(ctx context.Context, faile
 		return prior, nil
 	}
 	return domain.CommandOutcome{}, wrapUnavailable(cause)
+}
+
+// commitCasualIgnored persists a stable eligibility-rejected disposition plus
+// processed event and (playerId, gameId) contract keys without mutating ratings,
+// history, or outbox. Exact redelivery resolves via loadCasualDuplicate.
+func (s *RankingStore) commitCasualIgnored(ctx context.Context, tx pgx.Tx, req GameCompletedRequest, rej *domain.Rejection) (GameCompletedResult, error) {
+	result := GameCompletedResult{
+		Kind: domain.OutcomeRejected, CommandID: req.CommandID, EventID: req.EventID, Rejection: rej,
+	}
+	now := time.Now().UTC()
+	if err := persistResponses(ctx, tx, req, result); err != nil {
+		return GameCompletedResult{}, err
+	}
+	if req.EventID.Valid() {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO processed_upstream_events (event_id, topic, consumer_group, processed_at)
+			VALUES ($1, $2, 'ranking', $3)
+		`, string(req.EventID), topicCasualIngest, now); err != nil {
+			return s.casualConflictOrUnavailable(ctx, tx, req, err)
+		}
+	}
+	if req.GameID.Valid() {
+		seen := map[string]struct{}{}
+		for _, p := range req.Participants {
+			if !p.PlayerID.Valid() {
+				continue
+			}
+			pid := string(p.PlayerID)
+			if _, dup := seen[pid]; dup {
+				continue
+			}
+			seen[pid] = struct{}{}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO processed_casual_elo_keys (player_id, game_id, upstream_event_id, disposition, processed_at)
+				VALUES ($1, $2, $3, $4, $5)
+			`, pid, string(req.GameID), string(req.EventID), casualKeyDispositionIgnored, now); err != nil {
+				return s.casualConflictOrUnavailable(ctx, tx, req, err)
+			}
+		}
+	}
+	if s.FailNextCommits > 0 {
+		s.FailNextCommits--
+		return GameCompletedResult{}, wrapUnavailable(fmt.Errorf("injected commit failure"))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return GameCompletedResult{}, wrapUnavailable(err)
+	}
+	return result, nil
 }
 
 func validateCasualEligibility(req GameCompletedRequest) *domain.Rejection {

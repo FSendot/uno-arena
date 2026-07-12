@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"unoarena/services/room-gameplay/domain"
 )
@@ -17,7 +18,7 @@ func TestBuildFeedEvents_OutboxClassification(t *testing.T) {
 	sess := domain.OpenSession(room)
 	evs, _ := BuildFeedEvents(sess, 1, 1, "corr", "c0", out.Facts, []FeedAudience{
 		{PlayerID: "host", SessionID: "s1"},
-	}, 0)
+	}, 0, time.Unix(1, 0).UTC())
 	if len(evs) < 2 {
 		t.Fatalf("expected player + spectator events, got %d", len(evs))
 	}

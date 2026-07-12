@@ -14,6 +14,10 @@ type DealMaterial struct {
 	CurrentSeat     int
 	Direction       Direction
 	ApplyTopEffects bool // when true, apply skip/reverse/draw on the flipped discard
+	// DrawPileSize is the authoritative remaining draw-pile count after this deal confirms.
+	// HasDrawPileSize distinguishes an explicit zero from legacy test deals that omit the field.
+	DrawPileSize    int
+	HasDrawPileSize bool
 }
 
 // Game is a pure deterministic Uno game state machine.
@@ -43,6 +47,9 @@ type Game struct {
 	cardPoints map[PlayerID]int
 
 	outcomes map[CommandID]CommandOutcome
+
+	// drawPileSize is the authoritative remaining draw-pile count from Game Integrity.
+	drawPileSize int
 }
 
 // StartGame creates a game from an injected authoritative deal.
@@ -80,22 +87,49 @@ func StartGame(id GameID, seats []PlayerID, deal DealMaterial) (*Game, error) {
 	if cur < 0 || cur >= len(seats) {
 		return nil, Rejection{Code: RejectDealMismatch, Message: "invalid current seat"}
 	}
+	drawPile, err := resolveDrawPileSize(deal)
+	if err != nil {
+		return nil, err
+	}
 	g := &Game{
-		id:         id,
-		seats:      append([]PlayerID(nil), seats...),
-		hands:      hands,
-		discard:    deal.DiscardTop,
-		active:     active,
-		dir:        dir,
-		current:    cur,
-		sequence:   1,
-		outcomes:   make(map[CommandID]CommandOutcome),
-		cardPoints: make(map[PlayerID]int),
+		id:           id,
+		seats:        append([]PlayerID(nil), seats...),
+		hands:        hands,
+		discard:      deal.DiscardTop,
+		active:       active,
+		dir:          dir,
+		current:      cur,
+		sequence:     1,
+		outcomes:     make(map[CommandID]CommandOutcome),
+		cardPoints:   make(map[PlayerID]int),
+		drawPileSize: drawPile,
 	}
 	if deal.ApplyTopEffects && !deal.DiscardTop.IsWild() {
 		g.applyDealTopEffects(deal.DiscardTop)
 	}
 	return g, nil
+}
+
+const standardDeckSize = 108
+
+// resolveDrawPileSize returns the authoritative draw-pile size from DealMaterial.
+// Legacy in-memory test deals without HasDrawPileSize derive a safe default from
+// dealt cards; durable/GI paths must set HasDrawPileSize.
+func resolveDrawPileSize(deal DealMaterial) (int, error) {
+	if deal.HasDrawPileSize {
+		if deal.DrawPileSize < 0 {
+			return 0, Rejection{Code: RejectDealMismatch, Message: "drawPileSize must be >= 0"}
+		}
+		return deal.DrawPileSize, nil
+	}
+	dealt := 1 // discard top
+	for _, h := range deal.Hands {
+		dealt += len(h)
+	}
+	if dealt > standardDeckSize {
+		return 0, nil
+	}
+	return standardDeckSize - dealt, nil
 }
 
 func (g *Game) applyDealTopEffects(top Card) {
@@ -185,6 +219,19 @@ func (g *Game) HandCount(player PlayerID) int {
 	return len(g.hands[player])
 }
 
+// DrawPileSize returns the authoritative remaining draw-pile count (never identities/order).
+func (g *Game) DrawPileSize() int { return g.drawPileSize }
+
+// SetDrawPileSize updates the authoritative remaining draw-pile count after a confirmed draw.
+// Rejects negative values. Idempotent replays must not call this again.
+func (g *Game) SetDrawPileSize(n int) error {
+	if n < 0 {
+		return Rejection{Code: RejectInvalidCommand, Message: "drawPileSize must be >= 0"}
+	}
+	g.drawPileSize = n
+	return nil
+}
+
 // DirectionLabel returns a spectator-safe direction string.
 func DirectionLabel(d Direction) string {
 	if d == DirectionCounterClockwise {
@@ -220,6 +267,7 @@ type PublicState struct {
 	CurrentPlayer      PlayerID
 	Direction          Direction
 	HandCounts         map[PlayerID]int
+	DrawPileSize       int
 	PenaltyAmount      int
 	PenaltyTarget      PlayerID
 	PendingColorChoice bool
@@ -249,6 +297,7 @@ func (g *Game) PublicSnapshot() PublicState {
 		CurrentPlayer:      g.CurrentPlayer(),
 		Direction:          g.dir,
 		HandCounts:         counts,
+		DrawPileSize:       g.drawPileSize,
 		PenaltyAmount:      g.penaltyAmount,
 		PenaltyTarget:      g.penaltyTarget,
 		PendingColorChoice: g.pendingColor,
@@ -517,6 +566,9 @@ func (g *Game) DrawCard(cmd DrawCardCommand) CommandOutcome {
 			return g.reject(cmd.CommandID, cmd.ExpectedSequence, RejectDrawBatchMismatch,
 				"need "+strconv.Itoa(g.penaltyAmount)+" cards")
 		}
+		if err := applyDrawPileSize(g, cmd.HasDrawPileSize, cmd.DrawPileSize); err != nil {
+			return g.reject(cmd.CommandID, cmd.ExpectedSequence, RejectInvalidCommand, err.Error())
+		}
 		g.maybeCloseUnoOnTurnBegin(cmd.PlayerID, &facts)
 		g.hands[cmd.PlayerID] = append(g.hands[cmd.PlayerID], cloneHand(cmd.Cards)...)
 		amount := g.penaltyAmount
@@ -545,6 +597,9 @@ func (g *Game) DrawCard(cmd DrawCardCommand) CommandOutcome {
 	}
 	if len(cmd.Cards) == 0 {
 		return g.reject(cmd.CommandID, cmd.ExpectedSequence, RejectDrawBatchMismatch, "empty draw batch")
+	}
+	if err := applyDrawPileSize(g, cmd.HasDrawPileSize, cmd.DrawPileSize); err != nil {
+		return g.reject(cmd.CommandID, cmd.ExpectedSequence, RejectInvalidCommand, err.Error())
 	}
 	g.maybeCloseUnoOnTurnBegin(cmd.PlayerID, &facts)
 	g.hands[cmd.PlayerID] = append(g.hands[cmd.PlayerID], cloneHand(cmd.Cards)...)
@@ -666,6 +721,9 @@ func (g *Game) ReportMissingUno(cmd ReportMissingUnoCommand) CommandOutcome {
 	}
 	if len(cmd.Cards) != 2 {
 		return g.reject(cmd.CommandID, cmd.ExpectedSequence, RejectDrawBatchMismatch, "need 2 cards")
+	}
+	if err := applyDrawPileSize(g, cmd.HasDrawPileSize, cmd.DrawPileSize); err != nil {
+		return g.reject(cmd.CommandID, cmd.ExpectedSequence, RejectInvalidCommand, err.Error())
 	}
 
 	facts := []Fact{newFact(FactUnoChallengeIssued, map[string]string{
@@ -807,6 +865,13 @@ func (g *Game) ExpireUnoWindow(cmd ExpireUnoWindowCommand) CommandOutcome {
 	return g.commit(cmd.CommandID, []Fact{newFact(FactUnoWindowExpired, map[string]string{
 		"playerId": string(cmd.PlayerID),
 	})})
+}
+
+func applyDrawPileSize(g *Game, has bool, n int) error {
+	if !has {
+		return nil
+	}
+	return g.SetDrawPileSize(n)
 }
 
 func (g *Game) finish(winner PlayerID, facts *[]Fact) {

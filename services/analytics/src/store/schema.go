@@ -15,9 +15,14 @@ const (
 var RequiredTables = []string{
 	"active_generation",
 	"gameplay_metrics",
+	"ingestion_conflicts",
 	"processed_events",
 	"projection_generations",
 	"rating_statistics",
+	"recovery_jobs",
+	"recovery_leases",
+	"recovery_page_checkpoints",
+	"recovery_request_idempotency",
 	"schema_migrations",
 	"tournament_statistics",
 }

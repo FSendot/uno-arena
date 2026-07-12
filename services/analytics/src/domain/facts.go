@@ -8,6 +8,7 @@ const (
 	FactPublicTournamentStatisticProjected FactName = "PublicTournamentStatisticProjected"
 	FactPublicRatingStatisticProjected     FactName = "PublicRatingStatisticProjected"
 	FactProjectionEventQuarantined         FactName = "ProjectionEventQuarantined"
+	FactProjectionEventIgnored             FactName = "ProjectionEventIgnored"
 )
 
 // Fact is a named domain fact produced by projection handling.

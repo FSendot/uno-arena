@@ -50,6 +50,7 @@ type SanitizedSnapshot struct {
 	CurrentPlayerID PlayerID            `json:"currentPlayerId"`
 	PenaltyAmount   int                 `json:"penaltyAmount"`
 	PenaltyTarget   PlayerID            `json:"penaltyTarget"`
+	DrawPileSize    int                 `json:"drawPileSize"`
 	GameScore       map[PlayerID]int    `json:"gameScore"`
 	MatchWinner     PlayerID            `json:"matchWinner"`
 	GameCompleted   bool                `json:"gameCompleted"`
@@ -72,6 +73,7 @@ type SpectatorRoomProjection struct {
 	currentPlayer  PlayerID
 	penaltyAmount  int
 	penaltyTarget  PlayerID
+	drawPileSize   int
 	gameScore      map[PlayerID]int
 	matchWinner    PlayerID
 	gameCompleted  bool
@@ -430,6 +432,7 @@ func (p *SpectatorRoomProjection) Snapshot() SanitizedSnapshot {
 		CurrentPlayerID: p.currentPlayer,
 		PenaltyAmount:   p.penaltyAmount,
 		PenaltyTarget:   p.penaltyTarget,
+		DrawPileSize:    p.drawPileSize,
 		GameScore:       score,
 		MatchWinner:     p.matchWinner,
 		GameCompleted:   p.gameCompleted,
@@ -650,6 +653,9 @@ func (p *SpectatorRoomProjection) applyPublicGameState(pl map[string]any) {
 	}
 	if v, ok := stringField(pl, "penaltyTarget"); ok {
 		p.penaltyTarget = PlayerID(v)
+	}
+	if n, ok := intField(pl, "drawPileSize"); ok && n >= 0 {
+		p.drawPileSize = n
 	}
 	p.applyRoster(pl)
 }

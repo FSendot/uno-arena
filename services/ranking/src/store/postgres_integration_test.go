@@ -63,9 +63,12 @@ func resetPublic(t *testing.T, ctx context.Context, pool *store.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
 		DROP TABLE IF EXISTS outbox_events CASCADE;
+		DROP TABLE IF EXISTS kafka_consumer_quarantine CASCADE;
 		DROP TABLE IF EXISTS ranking_command_responses CASCADE;
 		DROP TABLE IF EXISTS leaderboard_snapshots CASCADE;
+		DROP TABLE IF EXISTS leaderboard_publication_state CASCADE;
 		DROP TABLE IF EXISTS processed_upstream_events CASCADE;
+		DROP TABLE IF EXISTS processed_tournament_performance_events CASCADE;
 		DROP TABLE IF EXISTS processed_tournament_placement_keys CASCADE;
 		DROP TABLE IF EXISTS processed_casual_elo_keys CASCADE;
 		DROP TABLE IF EXISTS rating_history CASCADE;
@@ -133,7 +136,7 @@ func TestIntegration_HydrateRoundTrip(t *testing.T) {
 	if err != nil || !ok || len(hist) != 1 {
 		t.Fatalf("history: ok=%v len=%d err=%v", ok, len(hist), err)
 	}
-	board, err := ts.Leaderboard(ctx, domain.SourceCasualElo)
+	board, err := ts.LeaderboardKeysetPage(ctx, domain.SourceCasualElo, nil, 10)
 	if err != nil || len(board) != 2 {
 		t.Fatalf("board=%+v err=%v", board, err)
 	}
@@ -356,7 +359,7 @@ func TestIntegration_PlacementDedupe(t *testing.T) {
 	// which PostgreSQL rejects in any TEXT column.
 	cmd := domain.ApplyTournamentPlacementUpdateCommand{
 		CommandID: "tp1", EventID: "te1", PlayerID: `p"1`,
-		TournamentID: "t,1", PlacementEventID: `pe]1`, Placement: 1, Delta: 50,
+		TournamentID: "t,1", PlacementEventID: `pe]1`, Placement: 1, Reason: domain.ReasonTournamentFinalStanding,
 	}
 	first, err := ts.ApplyTournamentPlacement(ctx, store.TournamentPlacementRequest{
 		Command: cmd, CorrelationID: "corr-place-1", CausationID: "tp1",
@@ -381,7 +384,7 @@ func TestIntegration_PlacementDedupe(t *testing.T) {
 	third, err := ts2.ApplyTournamentPlacement(ctx, store.TournamentPlacementRequest{
 		Command: domain.ApplyTournamentPlacementUpdateCommand{
 			CommandID: "tp2", EventID: "te2-new", PlayerID: `p"1`,
-			TournamentID: "t,1", PlacementEventID: `pe]1`, Placement: 1, Delta: 50,
+			TournamentID: "t,1", PlacementEventID: `pe]1`, Placement: 1, Reason: domain.ReasonTournamentFinalStanding,
 		},
 		CorrelationID: "corr-place-2", CausationID: "tp2",
 	})
@@ -394,7 +397,7 @@ func TestIntegration_PlacementDedupe(t *testing.T) {
 		t.Fatalf("hist=%d outbox=%d", nHist, nOut)
 	}
 	_, tour, ok, _ := ts2.GetPlayerRating(ctx, `p"1`)
-	if !ok || tour != 50 {
+	if !ok || tour != 100 {
 		t.Fatalf("tournament rating=%d", tour)
 	}
 	casual, _, _, _ := ts2.GetPlayerRating(ctx, `p"1`)
@@ -436,9 +439,81 @@ func TestIntegration_RejectionZeroWrites(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM processed_casual_elo_keys`).Scan(&nCasualKeys); err != nil {
 		t.Fatal(err)
 	}
-	if nPlayers != 0 || nHist != 0 || nOut != 0 || nDedupe != 0 || nResp != 0 || nCasualKeys != 0 {
-		t.Fatalf("rejection must write nothing: players=%d hist=%d out=%d dedupe=%d resp=%d keys=%d",
-			nPlayers, nHist, nOut, nDedupe, nResp, nCasualKeys)
+	// Eligibility reject must not mutate ratings/history/outbox, but must durably
+	// persist ignored disposition + processed event + contract keys.
+	if nPlayers != 0 || nHist != 0 || nOut != 0 {
+		t.Fatalf("rejection must not mutate ratings/history/outbox: players=%d hist=%d out=%d",
+			nPlayers, nHist, nOut)
+	}
+	if nDedupe != 3 || nResp != 6 || nCasualKeys != 6 {
+		t.Fatalf("ignored disposition writes: dedupe=%d resp=%d keys=%d want 3/6/6",
+			nDedupe, nResp, nCasualKeys)
+	}
+	var ignored int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM processed_casual_elo_keys WHERE disposition = 'ignored'
+	`).Scan(&ignored); err != nil {
+		t.Fatal(err)
+	}
+	if ignored != 6 {
+		t.Fatalf("ignored keys=%d", ignored)
+	}
+}
+
+func TestIntegration_IgnoredEligibilityDedupeStable(t *testing.T) {
+	ctx := context.Background()
+	pool, ts := openStore(t)
+	req := store.GameCompletedRequest{
+		CommandID: "c-ign", EventID: "e-ign", GameID: "g-ign", RoomID: "r1",
+		RoomType: domain.RoomTypeTournament, Authoritative: true, Completed: true,
+		Participants: []domain.RatedPlacement{{PlayerID: "p1", Placement: 1}, {PlayerID: "p2", Placement: 2}},
+	}
+	first, err := ts.ApplyCasualGameCompleted(ctx, req)
+	if err != nil || first.Kind != domain.OutcomeRejected || first.Rejection == nil {
+		t.Fatalf("first: %+v err=%v", first, err)
+	}
+	second, err := ts.ApplyCasualGameCompleted(ctx, req)
+	if err != nil || second.Kind != domain.OutcomeDuplicate {
+		t.Fatalf("second: %+v err=%v", second, err)
+	}
+	if second.Rejection == nil || second.Rejection.Code != first.Rejection.Code {
+		t.Fatalf("stable rejection: first=%+v second=%+v", first.Rejection, second.Rejection)
+	}
+	nPlayers, _ := ts.CountPlayers(ctx)
+	nHist, _ := ts.CountHistory(ctx)
+	nOut, _ := ts.CountOutbox(ctx)
+	if nPlayers != 0 || nHist != 0 || nOut != 0 {
+		t.Fatalf("ignored must not mutate: players=%d hist=%d out=%d", nPlayers, nHist, nOut)
+	}
+	var nDedupe, nKeys int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM processed_upstream_events`).Scan(&nDedupe)
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM processed_casual_elo_keys`).Scan(&nKeys)
+	if nDedupe != 1 || nKeys != 2 {
+		t.Fatalf("dedupe=%d keys=%d", nDedupe, nKeys)
+	}
+}
+
+func TestIntegration_KafkaQuarantineRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	_, ts := openStore(t)
+	active, err := ts.IsKafkaAggregateQuarantined(ctx, "ranking", "room.game.completed", "room-1")
+	if err != nil || active {
+		t.Fatalf("empty quarantine: active=%v err=%v", active, err)
+	}
+	if err := ts.QuarantineKafkaAggregate(ctx, store.KafkaAggregateQuarantine{
+		ConsumerGroup: "ranking", SourceTopic: "room.game.completed", AggregateKey: "room-1",
+		Classification: "schema_invalid", Reason: "bad payload",
+		SourcePartition: 1, SourceOffset: 9, EventID: "e1", CorrelationID: "c1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	active, err = ts.IsKafkaAggregateQuarantined(ctx, "ranking", "room.game.completed", "room-1")
+	if err != nil || !active {
+		t.Fatalf("want active quarantine: active=%v err=%v", active, err)
+	}
+	active, err = ts.IsKafkaAggregateQuarantined(ctx, "ranking", "room.game.completed", "room-other")
+	if err != nil || active {
+		t.Fatalf("unrelated key: active=%v err=%v", active, err)
 	}
 }
 
@@ -531,7 +606,7 @@ func TestIntegration_OutboxPlacementContractAndReplayStable(t *testing.T) {
 	req := store.TournamentPlacementRequest{
 		Command: domain.ApplyTournamentPlacementUpdateCommand{
 			CommandID: "tp1", EventID: "te1", PlayerID: "p1",
-			TournamentID: "t1", PlacementEventID: "pe1", Placement: 1, Delta: 40,
+			TournamentID: "t1", PlacementEventID: "pe1", Placement: 1, Reason: domain.ReasonTournamentFinalStanding,
 		},
 		CorrelationID: "corr-place-1",
 		CausationID:   "tp1",
@@ -621,6 +696,16 @@ func assertPersistedPlayerRatingPayload(t *testing.T, payload map[string]any, pl
 	if payload["eventType"] != "PlayerRatingUpdated" {
 		t.Fatalf("payload.eventType=%v", payload["eventType"])
 	}
+	prev := asJSONInt(t, payload["previousRating"])
+	next := asJSONInt(t, payload["newRating"])
+	if prev != next {
+		if _, ok := payload["projectionVersion"]; !ok {
+			t.Fatalf("score-changing payload missing projectionVersion: %+v", payload)
+		}
+		if asJSONInt64(t, payload["projectionVersion"]) <= 0 {
+			t.Fatalf("projectionVersion must be positive: %+v", payload)
+		}
+	}
 	if placement {
 		if _, ok := payload["tournamentId"]; !ok {
 			t.Fatalf("missing tournamentId")
@@ -628,6 +713,48 @@ func assertPersistedPlayerRatingPayload(t *testing.T, payload map[string]any, pl
 		if _, ok := payload["placementEventId"]; !ok {
 			t.Fatalf("missing placementEventId")
 		}
+	}
+}
+
+func asJSONInt(t *testing.T, v any) int {
+	t.Helper()
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return int(i)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		t.Fatalf("not int: %T %v", v, v)
+		return 0
+	}
+}
+
+func asJSONInt64(t *testing.T, v any) int64 {
+	t.Helper()
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	default:
+		t.Fatalf("not int64: %T %v", v, v)
+		return 0
 	}
 }
 

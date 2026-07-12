@@ -1,0 +1,52 @@
+{{- /*
+  Tournament seeding worker: same image as API; WORKER_ROLE=tournament-seeding
+  claims all-round seeding jobs with FOR UPDATE SKIP LOCKED and processes chunks
+  in-process (no self-HTTP). Enabled for kind with 2 replicas to exercise SKIP LOCKED.
+  Default/staging/production keep enabled=false (ADR-0013).
+  Least privilege: DATABASE_URL secret + REDIS_URL for post-finalize bracket refresh —
+  no internal/service/Room/cursor credentials.
+*/ -}}
+{{- if .Values.seedingWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-seeding-worker
+  labels:
+    app: {{ .Release.Name }}-seeding-worker
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.seedingWorker.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-seeding-worker
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-seeding-worker
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: seeding-worker
+          image: {{ include "tournament-orchestration.image" . | quote }}
+          imagePullPolicy: {{ include "tournament-orchestration.imagePullPolicy" . }}
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
+            - name: WORKER_ROLE
+              value: "tournament-seeding"
+            {{- if .Values.env.REDIS_URL }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            {{- end }}
+            {{- if and .Values.existingSecret .Values.secretEnv.DATABASE_URL }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ .Values.secretEnv.DATABASE_URL | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

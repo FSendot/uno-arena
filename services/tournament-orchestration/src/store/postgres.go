@@ -22,7 +22,7 @@ type OutboxEvent struct {
 	Topic         string
 	PartitionKey  string
 	SchemaVersion int
-	Payload       map[string]string
+	Payload       map[string]any
 	CreatedAt     time.Time
 }
 
@@ -33,6 +33,9 @@ type CommitRequest struct {
 	Outcome           envelope.Result
 	Events            []OutboxEvent
 	MatchResultSource *MatchResultSource
+	// ProjectionChanged bumps bracket_projection_versions only for accepted
+	// bracket-visible state changes (never rejects or semantic no-ops).
+	ProjectionChanged bool
 }
 
 // MatchResultSource carries the inbound MatchCompleted event id for the matching room/version.

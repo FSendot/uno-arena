@@ -11,10 +11,13 @@ import (
 )
 
 // Lock key prefixes establish a globally fixed advisory-lock order when sorted:
-// ranking:casual:event < ranking:casual:game < ranking:placement:biz < ranking:placement:event
+// ranking:casual:event < ranking:casual:game < ranking:perf:biz < ranking:perf:event
+// < ranking:placement:biz < ranking:placement:event
 const (
 	lockPrefixCasualEvent    = "ranking:casual:event:"
 	lockPrefixCasualGame     = "ranking:casual:game:"
+	lockPrefixPerfBiz        = "ranking:perf:biz:"
+	lockPrefixPerfEvent      = "ranking:perf:event:"
 	lockPrefixPlacementBiz   = "ranking:placement:biz:"
 	lockPrefixPlacementEvent = "ranking:placement:event:"
 )
@@ -71,6 +74,17 @@ func placementIngestLockKeys(placementKey, eventID string) []string {
 	}
 	if eventID != "" {
 		keys = append(keys, lockPrefixPlacementEvent+eventID)
+	}
+	return keys
+}
+
+func performanceIngestLockKeys(sourceTopic, businessKey, eventID string) []string {
+	var keys []string
+	if businessKey != "" {
+		keys = append(keys, lockPrefixPerfBiz+sourceTopic+":"+businessKey)
+	}
+	if eventID != "" {
+		keys = append(keys, lockPrefixPerfEvent+eventID)
 	}
 	return keys
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"unoarena/services/analytics/domain"
+	"unoarena/services/analytics/store"
 )
 
 // internalCredentialHeader authenticates service-to-service callers of internal routes.
@@ -134,10 +135,14 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.readyCheck != nil {
 		if err := s.readyCheck(r.Context()); err != nil {
+			reason := "clickhouse_schema"
+			if strings.Contains(err.Error(), "kafka_consumer_stopped") {
+				reason = "kafka_consumer_stopped"
+			}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 				"status":  "not_ready",
 				"service": "analytics",
-				"reason":  "clickhouse_schema",
+				"reason":  reason,
 			})
 			logRequest(r, "/ready")
 			return
@@ -279,6 +284,7 @@ func (s *Server) ingestWithSource(w http.ResponseWriter, r *http.Request, cred s
 	// Body source is ignored — trusted SourceTopic comes from credential mapping.
 	evt := body.toDomain()
 	evt.Source = source
+	domain.EnsureIngressIdentity(&evt)
 	out, err := s.app.Apply(r.Context(), evt)
 	if err != nil {
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "store unavailable")
@@ -317,10 +323,12 @@ func resolveTrustedSource(gotCred string, creds ProducerCredentials, fixed domai
 			if headerHint != "" {
 				st := domain.SourceTopic(headerHint)
 				switch st {
-				case domain.SourceTournamentMatchAssigned,
+				case domain.SourceRoomMatchCompleted,
+					domain.SourceTournamentMatchAssigned,
 					domain.SourceTournamentMatchResultRecorded,
 					domain.SourceTournamentPlayersAdvanced,
-					domain.SourceTournamentRoundCompleted:
+					domain.SourceTournamentRoundCompleted,
+					domain.SourceTournamentCompleted:
 					return st, true
 				}
 			}
@@ -365,6 +373,11 @@ func (s *Server) rebuildHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	outs, err := s.app.Rebuild(r.Context(), events)
 	if err != nil {
+		if errors.Is(err, store.ErrAdHocRebuildDisabled) {
+			writeError(w, r, http.StatusServiceUnavailable, "rebuild_coordinator_required",
+				"ad-hoc rebuild disabled; emit analytics.projection.rebuild_requested")
+			return
+		}
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "rebuild unavailable")
 		return
 	}
@@ -465,6 +478,15 @@ func logRequest(r *http.Request, path string) {
 }
 
 func main() {
+	if workerRoleFromEnv() == workerRoleAnalyticsProjectionRebuilder {
+		rt, err := wireProjectionRebuildWorker()
+		if err != nil {
+			log.Fatalf(`{"level":"error","service":"analytics","event":"projection_rebuilder_startup_failed","error":%q}`, err.Error())
+		}
+		runProjectionRebuildWorker(rt)
+		return
+	}
+
 	rt, err := wireAnalyticsRuntime()
 	if err != nil {
 		log.Fatal(err)
@@ -478,6 +500,14 @@ func main() {
 		srv.mode = "durable"
 	} else if rt.mode == "capability" {
 		srv.mode = "capability"
+	}
+
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.start(rootCtx)
+		log.Printf(`{"level":"info","service":"analytics","event":"kafka_consumer_started","group":%q,"topics":%q}`,
+			rt.kafka.consumer.cfg.Group, strings.Join(rt.kafka.consumer.cfg.Topics, ","))
 	}
 
 	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
@@ -497,6 +527,10 @@ func main() {
 	case <-sigCh:
 	}
 
+	rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.stop()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)

@@ -1,3 +1,4 @@
+# Analytics Helm defaults (staging-oriented base).
 replicaCount: 1
 
 image:
@@ -9,11 +10,29 @@ env:
   DEPLOYMENT_ENV: staging
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_DB: analytics
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_CONSUMER_GROUP: analytics
+  KAFKA_TOPICS: room.gameplay.metrics,room.match.completed,tournament.match.assigned,tournament.match.result_recorded,tournament.players.advanced,tournament.round.completed,tournament.completed,ranking.player_rating_updated,ranking.leaderboard_snapshot_published
+  KAFKA_MAX_ATTEMPTS: "5"
+  KAFKA_MAX_PARTITION_WORKERS: "8"
 
-# BLOCKED: binary has no WORKER_ROLE=analytics-projection-rebuilder loop; Kafka rebuild path absent.
-# HTTP rebuild endpoint exists on the API Deployment; keep worker disabled.
+# Default/staging/production keep disabled until live recovery proof (ADR-0039).
 projectionRebuilder:
   enabled: false
+  replicaCount: 1
+  env:
+    ROOM_GAMEPLAY_URL: http://room-gameplay:8080
+    TOURNAMENT_ORCHESTRATION_URL: http://tournament-orchestration:8080
+    RANKING_URL: http://ranking:8080
+    KAFKA_PROJECTION_REBUILD_GROUP: analytics-projection-rebuilder
+    KAFKA_PROJECTION_REBUILD_TOPIC: analytics.projection.rebuild_requested
+    KAFKA_PROJECTION_REBUILD_DLQ_TOPIC: analytics.projection.rebuild_requested.analytics.dlq
+  secretEnv:
+    CLICKHOUSE_USER: clickhouse-user
+    CLICKHOUSE_PASSWORD: clickhouse-password
+    ANALYTICS_ROOM_CREDENTIAL: analytics-room-credential
+    ANALYTICS_TOURNAMENT_CREDENTIAL: analytics-tournament-credential
+    ANALYTICS_RANKING_CREDENTIAL: analytics-ranking-credential
 
 # Producer-scope credentials (distinct values; Room/Ranking/Tournament each present one):
 #   analytics-room-credential       — Room→Analytics only

@@ -34,10 +34,11 @@ type giDeck struct {
 }
 
 type giPending struct {
-	opID  string
-	kind  string
-	count int
-	seats []string
+	opID           string
+	kind           string
+	count          int
+	seats          []string
+	remainingAfter int
 }
 
 func newGIDouble(cred string) *giDouble {
@@ -138,16 +139,25 @@ func (g *giDouble) deckOps(w http.ResponseWriter, r *http.Request) {
 		shape := "deal|" + strings.Join(body.Seats, ",") + "|7"
 		id := detResID(roomID, body.GameID, body.OperationID, shape)
 		if prior, ok := dk.byOp[body.OperationID]; ok {
+			rem := 0
+			if p, ok := dk.pending[prior]; ok {
+				rem = p.remainingAfter
+			} else if p, ok := dk.confirmedID[prior]; ok {
+				rem = p.remainingAfter
+			}
 			writeJSON(w, 200, map[string]any{"kind": "duplicate", "reservationId": prior,
 				"hands": map[string]any{}, "discardTop": card("d", "red", "1"),
-				"activeColor": "red", "currentSeat": 0, "direction": "clockwise"})
+				"activeColor": "red", "currentSeat": 0, "direction": "clockwise",
+				"remaining": rem})
 			return
 		}
 		if len(dk.pending) > 0 {
 			writeErr(w, 409, "conflicting_duplicate", "deck has outstanding unconfirmed reservation")
 			return
 		}
-		dk.pending[id] = giPending{opID: body.OperationID, kind: "deal", count: len(body.Seats)*7 + 1, seats: body.Seats}
+		need := len(body.Seats)*7 + 1
+		remaining := 108 - dk.pointer - need
+		dk.pending[id] = giPending{opID: body.OperationID, kind: "deal", count: need, seats: body.Seats, remainingAfter: remaining}
 		dk.byOp[body.OperationID] = id
 		hands := map[string]any{}
 		for _, s := range body.Seats {
@@ -161,6 +171,7 @@ func (g *giDouble) deckOps(w http.ResponseWriter, r *http.Request) {
 			"kind": "accepted", "reservationId": id, "hands": hands,
 			"discardTop": card("top", "blue", "3"), "activeColor": "blue",
 			"currentSeat": 0, "direction": "clockwise", "applyTopEffects": false,
+			"remaining": remaining,
 		})
 	case "reserve_draw":
 		if !dk.inited {
@@ -170,20 +181,27 @@ func (g *giDouble) deckOps(w http.ResponseWriter, r *http.Request) {
 		shape := "draw|" + itoa(body.Count)
 		id := detResID(roomID, body.GameID, body.OperationID, shape)
 		if prior, ok := dk.byOp[body.OperationID]; ok {
-			writeJSON(w, 200, map[string]any{"kind": "duplicate", "reservationId": prior, "cards": []any{}})
+			rem := 0
+			if p, ok := dk.pending[prior]; ok {
+				rem = p.remainingAfter
+			} else if p, ok := dk.confirmedID[prior]; ok {
+				rem = p.remainingAfter
+			}
+			writeJSON(w, 200, map[string]any{"kind": "duplicate", "reservationId": prior, "cards": []any{}, "remaining": rem})
 			return
 		}
 		if len(dk.pending) > 0 {
 			writeErr(w, 409, "conflicting_duplicate", "deck has outstanding unconfirmed reservation")
 			return
 		}
-		dk.pending[id] = giPending{opID: body.OperationID, kind: "draw", count: body.Count}
+		remaining := 108 - dk.pointer - body.Count
+		dk.pending[id] = giPending{opID: body.OperationID, kind: "draw", count: body.Count, remainingAfter: remaining}
 		dk.byOp[body.OperationID] = id
 		cards := make([]any, body.Count)
 		for i := 0; i < body.Count; i++ {
 			cards[i] = card("draw-"+itoa(i), "yellow", "2")
 		}
-		writeJSON(w, 200, map[string]any{"kind": "accepted", "reservationId": id, "cards": cards})
+		writeJSON(w, 200, map[string]any{"kind": "accepted", "reservationId": id, "cards": cards, "remaining": remaining})
 	case "confirm":
 		if _, ok := dk.confirmedID[body.ReservationID]; ok {
 			writeJSON(w, 200, map[string]any{"kind": "duplicate"})
@@ -197,7 +215,7 @@ func (g *giDouble) deckOps(w http.ResponseWriter, r *http.Request) {
 		dk.pointer += p.count
 		dk.confirmedID[body.ReservationID] = p
 		delete(dk.pending, body.ReservationID)
-		delete(dk.byOp, p.opID)
+		// Keep byOp so exact-duplicate after confirm can resolve remainingAfter.
 		writeJSON(w, 200, map[string]any{"kind": "accepted"})
 	case "cancel":
 		if p, ok := dk.pending[body.ReservationID]; ok {
@@ -300,11 +318,14 @@ func TestHTTPDealSourceReservationCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.ID == "" || res.Deal == nil {
+	if res.Deal == nil || res.Deal.DiscardTop.ID == "" {
 		t.Fatalf("%+v", res)
 	}
 	if len(res.Deal.Hands["p1"]) != 7 || res.Deal.DiscardTop.ID == "" {
 		t.Fatalf("deal material: %+v", res.Deal)
+	}
+	if res.DrawPileSize != 93 || !res.Deal.HasDrawPileSize || res.Deal.DrawPileSize != 93 {
+		t.Fatalf("deal remaining=%d deal=%+v", res.DrawPileSize, res.Deal)
 	}
 	if res.Deal.Direction == 0 {
 		t.Fatal("direction not mapped")
@@ -320,6 +341,9 @@ func TestHTTPDealSourceReservationCompatibility(t *testing.T) {
 	}
 	if len(draw.Cards) != 2 {
 		t.Fatalf("cards: %+v", draw.Cards)
+	}
+	if draw.DrawPileSize != 91 {
+		t.Fatalf("draw remaining=%d want 91", draw.DrawPileSize)
 	}
 	if err := deals.Cancel(ctx, draw.ID); err != nil {
 		t.Fatal(err)

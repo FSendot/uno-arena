@@ -86,14 +86,14 @@ func TestExportRestoreExactRoundTrip(t *testing.T) {
 
 func TestRestoreWithoutFakeEvents(t *testing.T) {
 	exp := ProjectionExport{
-		RoomID:       "r1",
-		Status:       RoomStatusCompleted,
-		Visibility:   VisibilityPublic,
-		Sequence:     9,
-		StreamClosed: true,
+		RoomID:         "r1",
+		Status:         RoomStatusCompleted,
+		Visibility:     VisibilityPublic,
+		Sequence:       9,
+		StreamClosed:   true,
 		MatchCompleted: true,
-		GameScore:    map[PlayerID]int{"p1": 2},
-		MatchWinner:  "p1",
+		GameScore:      map[PlayerID]int{"p1": 2},
+		MatchWinner:    "p1",
 		Outcomes: map[EventID]OutcomeExport{
 			"term": {Kind: OutcomeAccepted, EventID: "term", Sequence: 9},
 		},

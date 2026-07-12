@@ -39,31 +39,33 @@ type deckDrawSnapshot struct {
 }
 
 type pendingSnapshot struct {
-	ID           string        `json:"id"`
-	RoomID       string        `json:"roomId"`
-	GameID       string        `json:"gameId"`
-	OperationID  string        `json:"operationId"`
-	Kind         string        `json:"kind"`
-	Seats        []string      `json:"seats,omitempty"`
-	CardsPerHand int           `json:"cardsPerHand,omitempty"`
-	Count        int           `json:"count,omitempty"`
-	CardCount    int           `json:"cardCount,omitempty"`
-	Deal         *DealMaterial `json:"deal,omitempty"`
-	Cards        []CardDTO     `json:"cards,omitempty"`
-	Shape        string        `json:"shape"`
+	ID             string        `json:"id"`
+	RoomID         string        `json:"roomId"`
+	GameID         string        `json:"gameId"`
+	OperationID    string        `json:"operationId"`
+	Kind           string        `json:"kind"`
+	Seats          []string      `json:"seats,omitempty"`
+	CardsPerHand   int           `json:"cardsPerHand,omitempty"`
+	Count          int           `json:"count,omitempty"`
+	CardCount      int           `json:"cardCount,omitempty"`
+	Deal           *DealMaterial `json:"deal,omitempty"`
+	Cards          []CardDTO     `json:"cards,omitempty"`
+	Shape          string        `json:"shape"`
+	RemainingAfter int           `json:"remainingAfter"`
 }
 
 type confirmedSnapshot struct {
-	ReservationID string        `json:"reservationId"`
-	OperationID   string        `json:"operationId"`
-	Kind          string        `json:"kind"`
-	Seats         []string      `json:"seats,omitempty"`
-	CardsPerHand  int           `json:"cardsPerHand,omitempty"`
-	Count         int           `json:"count,omitempty"`
-	Shape         string        `json:"shape"`
-	Deal          *DealMaterial `json:"deal,omitempty"`
-	Cards         []CardDTO     `json:"cards,omitempty"`
-	FromPointer   int           `json:"fromPointer"`
+	ReservationID  string        `json:"reservationId"`
+	OperationID    string        `json:"operationId"`
+	Kind           string        `json:"kind"`
+	Seats          []string      `json:"seats,omitempty"`
+	CardsPerHand   int           `json:"cardsPerHand,omitempty"`
+	Count          int           `json:"count,omitempty"`
+	Shape          string        `json:"shape"`
+	Deal           *DealMaterial `json:"deal,omitempty"`
+	Cards          []CardDTO     `json:"cards,omitempty"`
+	FromPointer    int           `json:"fromPointer"`
+	RemainingAfter int           `json:"remainingAfter"`
 }
 
 func snapshotFromDeckState(roomID domain.RoomID, gameID domain.GameID, st *DeckState) (*DeckStateSnapshotV1, error) {
@@ -131,7 +133,7 @@ func pendingToSnapshot(p *pendingReservation) pendingSnapshot {
 		OperationID: string(p.OperationID), Kind: string(p.Kind),
 		Seats: append([]string(nil), p.Seats...), CardsPerHand: p.CardsPerHand,
 		Count: p.Count, CardCount: p.CardCount, Deal: cloneDealPtr(p.Deal),
-		Cards: cloneCards(p.Cards), Shape: p.Shape,
+		Cards: cloneCards(p.Cards), Shape: p.Shape, RemainingAfter: p.RemainingAfter,
 	}
 }
 
@@ -140,7 +142,7 @@ func confirmedToSnapshot(c confirmedOp) confirmedSnapshot {
 		ReservationID: c.ReservationID, OperationID: string(c.OperationID), Kind: string(c.Kind),
 		Seats: append([]string(nil), c.Seats...), CardsPerHand: c.CardsPerHand,
 		Count: c.Count, Shape: c.Shape, Deal: cloneDealPtr(c.Deal),
-		Cards: cloneCards(c.Cards), FromPointer: c.FromPointer,
+		Cards: cloneCards(c.Cards), FromPointer: c.FromPointer, RemainingAfter: c.RemainingAfter,
 	}
 }
 
@@ -320,6 +322,9 @@ func validatePendingAgainstDeck(snap *DeckStateSnapshotV1, pending *pendingReser
 		if !cardDTOsEqual(pending.Cards, want) {
 			return fmt.Errorf("pending draw cards mismatch deck window")
 		}
+		if pending.RemainingAfter < 0 || pending.RemainingAfter != remaining-pending.CardCount {
+			return fmt.Errorf("pending remainingAfter mismatch")
+		}
 	case reservationDeal:
 		if err := validateDealSeatsList(pending.Seats); err != nil {
 			return err
@@ -357,6 +362,9 @@ func validatePendingAgainstDeck(snap *DeckStateSnapshotV1, pending *pendingReser
 		want := reconstructDealMaterial(pending.Seats, pending.CardsPerHand, dtos)
 		if !dealMaterialsEqual(pending.Deal, &want) {
 			return fmt.Errorf("pending deal material mismatch deck window")
+		}
+		if pending.RemainingAfter < 0 || pending.RemainingAfter != remaining-pending.CardCount {
+			return fmt.Errorf("pending remainingAfter mismatch")
 		}
 	default:
 		return fmt.Errorf("unknown pending kind %q", pending.Kind)
@@ -542,7 +550,7 @@ func validateConfirmedAgainstDraws(snap *DeckStateSnapshotV1, conf confirmedOp) 
 func confirmedOpsEqual(a, b confirmedOp) bool {
 	if a.ReservationID != b.ReservationID || a.OperationID != b.OperationID ||
 		a.Kind != b.Kind || a.CardsPerHand != b.CardsPerHand || a.Count != b.Count ||
-		a.Shape != b.Shape || a.FromPointer != b.FromPointer {
+		a.Shape != b.Shape || a.FromPointer != b.FromPointer || a.RemainingAfter != b.RemainingAfter {
 		return false
 	}
 	if len(a.Seats) != len(b.Seats) {
@@ -565,7 +573,7 @@ func snapshotToPending(p pendingSnapshot) *pendingReservation {
 		OperationID: domain.DrawOperationID(p.OperationID), Kind: reservationKind(p.Kind),
 		Seats: append([]string(nil), p.Seats...), CardsPerHand: p.CardsPerHand,
 		Count: p.Count, CardCount: p.CardCount, Deal: cloneDealPtr(p.Deal),
-		Cards: cloneCards(p.Cards), Shape: p.Shape,
+		Cards: cloneCards(p.Cards), Shape: p.Shape, RemainingAfter: p.RemainingAfter,
 	}
 }
 
@@ -575,6 +583,7 @@ func snapshotToConfirmed(c confirmedSnapshot) confirmedOp {
 		Kind: reservationKind(c.Kind), Seats: append([]string(nil), c.Seats...),
 		CardsPerHand: c.CardsPerHand, Count: c.Count, Shape: c.Shape,
 		Deal: cloneDealPtr(c.Deal), Cards: cloneCards(c.Cards), FromPointer: c.FromPointer,
+		RemainingAfter: c.RemainingAfter,
 	}
 }
 

@@ -1,0 +1,52 @@
+{{- /*
+  Tournament round-completion worker: same image as API; WORKER_ROLE=tournament-round-completion
+  discovers ready in_progress rounds (hint) and invokes CompleteRound try path with deterministic
+  commandId complete:{tournamentId}:r{roundNumber}. No HTTP service.
+  Default/staging/production keep enabled=false (ADR-0013). Kind enables 2 replicas.
+  Least privilege: DATABASE_URL secret + REDIS_URL for post-commit bracket refresh —
+  no internal/service/Room/cursor credentials.
+*/ -}}
+{{- if .Values.completionWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-completion-worker
+  labels:
+    app: {{ .Release.Name }}-completion-worker
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.completionWorker.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-completion-worker
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-completion-worker
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: completion-worker
+          image: {{ include "tournament-orchestration.image" . | quote }}
+          imagePullPolicy: {{ include "tournament-orchestration.imagePullPolicy" . }}
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
+            - name: WORKER_ROLE
+              value: "tournament-round-completion"
+            {{- if .Values.env.REDIS_URL }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            {{- end }}
+            {{- if and .Values.existingSecret .Values.secretEnv.DATABASE_URL }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ .Values.secretEnv.DATABASE_URL | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

@@ -96,13 +96,20 @@ Examples:
 
 ## Spectator Recovery
 
-- rebuild projections from spectator-safe upstream events
+- rebuild projections from spectator-safe upstream events while Kafka history remains available
+- after retention expiry or quarantine requiring rebuild, emit `spectator.projection.rebuild_requested` and fetch Room `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` with `ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`; Redis Lua CAS/fence generation-swap so newer live apply wins, recording `(recoveryJobId, roomId, failedCheckpoint)` idempotency atomically with fenced quarantine release
+- replay bounded held post-gap quarantine/DLQ records in sequence for that `roomId` only (max 1000); release quarantine only after continuity is proven; never silently skip a gap
+- rebuilder Deployment remains disabled in default/staging/production/`kind` until live recovery tests pass
 - re-filter historical events if the visibility policy changes
 - restore admission rules so new connections are allowed only while the projected room is `waiting`, `locked`, or `in_progress`, and close streams for terminal rooms
 
 ## Analytics Recovery
 
-- replay sanitized gameplay metrics, public tournament facts, and public rating facts from their upstream topics
+- replay sanitized gameplay metrics, public tournament facts, and public rating facts from their upstream topics while Kafka history remains available
+- after retention expiry or quarantine requiring rebuild, emit `analytics.projection.rebuild_requested` and page Room/Tournament/Ranking `POST .../analytics-backfill` APIs (producer-owned HMAC cursor; paired range required; producer default 100 / hard max 1000; worker default page 1000; read-only append-only outbox)
+- apply under a durable ClickHouse rebuilding generation/lease (deterministic generation, lease readback, active/building dual-write, server-side clone) so concurrent live ingest joins the fence; claim continuity only after every requested page/checkpoint is reconciled
+- acknowledge ClickHouse non-transactional projection-before-marker check-then-act; same-generation redelivery is idempotent via FINAL processed markers
+- rebuilder Deployment remains disabled in default/staging/production/`kind` until live recovery tests pass
 - rebuild public reporting projections without changing source-of-truth contexts
 - drop or quarantine events that do not satisfy the analytics anonymization and public-data policy
 

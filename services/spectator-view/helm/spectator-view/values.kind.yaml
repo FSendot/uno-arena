@@ -1,6 +1,8 @@
 # Local kind overlay for Spectator View durable Redis projection + SSE.
-# Kafka consumer for room.spectator-safe.events remains PENDING.
-# HTTP internal ingest is a test/ops bridge only.
+# Kafka consumer for room.spectator-safe.events is wired via franz-go.
+# HTTP internal ingest remains a test/ops bridge only.
+# Projection rebuilder stays disabled in kind: only offline structure checks exist;
+# no live request→snapshot→fenced swap→quarantine release proof has run (ADR-0039).
 kind: true
 
 replicaCount: 1
@@ -19,8 +21,11 @@ env:
   SPECTATOR_REDIS_KEY_PREFIX: "spectator:"
   # Approximate Redis stream MAXLEN (~) for local proof; snapshot covers trim.
   SPECTATOR_REDIS_STREAM_MAXLEN: "1024"
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: spectator-view
+  KAFKA_SPECTATOR_SAFE_TOPIC: room.spectator-safe.events
+  KAFKA_SPECTATOR_SAFE_DLQ_TOPIC: room.spectator-safe.events.spectator-view.dlq
   # Durable mode: no SPECTATOR_CAPABILITY_MODE; credential from secret.
-  # Kafka consumer intentionally omitted until that slice.
 
 existingSecret: uno-arena-local-credentials
 secretEnv:
@@ -28,3 +33,11 @@ secretEnv:
 
 projectionRebuilder:
   enabled: false
+  replicaCount: 1
+  env:
+    ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+    KAFKA_PROJECTION_REBUILD_GROUP: spectator-view-projection-rebuilder
+    KAFKA_PROJECTION_REBUILD_TOPIC: spectator.projection.rebuild_requested
+    KAFKA_PROJECTION_REBUILD_DLQ_TOPIC: spectator.projection.rebuild_requested.spectator-view.dlq
+  secretEnv:
+    ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL: room-spectator-recovery-service-credential

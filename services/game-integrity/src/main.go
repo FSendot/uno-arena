@@ -281,6 +281,7 @@ func (s *Server) deckOperationsHandler(w http.ResponseWriter, r *http.Request) {
 		out := map[string]any{
 			"kind":          string(res.Kind),
 			"reservationId": res.ReservationID,
+			"remaining":     res.Remaining,
 		}
 		if res.Deal != nil {
 			out["hands"] = res.Deal.Hands
@@ -307,6 +308,7 @@ func (s *Server) deckOperationsHandler(w http.ResponseWriter, r *http.Request) {
 			"kind":          string(res.Kind),
 			"reservationId": res.ReservationID,
 			"cards":         res.Cards,
+			"remaining":     res.Remaining,
 		})
 	case "confirm":
 		kind, rej, err := s.svc.ConfirmReservation(r.Context(), roomID, body.GameID, body.ReservationID)

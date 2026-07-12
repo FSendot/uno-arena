@@ -1,0 +1,184 @@
+# Debezium Server 3.6 — Room realtime outbox → Redis Streams (DB 2, extended format).
+# Separate from Kafka Connect. Does not claim live Postgres→Redis delivery verification.
+# Workload pins the exact quay.io ARM64 digest; imagePullPolicy Never so kubelet
+# never registry-pulls — make kind-load-debezium-server (node-native crictl pull)
+# is mandatory before pods can start. kind load is not used for this image.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: debezium-server-room-realtime-config
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: debezium-server-room-realtime
+    app.kubernetes.io/part-of: uno-arena
+    app.kubernetes.io/component: debezium-server
+    uno-arena.local/non-production: "true"
+    uno-arena.local/cdc-pipeline: room-realtime-redis
+data:
+  # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
+  # Multiarch index: sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984
+  SOURCE_IMAGE_REF: quay.io/debezium/server:3.6.0.Final@sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b
+  IMAGE_VERSION: 3.6.0.Final
+  ARM64_DIGEST: sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b
+  MULTIARCH_INDEX_DIGEST: sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984
+  application.properties: |
+    # Quarkus / health
+    quarkus.http.port=8080
+    quarkus.log.console.json=false
+
+    # Redis Streams sink — Gateway player feed DB index 2, extended format
+    debezium.sink.type=redis
+    debezium.sink.redis.address=redis.uno-arena.svc.cluster.local:6379
+    debezium.sink.redis.db.index=2
+    debezium.sink.redis.message.format=extended
+    debezium.sink.redis.cluster.enabled=false
+
+    # Durable Redis offsets — unique key (must not collide with Connect / other pipelines).
+    # Offset Redis db.index is unsupported; rely on the unique key only.
+    debezium.source.offset.storage=io.debezium.storage.redis.offset.RedisOffsetBackingStore
+    debezium.source.offset.storage.redis.address=redis.uno-arena.svc.cluster.local:6379
+    debezium.source.offset.storage.redis.key=metadata:debezium:room-realtime:offsets
+    debezium.source.offset.flush.interval.ms=1000
+
+    # PostgreSQL source — Room context DB, realtime CDC identity (password via env).
+    # No explicit schema-history store: insert-only outbox with snapshot.mode=no_data.
+    debezium.source.connector.class=io.debezium.connector.postgresql.PostgresConnector
+    debezium.source.database.hostname=postgres-room-gameplay.uno-arena.svc.cluster.local
+    debezium.source.database.port=5432
+    debezium.source.database.user=room_cdc_realtime
+    debezium.source.database.dbname=room_gameplay
+    debezium.source.topic.prefix=room.realtime
+    debezium.source.plugin.name=pgoutput
+    debezium.source.slot.name=debezium_server_room_realtime
+    debezium.source.publication.name=room_cdc_realtime_outbox
+    debezium.source.publication.autocreate.mode=disabled
+    debezium.source.table.include.list=public.realtime_outbox_events
+    debezium.source.tombstones.on.delete=false
+    # Insert-only outbox; disposable local data — streaming only, no historical snapshot.
+    debezium.source.snapshot.mode=no_data
+
+    # Official Debezium Server format properties (not source.* converter aliases).
+    debezium.format.key=json
+    debezium.format.key.schemas.enable=false
+    debezium.format.value=json
+    debezium.format.value.schemas.enable=false
+    debezium.format.header=json
+    debezium.format.header.schemas.enable=false
+
+    # Outbox Event Router — route target_stream column to physical Redis stream name.
+    # Default routed payload stays available as "payload"; additional.placement is
+    # metadata aliases only (do not re-place the payload column).
+    debezium.transforms=outbox
+    debezium.transforms.outbox.type=io.debezium.transforms.outbox.EventRouter
+    debezium.transforms.outbox.table.field.event.id=event_id
+    debezium.transforms.outbox.table.field.event.key=partition_key
+    debezium.transforms.outbox.table.field.event.payload=payload
+    debezium.transforms.outbox.table.expand.json.payload=true
+    debezium.transforms.outbox.route.by.field=target_stream
+    # SmallRye/MicroProfile treats ${...} as a config expression. Property-file
+    # sources need \\${...} so the resolved value is the literal Outbox token
+    # ${routedByValue} (Connect JSON templates keep the bare token — no Quarkus).
+    debezium.transforms.outbox.route.topic.replacement=\\${routedByValue}
+    debezium.transforms.outbox.table.field.additional.missing=ignore
+    debezium.transforms.outbox.table.fields.additional.placement=event_id:envelope:eventId,event_type:envelope:event,schema_version:envelope:schemaVersion,sequence_number:envelope:sequence,player_id:envelope:playerId,session_id:envelope:sessionId
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: debezium-server-room-realtime
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: debezium-server-room-realtime
+    app.kubernetes.io/part-of: uno-arena
+    app.kubernetes.io/component: debezium-server
+    uno-arena.local/non-production: "true"
+    uno-arena.local/cdc-pipeline: room-realtime-redis
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: debezium-server-room-realtime
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debezium-server-room-realtime
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: debezium-server-room-realtime
+    app.kubernetes.io/part-of: uno-arena
+    app.kubernetes.io/component: debezium-server
+    uno-arena.local/non-production: "true"
+    uno-arena.local/cdc-pipeline: room-realtime-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: debezium-server-room-realtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: debezium-server-room-realtime
+        app.kubernetes.io/part-of: uno-arena
+        app.kubernetes.io/component: debezium-server
+        uno-arena.local/non-production: "true"
+        uno-arena.local/cdc-pipeline: room-realtime-redis
+    spec:
+      # Avoid Service-link env vars colliding with Quarkus/Debezium config keys.
+      enableServiceLinks: false
+      containers:
+        - name: debezium-server
+          # Exact quay ARM64 digest; Never = node must already hold it (node-native loader).
+          image: quay.io/debezium/server:3.6.0.Final@sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            # MicroProfile maps DEBEZIUM_SOURCE_DATABASE_PASSWORD → debezium.source.database.password
+            - name: DEBEZIUM_SOURCE_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-cdc-realtime-user
+            - name: DEBEZIUM_SOURCE_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: uno-arena-local-credentials
+                  key: room-cdc-realtime-password
+          volumeMounts:
+            - name: config
+              mountPath: /debezium/config
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            limits:
+              memory: 1536Mi
+      volumes:
+        - name: config
+          configMap:
+            name: debezium-server-room-realtime-config
+            items:
+              - key: application.properties
+                path: application.properties

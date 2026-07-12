@@ -196,6 +196,72 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
 
+  /v1/rooms:
+    get:
+      tags: [reads]
+      summary: Bounded public room list (proxied)
+      description: |
+        Canonical CLI `room list` / `play --casual` matchmaking read. Transparent Gateway proxy of
+        Room Gameplay `GET /internal/v1/rooms/public-list` authenticated with the Gateway↔Room
+        scoped service credential. Returns only public room summaries; never private rooms, hands,
+        session data, invite material, Game Integrity data, or internal credentials.
+        No player bearer is required. Default `status=waiting` (joinable); optional
+        `waiting|locked|in_progress`. Opaque Room-owned HMAC cursor; page default 50 / hard max 100.
+        Gateway validates query bounds and upstream shape; preserves Room 400/401 classifications
+        with Gateway-owned safe error bodies; network/decode/malformed upstream map to 502.
+      operationId: listPublicRooms
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [waiting, locked, in_progress]
+            default: waiting
+          description: Room lifecycle filter. Default waiting for joinable casual matchmaking.
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque Room-owned live keyset cursor over stable roomId, bound to the status filter.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Bounded public room summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicRoomListPage"
+        "400":
+          description: Invalid status, limit, or cursor (Room classification preserved)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Upstream service credential failure (should not reach public clients in healthy wiring)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Room upstream failure or malformed public list body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
   /v1/rooms/{roomId}/commands:
     post:
       tags: [commands]
@@ -504,18 +570,239 @@ paths:
       operationId: getLeaderboard
       parameters:
         - $ref: "#/components/parameters/CorrelationIdHeader"
+        - name: boardType
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [casual_elo, tournament_placement]
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque Ranking-owned live keyset cursor over the last (rating, playerId) boundary. A projection version change does not invalidate it.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
       responses:
         "200":
           description: Leaderboard snapshot
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/LeaderboardPage"
         "429":
           $ref: "#/components/responses/Error"
         "502":
           description: Ranking upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/tournaments/{tournamentId}/bracket:
+    get:
+      tags: [reads]
+      summary: Bounded tournament bracket read model (proxied)
+      description: |
+        Transparent Gateway proxy of Tournament Orchestration `GET /v1/tournaments/{tournamentId}/bracket`.
+        Query parameters are forwarded unchanged. BFF is the sole public boundary and forwards only
+        validated principals (as trusted `X-Player-Id` / `X-Operator-Scope`) plus the Tournament
+        service credential.
+        Authorization: anonymous-tolerant for public tournaments; private tournaments require a
+        participant (registration status != withdrawn) or operator scope. When `Authorization` is
+        present, an invalid bearer returns HTTP 401 before the upstream read.
+        Response is a compact read model only (no full-bracket dump).
+        Gateway preserves Tournament 400/401/403/404 classifications with Gateway-owned safe error bodies;
+        other upstream/network/decode failures map to 502 without exposing upstream bodies.
+      operationId: getTournamentBracket
+      security:
+        - {}
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - name: tournamentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: roundNumber
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque Tournament-owned live keyset cursor over stable (roundNumber, slotIndex) identity.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+      responses:
+        "200":
+          description: Compact bracket summary and one bounded slot page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BracketPage"
+        "400":
+          description: Invalid bracket query or cursor (Tournament classification preserved)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Authorization present but invalid, or private tournament without principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "403":
+          description: Authenticated principal is not a participant or operator for a private tournament
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Tournament upstream/network/decode failure (Gateway-owned safe body)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/tournaments/{tournamentId}/standings:
+    get:
+      tags: [reads]
+      summary: Bounded tournament standings read model (proxied)
+      description: |
+        Transparent Gateway proxy of Tournament Orchestration `GET /v1/tournaments/{tournamentId}/standings`.
+        Compact projection only: phase, registeredCount, currentRound, and ordered finalStandings (max 10).
+        finalStandings is empty until a final-round recorded result exists. No pagination.
+        Authorization: anonymous-tolerant for public standings; private tournaments require a
+        participant (registration status != withdrawn) or operator scope. When `Authorization` is
+        present, an invalid bearer returns HTTP 401 before the upstream read.
+        Gateway preserves Tournament 401/403/404 classifications with Gateway-owned safe error bodies;
+        Tournament store/malformed failures and other upstream/network/decode failures map to 502
+        without exposing upstream bodies.
+      operationId: getTournamentStandings
+      security:
+        - {}
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - name: tournamentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bounded tournament standings projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TournamentStandings"
+        "401":
+          description: Authorization present but invalid, or private tournament without principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "403":
+          description: Authenticated principal is not a participant or operator for a private tournament
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Tournament upstream/network/decode failure (Gateway-owned safe body)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/tournaments/{tournamentId}/players/{playerId}/assignment:
+    get:
+      tags: [reads]
+      summary: Bounded player room-slot assignment (proxied)
+      description: |
+        Transparent Gateway proxy of Tournament Orchestration
+        `GET /v1/tournaments/{tournamentId}/players/{playerId}/assignment`.
+        Returns the caller's latest-round slot mapping (indexed; never scans seeded_player_ids arrays).
+        `assignment` may be null when the player is registered but the current next round is not yet
+        seeded/provisioned; `roomId` may be omitted until the slot is assigned a room.
+        Requires bearer authentication. Requested `playerId` must equal the validated principal unless
+        the principal has operator scope. Gateway forwards only trusted principal fields plus the
+        Tournament service credential.
+      operationId: getTournamentPlayerAssignment
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+        - name: tournamentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: playerId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Bounded assignment projection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TournamentPlayerAssignment"
+        "401":
+          description: Missing or invalid session bearer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "403":
+          description: Authenticated principal may not read this player's assignment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: Tournament or player registration not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Tournament upstream/network/decode failure (Gateway-owned safe body)
           content:
             application/json:
               schema:
@@ -604,6 +891,286 @@ components:
             correlationId: corr_01HX...
 
   schemas:
+    PublicRoomListPage:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, rooms]
+      properties:
+        schemaVersion:
+          type: integer
+          enum: [1]
+        rooms:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PublicRoomSummary"
+        nextCursor:
+          type: string
+          description: Present only when another page exists (one-row lookahead).
+    PublicRoomSummary:
+      type: object
+      additionalProperties: false
+      required: [roomId, status, visibility, maxSeats, currentPlayers, hostId, roomType]
+      properties:
+        roomId:
+          type: string
+        status:
+          type: string
+          enum: [waiting, locked, in_progress]
+        visibility:
+          type: string
+          enum: [public]
+        maxSeats:
+          type: integer
+          minimum: 2
+          maximum: 10
+        currentPlayers:
+          type: integer
+          minimum: 0
+        hostId:
+          type: string
+          description: Host player id only; other roster identities are never listed.
+        roomType:
+          type: string
+          enum: [ad_hoc, tournament]
+        tournamentId:
+          type: string
+          description: Present only for public tournament rooms when relevant.
+    LeaderboardPage:
+      type: object
+      additionalProperties: false
+      required: [boardType, projectionVersion, generatedAt, entries]
+      properties:
+        boardType:
+          type: string
+          enum: [casual_elo, tournament_placement]
+        projectionVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Version observed for this page; a later page may report a newer version.
+        generatedAt:
+          type: string
+          format: date-time
+        entries:
+          type: array
+          maxItems: 500
+          items:
+            type: object
+            additionalProperties: false
+            required: [playerId, rating, rank]
+            properties:
+              playerId:
+                type: string
+              rating:
+                type: integer
+              rank:
+                type: integer
+                minimum: 1
+        nextCursor:
+          type: string
+          description: Opaque live-keyset continuation cursor; absent on the final page.
+
+    BracketPage:
+      type: object
+      additionalProperties: false
+      required: [tournamentId, projectionVersion, generatedAt, summary, slots]
+      properties:
+        tournamentId:
+          type: string
+        projectionVersion:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Version observed for this page; slot state may advance before a later page.
+        generatedAt:
+          type: string
+          format: date-time
+        summary:
+          $ref: "#/components/schemas/BracketSummary"
+        slots:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/BracketSlot"
+        nextCursor:
+          type: string
+          description: Opaque live-keyset continuation cursor; absent on the final page.
+
+    BracketSummary:
+      type: object
+      additionalProperties: false
+      required: [phase, capacity, registeredCount, currentRound, rounds]
+      properties:
+        phase:
+          type: string
+        capacity:
+          type: integer
+          minimum: 0
+        registeredCount:
+          type: integer
+          minimum: 0
+        currentRound:
+          type: integer
+          minimum: 0
+        rounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/BracketRoundSummary"
+
+    BracketRoundSummary:
+      type: object
+      additionalProperties: false
+      required: [roundNumber, status, isFinal, slotCount, completed, batchCount]
+      properties:
+        roundNumber:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+        isFinal:
+          type: boolean
+        slotCount:
+          type: integer
+          minimum: 0
+        completed:
+          type: boolean
+        batchCount:
+          type: integer
+          minimum: 0
+
+    BracketSlot:
+      type: object
+      additionalProperties: false
+      required: [roundNumber, slotIndex, slotId, status, seededPlayerIds]
+      properties:
+        roundNumber:
+          type: integer
+          minimum: 1
+        slotIndex:
+          type: integer
+          minimum: 0
+        slotId:
+          type: string
+        status:
+          type: string
+        seededPlayerIds:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+        roomId:
+          type: string
+        batchId:
+          type: string
+        advancingPlayerIds:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+        completionVersion:
+          type: integer
+          format: int64
+          minimum: 0
+        quarantineReason:
+          type: string
+
+    TournamentStandings:
+      type: object
+      additionalProperties: false
+      required:
+        - tournamentId
+        - projectionVersion
+        - generatedAt
+        - phase
+        - registeredCount
+        - currentRound
+        - finalStandings
+      properties:
+        tournamentId:
+          type: string
+        projectionVersion:
+          type: integer
+          format: int64
+          minimum: 0
+        generatedAt:
+          type: string
+          format: date-time
+        phase:
+          type: string
+        registeredCount:
+          type: integer
+          minimum: 0
+        currentRound:
+          type: integer
+          minimum: 0
+        finalStandings:
+          type: array
+          maxItems: 10
+          description: |
+            Ordered final-room player IDs from Tournament-owned recorded ranked_result.
+            Empty until a final-round result is recorded. No championId; first entry is place 1.
+          items:
+            type: string
+
+    TournamentPlayerAssignment:
+      type: object
+      additionalProperties: false
+      required:
+        - tournamentId
+        - playerId
+        - visibility
+        - phase
+        - registrationStatus
+        - currentRound
+        - assignment
+      properties:
+        tournamentId:
+          type: string
+        playerId:
+          type: string
+        visibility:
+          type: string
+          enum: [public, private]
+        phase:
+          type: string
+        registrationStatus:
+          type: string
+          enum: [registered, withdrawn, eliminated, advanced_final]
+        currentRound:
+          type: integer
+          minimum: 0
+        assignment:
+          nullable: true
+          description: |
+            Latest-round slot mapping from the normalized player index.
+            Null when registered but the player's next round is not yet seeded.
+          allOf:
+            - $ref: "#/components/schemas/TournamentSlotAssignment"
+        projectionVersion:
+          type: integer
+          format: int64
+          minimum: 0
+        generatedAt:
+          type: string
+          format: date-time
+
+    TournamentSlotAssignment:
+      type: object
+      additionalProperties: false
+      required: [roundNumber, slotId, slotStatus]
+      properties:
+        roundNumber:
+          type: integer
+          minimum: 1
+        slotId:
+          type: string
+        roomId:
+          type: string
+          description: Present only after the slot has an assigned room; omitted when still pending provisioning.
+        slotStatus:
+          type: string
+
     HealthResponse:
       type: object
       required: [status, service]
@@ -1071,6 +1638,11 @@ components:
             batchSize:
               type: integer
               minimum: 1
+            visibility:
+              type: string
+              enum: [public, private]
+              default: public
+              description: Tournament read visibility. Empty/omitted defaults to public.
 
     RegisterPlayerCommand:
       type: object
@@ -1309,6 +1881,10 @@ components:
               type: object
               additionalProperties:
                 type: integer
+            drawPileSize:
+              type: integer
+              minimum: 0
+              description: Authoritative remaining draw-pile count from Game Integrity (count only; never card identities or order)
             completed:
               type: boolean
         hand:
@@ -1389,6 +1965,10 @@ components:
           type: integer
         penaltyTarget:
           type: string
+        drawPileSize:
+          type: integer
+          minimum: 0
+          description: Authoritative remaining draw-pile count (public-safe count only; never card identities or order)
         gameScore:
           type: object
           additionalProperties:

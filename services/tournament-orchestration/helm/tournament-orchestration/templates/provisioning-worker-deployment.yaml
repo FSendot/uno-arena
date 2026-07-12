@@ -1,8 +1,57 @@
 {{- /*
-  Provisioning worker remains disabled: no safe WORKER_ROLE=tournament-provisioning
-  loop is implemented. Synchronous ProcessProvisioningBatch + durable recovery cover
-  the application path. Keep provisioningWorker.enabled=false in all overlays.
+  Tournament provisioning worker: same image as API; WORKER_ROLE=tournament-provisioning
+  claims Postgres batches with FOR UPDATE SKIP LOCKED and calls ProcessProvisioningBatch
+  in-process (no self-HTTP). Enabled for kind with 2 replicas to exercise SKIP LOCKED.
+  Default/staging/production keep enabled=false (ADR-0013).
 */ -}}
 {{- if .Values.provisioningWorker.enabled }}
-{{- fail "provisioningWorker.enabled must stay false until a safe WORKER_ROLE loop exists" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-provisioning-worker
+  labels:
+    app: {{ .Release.Name }}-provisioning-worker
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.provisioningWorker.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-provisioning-worker
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-provisioning-worker
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: provisioning-worker
+          image: {{ include "tournament-orchestration.image" . | quote }}
+          imagePullPolicy: {{ include "tournament-orchestration.imagePullPolicy" . }}
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
+            - name: WORKER_ROLE
+              value: "tournament-provisioning"
+            - name: ROOM_GAMEPLAY_URL
+              value: {{ .Values.env.ROOM_GAMEPLAY_URL | quote }}
+            {{- if .Values.env.REDIS_URL }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            {{- end }}
+            {{- if .Values.existingSecret }}
+            {{- range $envName, $key := .Values.secretEnv }}
+            {{- /* Cursor HMAC + analytics backfill secrets are API-only. */ -}}
+            {{- if and $key (ne $key "") (ne $envName "TOURNAMENT_BRACKET_CURSOR_SECRET") (ne $envName "TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET") (ne $envName "TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL") }}
+            - name: {{ $envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
 {{- end }}

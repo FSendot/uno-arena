@@ -679,6 +679,23 @@ func (s *Server) handleInternalSessionInvalidated(w http.ResponseWriter, r *http
 		s.writeErr(w, r, http.StatusBadRequest, "id_mismatch", "body sessionId does not match path", "")
 		return
 	}
+	playerID := strings.TrimSpace(req.PlayerID)
+	reason := strings.TrimSpace(req.Reason)
+	if s.sessionInvalidation != nil {
+		if playerID == "" || reason == "" {
+			s.writeErr(w, r, http.StatusBadRequest, "bad_request", "playerId and reason are required when durable invalidation is configured", "")
+			return
+		}
+		_, err := s.sessionInvalidation.Apply(r.Context(), req.EventID, pathSessionID, playerID, reason, req.EventID, s.clock())
+		if err != nil {
+			if errors.Is(err, ErrControlConflict) {
+				s.writeErr(w, r, http.StatusConflict, "control_conflict", err.Error(), "")
+				return
+			}
+			s.writeErr(w, r, http.StatusServiceUnavailable, "session_invalidation_unavailable", err.Error(), "")
+			return
+		}
+	}
 	n, dup, err := s.hub.ApplySessionInvalidation(req.EventID, pathSessionID)
 	if err != nil {
 		if errors.Is(err, ErrControlConflict) {

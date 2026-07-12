@@ -104,8 +104,8 @@ func TestApply_PublicTournamentAndRatingMetrics(t *testing.T) {
 			"snapshotId": "lb_1",
 			"sourceType": "casual_elo",
 			"entries": []any{
-				map[string]any{"playerId": "p1", "rating": 1016},
-				map[string]any{"playerId": "p2", "rating": 990},
+				map[string]any{"playerId": "p1", "rating": 1016, "rank": 1},
+				map[string]any{"playerId": "p2", "rating": 990, "rank": 2},
 			},
 		},
 	})

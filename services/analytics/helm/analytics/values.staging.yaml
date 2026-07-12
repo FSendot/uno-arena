@@ -2,6 +2,11 @@ env:
   DEPLOYMENT_ENV: staging
   CLICKHOUSE_URL: http://clickhouse.uno-arena.svc.cluster.local:8123
   CLICKHOUSE_DB: analytics
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: analytics
+  KAFKA_TOPICS: room.gameplay.metrics,room.match.completed,tournament.match.assigned,tournament.match.result_recorded,tournament.players.advanced,tournament.round.completed,tournament.completed,ranking.player_rating_updated,ranking.leaderboard_snapshot_published
+  KAFKA_MAX_ATTEMPTS: "5"
+  KAFKA_MAX_PARTITION_WORKERS: "8"
 
 projectionRebuilder:
   enabled: false

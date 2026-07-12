@@ -67,6 +67,20 @@ This repository contains the current UnoArena design package and the architectur
 
 ## Client Checkpoint
 
+Stage **A** (canonical CLI foundation: auth/session/seed, room + tournament utilities,
+`spectate`, Docker packaging, offline tests) is implemented under
+[`client-checkpoint/`](./client-checkpoint/README.md). Stage **B** interactive `play` and
+headless `bot` are **not** implemented yet.
+
+```bash
+export UNOARENA_API_URL=http://127.0.0.1:8080
+./client-checkpoint/bin/unoarena health
+make test-client-checkpoint          # offline fake-BFF CLI tests
+make test-client-dockerfile          # Dockerfile structure (no build/pull)
+# docker build -f client-checkpoint/Dockerfile -t uno-arena/client:local ./client-checkpoint
+# docker run --rm -e UNOARENA_API_URL=… uno-arena/client:local <subcommand> …
+```
+
 - [Client Checkpoint CLI](./client-checkpoint/README.md)
 
 ## Local foundation (contracts + topology)

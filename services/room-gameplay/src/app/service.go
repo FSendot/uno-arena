@@ -50,9 +50,11 @@ type ServiceDeps struct {
 
 // Service is the Room Gameplay application service.
 type Service struct {
-	deps     ServiceDeps
-	mu       sync.Mutex // serialize per-process command handling for in-memory repo
-	outboxMu sync.Mutex // serialize DrainOutbox across worker + post-commit paths
+	deps              ServiceDeps
+	mu                sync.Mutex // serialize per-process command handling for in-memory repo
+	outboxMu          sync.Mutex // serialize DrainOutbox across worker + post-commit paths
+	analyticsBackfill AnalyticsBackfillReader
+	publicList        PublicRoomLister
 }
 
 // durable returns true when RoomCommandStore drives FOR UPDATE command transactions.
@@ -228,6 +230,27 @@ func (s *Service) Provision(ctx context.Context, in ProvisionInput) CommandResul
 	return s.commitAccepted(ctx, cmdIn, nil, sess, out, MaterialReservation{})
 }
 
+// SpectatorRecoverySnapshot loads an authoritative room session and returns
+// SnapshotSanitized-compatible public state plus sequence/resumeCheckpoint.
+// Never includes private hands, deck, player-feed, GI, or session secrets.
+func (s *Service) SpectatorRecoverySnapshot(ctx context.Context, roomID string) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.deps.Sessions.Get(ctx, domain.RoomID(roomID))
+	if !ok {
+		return nil, ErrNotFound
+	}
+	seq := int64(sess.Room().Sequence())
+	data := BuildPublicSpectatorSnapshot(sess)
+	out := make(map[string]any, len(data)+2)
+	for k, v := range data {
+		out[k] = v
+	}
+	out["sequenceNumber"] = seq
+	out["resumeCheckpoint"] = seq
+	return out, nil
+}
+
 // PlayerSnapshot builds a player-private reconnect snapshot.
 func (s *Service) PlayerSnapshot(ctx context.Context, roomID, playerID string) (map[string]any, error) {
 	s.mu.Lock()
@@ -288,6 +311,7 @@ func (s *Service) PlayerSnapshot(ctx context.Context, roomID, playerID string) (
 			"currentPlayer":  string(pub.CurrentPlayer),
 			"direction":      int(pub.Direction),
 			"handCounts":     pub.HandCounts,
+			"drawPileSize":   pub.DrawPileSize,
 			"completed":      pub.Completed,
 		}
 		snap["hand"] = g.Hand(game.PlayerID(playerID))
@@ -550,10 +574,13 @@ func (s *Service) apply(ctx context.Context, sess *domain.Session, in CommandInp
 			return domain.CommandOutcome{}, err
 		}
 		*reservation = res
+		deal := *res.Deal
+		deal.DrawPileSize = res.DrawPileSize
+		deal.HasDrawPileSize = true
 		return sess.StartMatch(domain.StartMatchCommand{
 			CommandID: domain.CommandID(in.CommandID), ActorID: player, AsSystem: in.AsSystem,
 			GameID: domain.GameID(gameID), ExpectedSequence: expected,
-		}, *res.Deal), nil
+		}, deal), nil
 	case CmdStartNextGame:
 		var p struct {
 			GameID string `json:"gameId"`
@@ -569,9 +596,12 @@ func (s *Service) apply(ctx context.Context, sess *domain.Session, in CommandInp
 			return domain.CommandOutcome{}, err
 		}
 		*reservation = res
+		deal := *res.Deal
+		deal.DrawPileSize = res.DrawPileSize
+		deal.HasDrawPileSize = true
 		return sess.StartNextGame(domain.StartNextGameCommand{
 			CommandID: domain.CommandID(in.CommandID), GameID: domain.GameID(gameID),
-			ExpectedSequence: expected, Deal: *res.Deal,
+			ExpectedSequence: expected, Deal: deal,
 		}), nil
 	case CmdPlayCard:
 		var p struct {
@@ -595,6 +625,7 @@ func (s *Service) apply(ctx context.Context, sess *domain.Session, in CommandInp
 		return sess.DrawCard(domain.DrawCardCommand{
 			CommandID: domain.CommandID(in.CommandID), PlayerID: player,
 			Cards: res.Cards, ExpectedSequence: expected,
+			DrawPileSize: res.DrawPileSize, HasDrawPileSize: true,
 		}), nil
 	case CmdChooseColor:
 		var p struct {
@@ -624,6 +655,7 @@ func (s *Service) apply(ctx context.Context, sess *domain.Session, in CommandInp
 			CommandID: domain.CommandID(in.CommandID), ChallengerID: player,
 			TargetID: domain.PlayerID(p.TargetID), Cards: res.Cards,
 			ExpectedSequence: expected, NowUTC: now,
+			DrawPileSize: res.DrawPileSize, HasDrawPileSize: true,
 		}), nil
 	case CmdReconnectToRoom:
 		var p struct {
@@ -750,8 +782,9 @@ func (s *Service) commitAccepted(
 
 	audiences := s.feedAudiences(ctx, roomID, stage.Room(), in)
 	playerStart := s.deps.Sessions.PeekStreamSeq(ctx, roomID) + 1
-	feedEvents, playerHighWater := BuildFeedEvents(stage, seq, playerStart, in.CorrelationID, in.CommandID, out.Facts, audiences, prevSeq)
-	completion := BuildCompletionEvents(stage.Room(), stage.Game(), gameID, seq, in.CorrelationID, in.CommandID, out.Facts, s.deps.Clock.Now())
+	now := s.deps.Clock.Now()
+	feedEvents, playerHighWater := BuildFeedEvents(stage, seq, playerStart, in.CorrelationID, in.CommandID, out.Facts, audiences, prevSeq, now)
+	completion := BuildCompletionEvents(stage.Room(), stage.Game(), gameID, seq, in.CorrelationID, in.CommandID, out.Facts, now)
 	all := append(feedEvents, completion...)
 
 	req := CommitRequest{
@@ -790,9 +823,13 @@ func (s *Service) commitAccepted(
 	// Async publish from pending outbox (errors leave entries pending for retry).
 	_, _ = s.DrainOutbox(ctx, 1)
 
-	return CommandResult{Result: envelope.Accepted(in.CommandID, in.Type, &seq, MustJSON(map[string]any{
-		"facts": factNames(out.Facts),
-	}))}
+	acceptedPayload := map[string]any{"facts": factNames(out.Facts)}
+	if in.Type == "ProvisionTournamentRoom" {
+		// Tournament HTTPRoomProvisioner requires authoritative payload.roomId on first success
+		// and every duplicate/replay — keep other command payloads facts-only.
+		acceptedPayload["roomId"] = roomID
+	}
+	return CommandResult{Result: envelope.Accepted(in.CommandID, in.Type, &seq, MustJSON(acceptedPayload))}
 }
 
 func (s *Service) feedAudiences(ctx context.Context, roomID string, room *domain.Room, in CommandInput) []FeedAudience {

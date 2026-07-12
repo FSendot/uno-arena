@@ -474,7 +474,7 @@ func TestFinding_HTTPSessionValidator_AndReady(t *testing.T) {
 		Clock:     app.NewFixedClock(time.Now().UTC()),
 		SessionsV: v,
 	})
-	srv := NewServerWithTimerCred(svc, testCred, testTimerCred, "room-gameplay")
+	srv := NewServerWithScopedCreds(svc, testCred, testTimerCred, testSpectatorRecoveryCred, testAnalyticsBackfillCred, "room-gameplay")
 	srv.SetReady(false, "postgres_adapter_blocked")
 	mux := srv.routes()
 	w := httptest.NewRecorder()
@@ -567,14 +567,16 @@ func TestFinding_SystemTimer_FeedAudienceUsesStoredBinding(t *testing.T) {
 
 func TestWireRuntime_ConfiguredWithoutDatabaseIsMisconfigured(t *testing.T) {
 	wired, err := wireRoomRuntime(roomRuntimeConfig{
-		ServiceName:       "room-gameplay",
-		ServiceCredential: "room-cred",
-		TimerCredential:   "timer-cred",
-		IdentityURL:       "http://identity.example",
-		IdentityCred:      "id-cred",
-		GameIntegrityURL:  "http://gi.example",
-		GameIntegrityCred: "gi-cred",
-		AllowFakes:        false,
+		ServiceName:                 "room-gameplay",
+		ServiceCredential:           "room-cred",
+		TimerCredential:             "timer-cred",
+		SpectatorRecoveryCredential: "spectator-recovery-cred",
+		AnalyticsBackfillCredential: "analytics-room-cred",
+		IdentityURL:                 "http://identity.example",
+		IdentityCred:                "id-cred",
+		GameIntegrityURL:            "http://gi.example",
+		GameIntegrityCred:           "gi-cred",
+		AllowFakes:                  false,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -592,15 +594,17 @@ func TestWireRuntime_ConfiguredWithoutDatabaseIsMisconfigured(t *testing.T) {
 
 func TestWireRuntime_DurableMissingRedisStaysNotReady(t *testing.T) {
 	wired, err := wireRoomRuntime(roomRuntimeConfig{
-		ServiceName:       "room-gameplay",
-		ServiceCredential: "room-cred",
-		TimerCredential:   "timer-cred",
-		IdentityURL:       "http://identity.example",
-		IdentityCred:      "id-cred",
-		GameIntegrityURL:  "http://gi.example",
-		GameIntegrityCred: "gi-cred",
-		DatabaseURL:       "postgres://room/db",
-		AllowFakes:        false,
+		ServiceName:                 "room-gameplay",
+		ServiceCredential:           "room-cred",
+		TimerCredential:             "timer-cred",
+		SpectatorRecoveryCredential: "spectator-recovery-cred",
+		AnalyticsBackfillCredential: "analytics-room-cred",
+		IdentityURL:                 "http://identity.example",
+		IdentityCred:                "id-cred",
+		GameIntegrityURL:            "http://gi.example",
+		GameIntegrityCred:           "gi-cred",
+		DatabaseURL:                 "postgres://room/db",
+		AllowFakes:                  false,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -609,6 +613,42 @@ func TestWireRuntime_DurableMissingRedisStaysNotReady(t *testing.T) {
 		t.Fatalf("ready=%v mode=%s", wired.Ready, wired.Mode)
 	}
 	if !strings.Contains(wired.NotReadyReason, "REDIS_URL") {
+		t.Fatalf("reason=%q", wired.NotReadyReason)
+	}
+}
+
+func TestWireRuntime_DurableMissingAnalyticsBackfillSecrets(t *testing.T) {
+	t.Setenv("ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET", "")
+	t.Setenv("ROOM_PUBLIC_LIST_CURSOR_SECRET", "")
+	t.Setenv("DEPLOYMENT_ENV", "staging")
+	wired, err := wireRoomRuntime(roomRuntimeConfig{
+		ServiceName:                 "room-gameplay",
+		ServiceCredential:           "room-cred",
+		TimerCredential:             "timer-cred",
+		SpectatorRecoveryCredential: "spectator-recovery-cred",
+		// AnalyticsBackfillCredential intentionally empty
+		IdentityURL:       "http://identity.example",
+		IdentityCred:      "id-cred",
+		GameIntegrityURL:  "http://gi.example",
+		GameIntegrityCred: "gi-cred",
+		DatabaseURL:       "postgres://room/db",
+		RedisURL:          "redis://localhost:6379/0",
+		AllowFakes:        false,
+		DeploymentEnv:     "staging",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wired.Ready {
+		t.Fatal("durable API must not be ready without analytics backfill secrets")
+	}
+	if !strings.Contains(wired.NotReadyReason, "ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL") {
+		t.Fatalf("reason=%q", wired.NotReadyReason)
+	}
+	if !strings.Contains(wired.NotReadyReason, "ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET") {
+		t.Fatalf("reason=%q", wired.NotReadyReason)
+	}
+	if !strings.Contains(wired.NotReadyReason, "ROOM_PUBLIC_LIST_CURSOR_SECRET") {
 		t.Fatalf("reason=%q", wired.NotReadyReason)
 	}
 }
@@ -701,23 +741,25 @@ func TestWireRuntime_CapabilityMode_ReachesIdentityGIPublisher(t *testing.T) {
 	t.Cleanup(tournament.Close)
 
 	wired, err := wireRoomRuntime(roomRuntimeConfig{
-		CapabilityMode:    true,
-		ServiceCredential: "room-cred",
-		TimerCredential:   "timer-cred",
-		IdentityURL:       identity.URL,
-		IdentityCred:      "id-cred",
-		GameIntegrityURL:  gi.URL,
-		GameIntegrityCred: "gi-cred",
-		GatewayURL:        gateway.URL,
-		GatewayCred:       "gw-cred",
-		SpectatorURL:      spectator.URL,
-		SpectatorCred:     "sv-cred",
-		RankingURL:        ranking.URL,
-		RankingCred:       "rk-cred",
-		AnalyticsURL:      analytics.URL,
-		AnalyticsCred:     "an-cred",
-		TournamentURL:     tournament.URL,
-		TournamentCred:    "to-cred",
+		CapabilityMode:              true,
+		ServiceCredential:           "room-cred",
+		TimerCredential:             "timer-cred",
+		SpectatorRecoveryCredential: "spectator-recovery-cred",
+		AnalyticsBackfillCredential: "analytics-room-cred",
+		IdentityURL:                 identity.URL,
+		IdentityCred:                "id-cred",
+		GameIntegrityURL:            gi.URL,
+		GameIntegrityCred:           "gi-cred",
+		GatewayURL:                  gateway.URL,
+		GatewayCred:                 "gw-cred",
+		SpectatorURL:                spectator.URL,
+		SpectatorCred:               "sv-cred",
+		RankingURL:                  ranking.URL,
+		RankingCred:                 "rk-cred",
+		AnalyticsURL:                analytics.URL,
+		AnalyticsCred:               "an-cred",
+		TournamentURL:               tournament.URL,
+		TournamentCred:              "to-cred",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -806,12 +848,13 @@ func TestWireRuntime_CapabilityMode_DistinctFromAllowFakesAndConfigured(t *testi
 	}
 
 	configured, err := wireRoomRuntime(roomRuntimeConfig{
-		ServiceCredential: "c",
-		TimerCredential:   "t",
-		IdentityURL:       "http://identity.example",
-		IdentityCred:      "id",
-		GameIntegrityURL:  "http://gi.example",
-		GameIntegrityCred: "gi",
+		ServiceCredential:           "c",
+		TimerCredential:             "t",
+		SpectatorRecoveryCredential: "sr",
+		IdentityURL:                 "http://identity.example",
+		IdentityCred:                "id",
+		GameIntegrityURL:            "http://gi.example",
+		GameIntegrityCred:           "gi",
 		// No DATABASE_URL → misconfigured (never silent memory).
 	})
 	if err != nil {
@@ -846,7 +889,7 @@ func TestFinding_SystemClock_WiredInAllRuntimeModes(t *testing.T) {
 		{AllowFakes: true, ServiceCredential: "c"},
 		{CapabilityMode: true, ServiceCredential: "c", DeploymentEnv: "development"},
 		{
-			ServiceCredential: "c", TimerCredential: "t",
+			ServiceCredential: "c", TimerCredential: "t", SpectatorRecoveryCredential: "sr",
 			IdentityURL: "http://identity.example", IdentityCred: "id",
 			GameIntegrityURL: "http://gi.example", GameIntegrityCred: "gi",
 			// No DATABASE_URL → misconfigured still wires SystemClock.
@@ -955,6 +998,11 @@ func TestFinding_NotReady_GatesCommandProvisionTimerSnapshot(t *testing.T) {
 		"roomId": "r", "hostId": "host", "playerIds": []string{"host"},
 	})
 	assertNotReady(http.MethodPost, "/internal/v1/rooms/room_nr/timer-commands", cmdBody("tm", "ExpireUnoWindow", seq(1), "host", "s", "room_nr", map[string]any{}))
+	assertNotReady(http.MethodGet, "/internal/v1/rooms/room_nr/spectator-recovery-snapshot?failedCheckpoint=1&recoveryJobId=j&schemaVersion=1", nil)
+	assertNotReady(http.MethodPost, "/internal/v1/rooms/analytics-backfill", map[string]any{
+		"recoveryJobId": "j", "sourceTopic": "room.gameplay.metrics", "schemaVersion": 1,
+		"fromCheckpoint": "1", "toCheckpoint": "2",
+	})
 	assertNotReady(http.MethodGet, "/v1/rooms/room_nr/snapshot?playerId=host", nil)
 
 	w := httptest.NewRecorder()

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,15 +18,16 @@ import (
 const testCred = "room-test-credential"
 
 type testEnv struct {
-	srv       *Server
-	mux       http.Handler
-	clock     *app.FixedClock
-	integrity *app.FakeGameIntegrity
-	audit     *app.FakeAuditSink
-	publisher *app.FakeEventPublisher
-	sessions  *app.MemorySessionRepository
-	deals     *app.FakeDealSource
-	sessionsV *app.FakeSessionValidator
+	srv               *Server
+	mux               http.Handler
+	clock             *app.FixedClock
+	integrity         *app.FakeGameIntegrity
+	audit             *app.FakeAuditSink
+	publisher         *app.FakeEventPublisher
+	sessions          *app.MemorySessionRepository
+	deals             *app.FakeDealSource
+	sessionsV         *app.FakeSessionValidator
+	analyticsBackfill *app.MemoryAnalyticsBackfillStore
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -53,15 +56,21 @@ func newTestEnv(t *testing.T) *testEnv {
 		Clock:     clock,
 		SessionsV: sessionsV,
 	})
-	srv := NewServerWithTimerCred(svc, testCred, testTimerCred, "room-gameplay")
+	srv := NewServerWithScopedCreds(svc, testCred, testTimerCred, testSpectatorRecoveryCred, testAnalyticsBackfillCred, "room-gameplay")
+	mem := app.NewMemoryAnalyticsBackfillStore()
+	svc.SetAnalyticsBackfillReader(mem)
+	svc.SetPublicListReader(sessions)
 	return &testEnv{
 		srv: srv, mux: srv.routes(), clock: clock,
 		integrity: integrity, audit: audit, publisher: publisher,
 		sessions: sessions, deals: deals, sessionsV: sessionsV,
+		analyticsBackfill: mem,
 	}
 }
 
 const testTimerCred = "room-timer-credential"
+const testSpectatorRecoveryCred = "room-spectator-recovery-credential"
+const testAnalyticsBackfillCred = "analytics-room-credential"
 
 func (e *testEnv) do(t *testing.T, method, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -96,6 +105,20 @@ func (e *testEnv) timerAuth() map[string]string {
 	return map[string]string{
 		"X-Service-Credential": testTimerCred,
 		"X-Correlation-Id":     "corr-timer",
+	}
+}
+
+func (e *testEnv) spectatorRecoveryAuth() map[string]string {
+	return map[string]string{
+		"X-Service-Credential": testSpectatorRecoveryCred,
+		"X-Correlation-Id":     "corr-spectator-recovery",
+	}
+}
+
+func (e *testEnv) analyticsBackfillAuth() map[string]string {
+	return map[string]string{
+		"X-Service-Credential": testAnalyticsBackfillCred,
+		"X-Correlation-Id":     "corr-analytics-backfill",
 	}
 }
 
@@ -354,6 +377,85 @@ func TestProvision_IdempotentByTournamentRoundSlot(t *testing.T) {
 	}
 }
 
+// tournamentParseProvisionedRoomID mirrors Tournament HTTPRoomProvisioner.parseProvisionedRoomID.
+// Keep in sync: first success and duplicate provision bodies must expose authoritative roomId.
+func tournamentParseProvisionedRoomID(raw []byte) (string, error) {
+	var env envelope.Result
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", err
+	}
+	if env.Status != envelope.StatusAccepted {
+		return "", errString("not accepted")
+	}
+	if len(env.Payload) == 0 {
+		return "", errString("missing payload")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return "", err
+	}
+	roomID, _ := payload["roomId"].(string)
+	if roomID == "" {
+		return "", errString("missing roomId")
+	}
+	return roomID, nil
+}
+
+func TestProvision_HTTPContract_FirstAndDuplicateFeedTournamentParser(t *testing.T) {
+	e := newTestEnv(t)
+	srv := httptest.NewServer(e.mux)
+	t.Cleanup(srv.Close)
+
+	wantRoom := "room_contract_1"
+	provisionViaHTTP := func(commandID, roomID string) []byte {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"commandId": commandID, "tournamentId": "t-contract", "roundNumber": 2, "slotId": "slot_3",
+			"roomId": roomID, "hostId": "p1", "playerIds": []string{"p1", "p2"},
+			"visibility": "private", "maxSeats": 4,
+		})
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/internal/v1/rooms/provision", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Service-Credential", testCred)
+		req.Header.Set("X-Correlation-Id", "corr-contract")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("provision %s: %d %s", commandID, resp.StatusCode, raw)
+		}
+		return raw
+	}
+
+	// Feed real Room HTTP bodies through Tournament's parseProvisionedRoomID contract.
+	firstID, err := tournamentParseProvisionedRoomID(provisionViaHTTP("prov-contract-1", wantRoom))
+	if err != nil {
+		t.Fatalf("tournament parser rejected first success body: %v", err)
+	}
+	if firstID != wantRoom {
+		t.Fatalf("first roomId=%q want %q", firstID, wantRoom)
+	}
+	dupID, err := tournamentParseProvisionedRoomID(provisionViaHTTP("prov-contract-2", "room_ignored_on_dup"))
+	if err != nil {
+		t.Fatalf("tournament parser rejected duplicate body: %v", err)
+	}
+	if dupID != wantRoom {
+		t.Fatalf("duplicate roomId=%q want %q", dupID, wantRoom)
+	}
+	if dupID != firstID {
+		t.Fatalf("duplicate roomId %q != first %q", dupID, firstID)
+	}
+}
+
 func TestTimerCommands_StaleUnoAndReconnectIdempotency(t *testing.T) {
 	e := newTestEnv(t)
 	h := e.auth()
@@ -494,5 +596,261 @@ func TestCancelRoom_DocumentedRoute(t *testing.T) {
 	res := decodeResult(t, w)
 	if res.Status != envelope.StatusAccepted {
 		t.Fatalf("cancel=%+v", res)
+	}
+}
+
+func spectatorRecoveryPath(roomID string, failedCheckpoint int64, recoveryJobID string, schemaVersion int) string {
+	return "/internal/v1/rooms/" + roomID + "/spectator-recovery-snapshot" +
+		"?failedCheckpoint=" + strconv.FormatInt(failedCheckpoint, 10) +
+		"&recoveryJobId=" + recoveryJobID +
+		"&schemaVersion=" + strconv.Itoa(schemaVersion)
+}
+
+func TestSpectatorRecoverySnapshot_Auth(t *testing.T) {
+	e := newTestEnv(t)
+	h := e.auth()
+	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("c", "CreateRoom", nil, "host", "s", "room_sr_auth", map[string]any{
+		"roomId": "room_sr_auth",
+	}), h)
+	path := spectatorRecoveryPath("room_sr_auth", 1, "job-1", 1)
+
+	w := e.do(t, http.MethodGet, path, nil, nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing cred: %d", w.Code)
+	}
+	w = e.do(t, http.MethodGet, path, nil, map[string]string{"X-Service-Credential": "wrong"})
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong cred: %d", w.Code)
+	}
+	w = e.do(t, http.MethodGet, path, nil, e.auth())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("generic service cred must not authorize: %d", w.Code)
+	}
+	w = e.do(t, http.MethodGet, path, nil, e.timerAuth())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("timer cred must not authorize: %d", w.Code)
+	}
+	w = e.do(t, http.MethodGet, path, nil, e.spectatorRecoveryAuth())
+	if w.Code != http.StatusOK {
+		t.Fatalf("recovery cred: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSpectatorRecoverySnapshot_QueryValidation(t *testing.T) {
+	e := newTestEnv(t)
+	h := e.auth()
+	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("c", "CreateRoom", nil, "host", "s", "room_sr_q", map[string]any{
+		"roomId": "room_sr_q",
+	}), h)
+	auth := e.spectatorRecoveryAuth()
+	base := "/internal/v1/rooms/room_sr_q/spectator-recovery-snapshot"
+
+	cases := []string{
+		base,
+		base + "?recoveryJobId=job-1&schemaVersion=1",
+		base + "?failedCheckpoint=1&schemaVersion=1",
+		base + "?failedCheckpoint=1&recoveryJobId=job-1",
+		base + "?failedCheckpoint=0&recoveryJobId=job-1&schemaVersion=1",
+		base + "?failedCheckpoint=-1&recoveryJobId=job-1&schemaVersion=1",
+		base + "?failedCheckpoint=abc&recoveryJobId=job-1&schemaVersion=1",
+		base + "?failedCheckpoint=1&recoveryJobId=&schemaVersion=1",
+		base + "?failedCheckpoint=1&recoveryJobId=%20&schemaVersion=1",
+		base + "?failedCheckpoint=1&recoveryJobId=job-1&schemaVersion=2",
+		base + "?failedCheckpoint=1&recoveryJobId=job-1&schemaVersion=0",
+		base + "?failedCheckpoint=1&recoveryJobId=job-1&schemaVersion=abc",
+	}
+	for _, path := range cases {
+		w := e.do(t, http.MethodGet, path, nil, auth)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: want 400, got %d %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestSpectatorRecoverySnapshot_NotFound(t *testing.T) {
+	e := newTestEnv(t)
+	w := e.do(t, http.MethodGet, spectatorRecoveryPath("room_missing", 1, "job-1", 1), nil, e.spectatorRecoveryAuth())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSpectatorRecoverySnapshot_PrivacyAndPublicFields(t *testing.T) {
+	e := newTestEnv(t)
+	h := e.auth()
+	roomID := "room_sr_priv"
+	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("c", "CreateRoom", nil, "host", "s", roomID, map[string]any{
+		"roomId": roomID,
+	}), h)
+	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("j", "JoinRoom", seq(1), "guest", "s2", roomID, map[string]any{}), h)
+	_ = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("l", "LockRoom", seq(2), "host", "s", roomID, map[string]any{}), h)
+	w := e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("st", "StartMatch", seq(3), "host", "s", roomID, map[string]any{"gameId": "g1"}), h)
+	start := decodeResult(t, w)
+	if start.Status != envelope.StatusAccepted || start.Sequence == nil {
+		t.Fatalf("start: %+v", start)
+	}
+
+	jobID := "recovery-job-priv"
+	failedCheckpoint := int64(2)
+	w = e.do(t, http.MethodGet, spectatorRecoveryPath(roomID, failedCheckpoint, jobID, 1), nil, e.spectatorRecoveryAuth())
+	if w.Code != http.StatusOK {
+		t.Fatalf("snapshot: %d %s", w.Code, w.Body.String())
+	}
+	raw := w.Body.String()
+	for _, leak := range []string{
+		`"hand"`, "sessionId", "deck", "dealMaterial", "integrity", "revision",
+		"gameIntegrity", "playerFeed", "secret-",
+	} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("privacy leak %q in %s", leak, raw)
+		}
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["schemaVersion"] != float64(1) {
+		t.Fatalf("schemaVersion=%v", resp["schemaVersion"])
+	}
+	if resp["roomId"] != roomID {
+		t.Fatalf("roomId=%v", resp["roomId"])
+	}
+	if resp["recoveryJobId"] != jobID {
+		t.Fatalf("recoveryJobId=%v", resp["recoveryJobId"])
+	}
+	if resp["failedCheckpoint"] != float64(failedCheckpoint) {
+		t.Fatalf("failedCheckpoint=%v", resp["failedCheckpoint"])
+	}
+	seqNum, ok := resp["sequenceNumber"].(float64)
+	if !ok || int64(seqNum) != *start.Sequence {
+		t.Fatalf("sequenceNumber=%v want %d", resp["sequenceNumber"], *start.Sequence)
+	}
+	resume, ok := resp["resumeCheckpoint"].(float64)
+	if !ok || int64(resume) != *start.Sequence {
+		t.Fatalf("resumeCheckpoint=%v want %d", resp["resumeCheckpoint"], *start.Sequence)
+	}
+	for _, key := range []string{"status", "visibility", "roster", "seats", "discardTop", "activeColor", "direction"} {
+		if _, ok := resp[key]; !ok {
+			t.Fatalf("missing public field %q in %s", key, raw)
+		}
+	}
+	if _, ok := resp["currentPlayerId"]; !ok {
+		t.Fatalf("missing currentPlayerId in %s", raw)
+	}
+}
+
+func TestAnalyticsBackfill_Auth(t *testing.T) {
+	restore := app.SetAnalyticsBackfillCursorMACKeyForTest("http-test-cursor")
+	t.Cleanup(restore)
+	e := newTestEnv(t)
+	path := "/internal/v1/rooms/analytics-backfill"
+	body := map[string]any{
+		"recoveryJobId": "job-auth", "sourceTopic": app.TopicGameplayMetrics, "schemaVersion": 1,
+		"fromCheckpoint": "1", "toCheckpoint": "100",
+	}
+
+	w := e.do(t, http.MethodPost, path, body, nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing cred: %d", w.Code)
+	}
+	w = e.do(t, http.MethodPost, path, body, map[string]string{"X-Service-Credential": "wrong"})
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong cred: %d", w.Code)
+	}
+	w = e.do(t, http.MethodPost, path, body, e.auth())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("generic service cred must not authorize: %d", w.Code)
+	}
+	w = e.do(t, http.MethodPost, path, body, e.timerAuth())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("timer cred must not authorize: %d", w.Code)
+	}
+	w = e.do(t, http.MethodPost, path, body, e.spectatorRecoveryAuth())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("spectator cred must not authorize: %d", w.Code)
+	}
+	w = e.do(t, http.MethodPost, path, body, e.analyticsBackfillAuth())
+	if w.Code != http.StatusOK {
+		t.Fatalf("analytics cred: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAnalyticsBackfill_HTTPValidationAndPaging(t *testing.T) {
+	restore := app.SetAnalyticsBackfillCursorMACKeyForTest("http-test-cursor")
+	t.Cleanup(restore)
+	e := newTestEnv(t)
+	at := time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC)
+	var firstID, lastID int64
+	for i := 0; i < 3; i++ {
+		ts := at.Add(time.Duration(i) * time.Minute)
+		payload, _ := json.Marshal(map[string]any{
+			"eventId": "http-" + strconv.Itoa(i), "eventType": "GameplayMetric", "schemaVersion": 1,
+			"correlationId": "c", "occurredAt": ts.Format(time.RFC3339Nano),
+			"roomId": "r1", "visibility": "anonymized_adhoc", "metricType": "draw",
+		})
+		id := e.analyticsBackfill.Append(app.TopicGameplayMetrics, "GameplayMetric", payload, &ts)
+		if i == 0 {
+			firstID = id
+		}
+		lastID = id
+	}
+	path := "/internal/v1/rooms/analytics-backfill"
+	auth := e.analyticsBackfillAuth()
+
+	w := e.do(t, http.MethodPost, path, map[string]any{
+		"recoveryJobId": "job-http", "sourceTopic": app.TopicGameplayMetrics, "schemaVersion": 1,
+	}, auth)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("no range: %d %s", w.Code, w.Body.String())
+	}
+
+	w = e.do(t, http.MethodPost, path, map[string]any{
+		"recoveryJobId": "job-http", "sourceTopic": "room.game.completed", "schemaVersion": 1,
+		"fromCheckpoint": strconv.FormatInt(firstID, 10), "toCheckpoint": strconv.FormatInt(lastID, 10),
+	}, auth)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("topic allowlist: %d", w.Code)
+	}
+
+	w = e.do(t, http.MethodPost, path, map[string]any{
+		"recoveryJobId": "job-http", "sourceTopic": app.TopicGameplayMetrics, "schemaVersion": 1,
+		"fromCheckpoint": strconv.FormatInt(firstID, 10), "toCheckpoint": strconv.FormatInt(lastID, 10),
+		"limit": 2,
+	}, auth)
+	if w.Code != http.StatusOK {
+		t.Fatalf("page1: %d %s", w.Code, w.Body.String())
+	}
+	var page1 app.AnalyticsBackfillResponse
+	if err := json.NewDecoder(w.Body).Decode(&page1); err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Records) != 2 || page1.NextCursor == "" {
+		t.Fatalf("page1=%+v", page1)
+	}
+	if page1.FromCheckpoint != strconv.FormatInt(firstID, 10) {
+		t.Fatalf("honest fromCheckpoint=%s", page1.FromCheckpoint)
+	}
+
+	w = e.do(t, http.MethodPost, path, map[string]any{
+		"recoveryJobId": "job-http", "sourceTopic": app.TopicGameplayMetrics, "schemaVersion": 1,
+		"fromCheckpoint": strconv.FormatInt(firstID, 10), "toCheckpoint": strconv.FormatInt(lastID, 10),
+		"limit": 2, "cursor": page1.NextCursor,
+	}, auth)
+	if w.Code != http.StatusOK {
+		t.Fatalf("page2: %d %s", w.Code, w.Body.String())
+	}
+	var page2 app.AnalyticsBackfillResponse
+	_ = json.NewDecoder(w.Body).Decode(&page2)
+	if len(page2.Records) != 1 || page2.NextCursor != "" {
+		t.Fatalf("page2=%+v", page2)
+	}
+	before := e.analyticsBackfill.Count()
+	_ = e.do(t, http.MethodPost, path, map[string]any{
+		"recoveryJobId": "job-http", "sourceTopic": app.TopicGameplayMetrics, "schemaVersion": 1,
+		"fromCheckpoint": strconv.FormatInt(firstID, 10), "toCheckpoint": strconv.FormatInt(lastID, 10),
+	}, auth)
+	if e.analyticsBackfill.Count() != before {
+		t.Fatal("HTTP backfill must not mutate outbox")
 	}
 }

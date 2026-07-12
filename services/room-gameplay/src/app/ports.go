@@ -259,6 +259,9 @@ type MaterialReservation struct {
 	ID    string
 	Deal  *game.DealMaterial
 	Cards []game.Card
+	// DrawPileSize is the authoritative remaining draw-pile count after this
+	// reservation confirms (from Game Integrity). Never derived from client input.
+	DrawPileSize int
 }
 
 // Stable operation purposes for DealSource operation IDs.

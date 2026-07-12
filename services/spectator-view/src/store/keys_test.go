@@ -31,6 +31,8 @@ func TestKeySpace_PerRoomKeysShareHashTag(t *testing.T) {
 		ks.Generation(room),
 		ks.Stream(room, "1"),
 		ks.Stream(room, "2"),
+		ks.KafkaQuarantine(room),
+		ks.RebuildDone(room, "job|roomA|10"),
 	}
 	tag, ok := redisHashTag(keys[0])
 	if !ok || tag != "roomA" {

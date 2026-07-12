@@ -246,8 +246,8 @@ type sessionUoW struct {
 	done       bool
 }
 
-func (u *sessionUoW) Loaded() *domain.Session { return u.loaded }
-func (u *sessionUoW) Exists() bool            { return u.exists }
+func (u *sessionUoW) Loaded() *domain.Session  { return u.loaded }
+func (u *sessionUoW) Exists() bool             { return u.exists }
 func (u *sessionUoW) IntegrityRevision() int64 { return u.revision }
 func (u *sessionUoW) PeekStreamSeq() int64     { return u.streamSeq }
 
@@ -442,19 +442,19 @@ func (s *SessionStore) loadSessionTx(ctx context.Context, q interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }, roomID string) (*domain.Session, error) {
 	var (
-		roomType, status, visibility string
-		capacity                     int
-		sequence, turnVersion        int64
-		hostID                       *string
-		matchNumber                  int
-		matchScore                   []byte
-		tournamentID                 *string
-		roundNumber                  *int
-		slotID                       *string
-		integrityOffset              int64
-		gameCompleted, hasUno        bool
-		usedGameIDs, skippedTurns    []byte
-		unoWindow, disconnects       []byte
+		roomType, status, visibility  string
+		capacity                      int
+		sequence, turnVersion         int64
+		hostID                        *string
+		matchNumber                   int
+		matchScore                    []byte
+		tournamentID                  *string
+		roundNumber                   *int
+		slotID                        *string
+		integrityOffset               int64
+		gameCompleted, hasUno         bool
+		usedGameIDs, skippedTurns     []byte
+		unoWindow, disconnects        []byte
 		nextDisc, matchSnap, outcomes []byte
 	)
 	err := q.QueryRow(ctx, `

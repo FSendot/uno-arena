@@ -19,10 +19,41 @@ echo "${kind_out}" | grep -q 'redis://redis.uno-arena.svc.cluster.local:6379/5'
 echo "${kind_out}" | grep -q 'SPECTATOR_REDIS_STREAM_MAXLEN'
 echo "${kind_out}" | grep -q 'SPECTATOR_VIEW_INTERNAL_CREDENTIAL'
 echo "${kind_out}" | grep -q 'DEPLOYMENT_ENV'
+echo "${kind_out}" | grep -q 'KAFKA_BROKERS'
+echo "${kind_out}" | grep -q 'kafka.uno-arena.svc.cluster.local:9092'
+echo "${kind_out}" | grep -q 'KAFKA_CONSUMER_GROUP'
+echo "${kind_out}" | grep -q 'KAFKA_SPECTATOR_SAFE_TOPIC'
+echo "${kind_out}" | grep -q 'KAFKA_SPECTATOR_SAFE_DLQ_TOPIC'
 echo "${kind_out}" | grep -q 'type: ClusterIP'
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
-! echo "${kind_out}" | grep -q 'KAFKA_BROKERS'
 ! echo "${kind_out}" | grep -q 'SPECTATOR_CAPABILITY_MODE'
+# Kind keeps projectionRebuilder disabled (structure-only; no live recovery claim).
+! echo "${kind_out}" | grep -q 'spectator-projection-rebuilder' \
+  || { echo "kind must omit projection-rebuilder while disabled" >&2; exit 1; }
+! echo "${kind_out}" | grep -q 'WORKER_ROLE' \
+  || { echo "kind must omit WORKER_ROLE while rebuilder disabled" >&2; exit 1; }
+
+# Template privilege checks via explicit enable flip only.
+reb_out="$("${HELM}" template spectator-view-kind-rebuilder "${CHART}" -f "${CHART}/values.kind.yaml" \
+  --set projectionRebuilder.enabled=true)"
+echo "${reb_out}" | grep -q 'WORKER_ROLE'
+echo "${reb_out}" | grep -q 'spectator-projection-rebuilder'
+echo "${reb_out}" | grep -q 'ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL'
+echo "${reb_out}" | grep -q 'KAFKA_PROJECTION_REBUILD_TOPIC'
+echo "${reb_out}" | grep -q 'spectator.projection.rebuild_requested'
+test "$(echo "${reb_out}" | grep -c 'name: WORKER_ROLE')" -eq 1
+rebuilder_doc="$(echo "${reb_out}" | awk '/name: .*projection-rebuilder$/{flag=1} flag; /^---$/{if(flag){exit}}')"
+! echo "${rebuilder_doc}" | grep -q 'containerPort' || { echo "rebuilder must not expose ports" >&2; exit 1; }
+! echo "${rebuilder_doc}" | grep -q 'readinessProbe' || { echo "rebuilder must not use HTTP probes" >&2; exit 1; }
+! echo "${rebuilder_doc}" | grep -q 'SPECTATOR_VIEW_INTERNAL_CREDENTIAL' || { echo "rebuilder must not get API credential" >&2; exit 1; }
+
+staging_disabled="$("${HELM}" template spectator-staging-disabled "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.staging.yaml" \
+  --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --set image.tag= 2>/dev/null || true)"
+if echo "${staging_disabled}" | grep -q 'spectator-projection-rebuilder'; then
+  echo "staging must keep projection rebuilder disabled" >&2
+  exit 1
+fi
 
 if "${HELM}" template spectator-staging "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.staging.yaml" >/dev/null 2>&1; then
   echo "staging without digest must fail" >&2

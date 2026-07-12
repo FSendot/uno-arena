@@ -18,8 +18,9 @@ env:
   # Base architecture mode: do not set GATEWAY_ALLOW_FAKES / GATEWAY_CAPABILITY_MODE.
   # Durable Redis requires REDIS_URL (rate-limit DB) plus GATEWAY_PLAYER_FEED_REDIS_URL
   # and GATEWAY_SPECTATOR_REDIS_URL. Kind overlay uses DB 6 / 2 / 5. Staging/production
-  # must set those URLs (and digests) for /ready to pass; Kafka SessionInvalidated and
-  # Debezium player-feed sink remain PENDING.
+  # must set those URLs (and digests) for /ready to pass; Kafka SessionInvalidated is
+  # required in durable configured mode (KAFKA_BROKERS). Room realtime player feeds
+  # arrive via Debezium Server → Redis Streams (Gateway XREAD).
 
 # Credentials via existingSecret + secretKeyRef (never inline secrets).
 # Cross-chart equality (secret *values* must match; keys stay chart-local):

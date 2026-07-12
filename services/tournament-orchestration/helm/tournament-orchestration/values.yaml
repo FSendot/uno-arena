@@ -8,20 +8,44 @@ image:
 env:
   SERVICE_NAME: tournament-orchestration
   ROOM_GAMEPLAY_URL: http://room-gameplay:8080
-  # REDIS_URL / KAFKA_BROKERS omitted until projection/CDC slices land.
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_CONSUMER_GROUP: tournament-orchestration
+  KAFKA_MATCH_COMPLETED_TOPIC: room.match.completed
+  KAFKA_MATCH_COMPLETED_DLQ_TOPIC: room.match.completed.tournament-orchestration.dlq
+  # Disposable Redis bracket projection (DB 7 deploy; integration tests use DB 14 —
+  # default Redis databases=16 only allows indices 0..15).
+  REDIS_URL: redis://redis:6379/7
 
-# No safe WORKER_ROLE loop; keep disabled. Provision via ProcessProvisioningBatch.
+# ADR-0013: same image, separate Deployment. Disabled outside kind until ops enable it.
 provisioningWorker:
   enabled: false
+  replicaCount: 1
+
+# ADR-0013: all-round seeding worker. Disabled outside kind until ops enable it.
+seedingWorker:
+  enabled: false
+  replicaCount: 1
+
+# ADR-0013: round-completion worker. Disabled outside kind until ops enable it.
+completionWorker:
+  enabled: false
+  replicaCount: 1
 
 # Cross-chart: tournament-internal-credential == gateway gateway-tournament-service-credential
 #              == room tournament-internal-credential secret value (Room→Tournament).
+# TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL is Analytics projection-rebuilder-only
+# (same secret value as analytics-tournament-credential pair; no Gateway fallback).
+# TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET is API-only opaque keyset MAC (not workers).
 existingSecret: tournament-orchestration-secrets
 secretEnv:
   TOURNAMENT_INTERNAL_CREDENTIAL: tournament-internal-credential
   SERVICE_CREDENTIAL: tournament-internal-credential
   ROOM_SERVICE_CREDENTIAL: room-service-credential
   DATABASE_URL: database-url
+  # Durable API bracket cursor HMAC (ADR-0038). Staging/production map to existingSecret.
+  TOURNAMENT_BRACKET_CURSOR_SECRET: tournament-bracket-cursor-secret
+  TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL: analytics-tournament-credential
+  TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET: tournament-analytics-backfill-cursor-secret
 
 resources:
   requests:

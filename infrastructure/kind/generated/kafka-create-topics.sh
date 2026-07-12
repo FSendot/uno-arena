@@ -122,6 +122,7 @@ create_or_assert_topic() {
   fi
 }
 
+create_or_assert_topic "analytics.projection.rebuild_requested" 32 1 "delete" 1 7200000
 create_or_assert_topic "analytics.public_projection.updated" 2 1 "delete" 1 7200000
 create_or_assert_topic "identity.session.invalidated" 2 1 "delete" 1 1800000
 create_or_assert_topic "ranking.leaderboard_snapshot_published" 2 1 "delete" 1 7200000
@@ -130,12 +131,14 @@ create_or_assert_topic "room.game.completed" 2 1 "delete" 1 7200000
 create_or_assert_topic "room.gameplay.metrics" 8 1 "delete" 1 1800000
 create_or_assert_topic "room.match.completed" 2 1 "delete" 1 7200000
 create_or_assert_topic "room.spectator-safe.events" 8 1 "delete" 1 600000
+create_or_assert_topic "spectator.projection.rebuild_requested" 32 1 "delete" 1 7200000
 create_or_assert_topic "spectator.room_projection.updated" 2 1 "delete" 1 7200000
 create_or_assert_topic "tournament.completed" 2 1 "delete" 1 7200000
 create_or_assert_topic "tournament.match.assigned" 2 1 "delete" 1 7200000
 create_or_assert_topic "tournament.match.result_recorded" 2 1 "delete" 1 7200000
 create_or_assert_topic "tournament.players.advanced" 2 1 "delete" 1 7200000
 create_or_assert_topic "tournament.round.completed" 2 1 "delete" 1 7200000
+create_or_assert_topic "analytics.projection.rebuild_requested.analytics.dlq" 32 1 "delete" 1 21600000
 create_or_assert_topic "identity.session.invalidated.gateway.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "ranking.leaderboard_snapshot_published.analytics.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "ranking.player_rating_updated.analytics.dlq" 2 1 "delete" 1 21600000
@@ -144,7 +147,9 @@ create_or_assert_topic "room.gameplay.metrics.analytics.dlq" 2 1 "delete" 1 2160
 create_or_assert_topic "room.match.completed.analytics.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "room.match.completed.tournament-orchestration.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "room.spectator-safe.events.spectator-view.dlq" 2 1 "delete" 1 21600000
+create_or_assert_topic "spectator.projection.rebuild_requested.spectator-view.dlq" 32 1 "delete" 1 21600000
 create_or_assert_topic "tournament.completed.analytics.dlq" 2 1 "delete" 1 21600000
+create_or_assert_topic "tournament.completed.ranking.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "tournament.match.assigned.analytics.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "tournament.match.result_recorded.analytics.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "tournament.players.advanced.analytics.dlq" 2 1 "delete" 1 21600000

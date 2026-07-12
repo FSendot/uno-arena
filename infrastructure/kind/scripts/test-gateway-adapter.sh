@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Explicit live Gateway durable adapter acceptance against kind (/ready + rate-limit ping path).
-# Kafka SessionInvalidated consumer and Debezium player-feed sink remain PENDING.
+# SessionInvalidated Kafka consumer is wired; Room realtime feeds use Debezium Server → Redis.
 # Never applies/resets unrelated resources.
 set -euo pipefail
 set -m
@@ -19,7 +19,7 @@ assert_kind_context
 source "${SCRIPT_DIR}/port-forward-gateway.sh"
 
 echo "Gateway base: ${GATEWAY_BASE_URL}"
-echo "note: Kafka SessionInvalidated + Debezium player-feed sink remain PENDING"
+echo "note: SessionInvalidated Kafka consumer wired; /ready proves durable Redis + worker health"
 
 ready=0
 for _ in $(seq 1 90); do
@@ -36,4 +36,4 @@ done
 health="$(curl -sS -o /tmp/gateway-health.json -w '%{http_code}' "${GATEWAY_BASE_URL}/health" || true)"
 [[ "${health}" == "200" ]] || die "/health want 200 got ${health}"
 
-echo "ok kind-test-gateway-adapter (Kafka/Debezium PENDING)"
+echo "ok kind-test-gateway-adapter (SessionInvalidated Kafka wired; durable Redis ready)"

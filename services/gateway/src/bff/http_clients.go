@@ -220,6 +220,37 @@ func (c *HTTPRoomClient) PlayerSnapshot(ctx context.Context, roomID, playerID st
 	return json.RawMessage(raw), nil
 }
 
+func (c *HTTPRoomClient) PublicList(ctx context.Context, rawQuery string, corr correlation.Headers) (json.RawMessage, error) {
+	if err := c.cfg.requireBase(); err != nil {
+		return nil, err
+	}
+	path := "/internal/v1/rooms/public-list"
+	if rawQuery != "" {
+		path += "?" + rawQuery
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.cfg.ServiceCredential != "" {
+		httpReq.Header.Set(headerServiceCredential, c.cfg.ServiceCredential)
+	}
+	corr.Apply(httpReq.Header)
+	resp, err := c.cfg.client().Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, MaxRequestBodyBytes))
+	if resp.StatusCode >= 400 {
+		return nil, &httpStatusError{status: resp.StatusCode, body: string(raw)}
+	}
+	if len(raw) == 0 || !json.Valid(raw) {
+		return nil, fmt.Errorf("decode upstream public list: invalid JSON body")
+	}
+	return json.RawMessage(raw), nil
+}
+
 func urlQueryEscape(s string) string {
 	return url.QueryEscape(s)
 }
@@ -236,6 +267,59 @@ func NewHTTPTournamentClient(cfg HTTPClientConfig) *HTTPTournamentClient {
 
 func (c *HTTPTournamentClient) SubmitCommand(ctx context.Context, req CommandDispatch) (envelope.Result, error) {
 	return submitCommandHTTP(ctx, c.cfg, "/internal/v1/commands", req)
+}
+
+func (c *HTTPTournamentClient) Bracket(ctx context.Context, tournamentID, rawQuery string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	path := "/v1/tournaments/" + url.PathEscape(tournamentID) + "/bracket"
+	if rawQuery != "" {
+		path += "?" + rawQuery
+	}
+	return c.getTournamentRead(ctx, path, corr, principal)
+}
+
+func (c *HTTPTournamentClient) Standings(ctx context.Context, tournamentID string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	path := "/v1/tournaments/" + url.PathEscape(tournamentID) + "/standings"
+	return c.getTournamentRead(ctx, path, corr, principal)
+}
+
+func (c *HTTPTournamentClient) Assignment(ctx context.Context, tournamentID, playerID string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	path := "/v1/tournaments/" + url.PathEscape(tournamentID) + "/players/" + url.PathEscape(playerID) + "/assignment"
+	return c.getTournamentRead(ctx, path, corr, principal)
+}
+
+// getTournamentRead issues a Tournament read with the configured service credential
+// and trusted principal headers only (never client-spoofed).
+func (c *HTTPTournamentClient) getTournamentRead(ctx context.Context, path string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	if err := c.cfg.requireBase(); err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.BaseURL, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.cfg.ServiceCredential != "" {
+		httpReq.Header.Set(headerServiceCredential, c.cfg.ServiceCredential)
+	}
+	if principal != nil {
+		httpReq.Header.Set("X-Player-Id", principal.PlayerID)
+		if principal.OperatorScope {
+			httpReq.Header.Set("X-Operator-Scope", "1")
+		}
+	}
+	corr.Apply(httpReq.Header)
+	resp, err := c.cfg.client().Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, MaxRequestBodyBytes))
+	if resp.StatusCode >= 400 {
+		return nil, &httpStatusError{status: resp.StatusCode, body: string(raw)}
+	}
+	if len(raw) == 0 || !json.Valid(raw) {
+		return nil, fmt.Errorf("decode upstream tournament read: invalid JSON body")
+	}
+	return json.RawMessage(raw), nil
 }
 
 func submitCommandHTTP(ctx context.Context, cfg HTTPClientConfig, path string, req CommandDispatch) (envelope.Result, error) {
@@ -504,12 +588,24 @@ func (ClosedRoom) SubmitCommand(context.Context, CommandDispatch) (envelope.Resu
 func (ClosedRoom) PlayerSnapshot(context.Context, string, string, correlation.Headers) (json.RawMessage, error) {
 	return nil, fmt.Errorf("room client not configured")
 }
+func (ClosedRoom) PublicList(context.Context, string, correlation.Headers) (json.RawMessage, error) {
+	return nil, fmt.Errorf("room client not configured")
+}
 
 // ClosedTournament rejects all tournament dispatches.
 type ClosedTournament struct{}
 
 func (ClosedTournament) SubmitCommand(context.Context, CommandDispatch) (envelope.Result, error) {
 	return envelope.Result{}, fmt.Errorf("tournament client not configured")
+}
+func (ClosedTournament) Bracket(context.Context, string, string, correlation.Headers, *Principal) (json.RawMessage, error) {
+	return nil, fmt.Errorf("tournament client not configured")
+}
+func (ClosedTournament) Standings(context.Context, string, correlation.Headers, *Principal) (json.RawMessage, error) {
+	return nil, fmt.Errorf("tournament client not configured")
+}
+func (ClosedTournament) Assignment(context.Context, string, string, correlation.Headers, *Principal) (json.RawMessage, error) {
+	return nil, fmt.Errorf("tournament client not configured")
 }
 
 // ClosedReads rejects all read-model proxies.

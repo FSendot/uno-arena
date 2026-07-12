@@ -84,10 +84,11 @@ func TestReadBridge_CanonicalSpectatorSnapshot_TwoAudiences(t *testing.T) {
 		}
 		lastSeq = ev.SequenceNumber
 
-		var data map[string]any
-		if err := json.Unmarshal(ev.Payload, &data); err != nil {
+		var raw map[string]any
+		if err := json.Unmarshal(ev.Payload, &raw); err != nil {
 			t.Fatal(err)
 		}
+		data := spectatorSnapshotFromEnvelope(raw)
 		for _, bad := range []string{"hand", "hands", "sessionId", "cardId", "privateHand", "deck"} {
 			if _, ok := data[bad]; ok {
 				t.Fatalf("spectator payload leaked %s: %v", bad, data)
@@ -154,8 +155,9 @@ func TestReadBridge_CanonicalSpectatorSnapshot_TwoAudiences(t *testing.T) {
 		if ev.SequenceNumber != int64(i+1) {
 			t.Fatalf("terminal path contiguous: seq[%d]=%d", i, ev.SequenceNumber)
 		}
-		var data map[string]any
-		_ = json.Unmarshal(ev.Payload, &data)
+		var raw map[string]any
+		_ = json.Unmarshal(ev.Payload, &raw)
+		data := spectatorSnapshotFromEnvelope(raw)
 		out := proj.Apply(svdomain.SpectatorSafeEvent{
 			EventID:       svdomain.EventID(ev.EventID),
 			EventType:     svdomain.EventType(ev.EventType),
@@ -184,6 +186,19 @@ func TestReadBridge_CanonicalSpectatorSnapshot_TwoAudiences(t *testing.T) {
 	if dec.Allowed {
 		t.Fatal("admission must deny after terminal close")
 	}
+}
+
+func spectatorSnapshotFromEnvelope(raw map[string]any) map[string]any {
+	if raw == nil {
+		return map[string]any{}
+	}
+	if payload, ok := raw["payload"].(map[string]any); ok {
+		return payload
+	}
+	if data, ok := raw["data"].(map[string]any); ok {
+		return data
+	}
+	return raw
 }
 
 func keysOf(m map[string][]app.PublishedEvent) []string {

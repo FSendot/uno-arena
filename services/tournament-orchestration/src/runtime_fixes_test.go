@@ -18,15 +18,21 @@ func TestAtomicCommit_PublishFailureLeavesPendingRetry(t *testing.T) {
 	mux := h.srv.Routes()
 	corr := map[string]string{"X-Correlation-Id": "corr-outbox"}
 
-	w := postJSON(t, mux, "/internal/v1/commands", testCred, commandBody("c-create", "CreateTournament", map[string]any{
+	seedTiny(t, h, mux, "t-outbox", corr)
+	w := postJSON(t, mux, "/internal/v1/commands", testCred, commandBody("prov-outbox", "ProvisionRoundMatches", map[string]any{
 		"tournamentId": "t-outbox",
-		"capacity":     4,
+		"roundNumber":  1,
 	}, "op", "s"), corr)
 	if decodeResult(t, w).Status != envelope.StatusAccepted {
-		t.Fatalf("create: %s", w.Body.String())
+		t.Fatalf("provision: %s", w.Body.String())
 	}
 	if h.repo.PendingOutboxLen() == 0 {
-		t.Fatal("expected pending outbox after create")
+		t.Fatal("expected pending contract outbox after provision")
+	}
+	for _, e := range h.repo.Events() {
+		if e.Topic == "tournament.lifecycle" || e.Topic == "" {
+			t.Fatalf("unexpected non-contract topic %q for %s", e.Topic, e.EventType)
+		}
 	}
 
 	h.pub.FailNext = 1
@@ -124,8 +130,15 @@ func TestCommitFailureDoesNotInstallOutcome(t *testing.T) {
 	if decodeResult(t, w).Status != envelope.StatusAccepted {
 		t.Fatalf("retry after commit fault: %s", w.Body.String())
 	}
-	if h.repo.PendingOutboxLen() == 0 {
-		t.Fatal("retry must install outbox facts")
+	if _, ok := h.repo.Get(domain.TournamentID("t-fail")); !ok {
+		t.Fatal("retry must persist tournament")
+	}
+	if _, ok := h.repo.LookupOutcome("c-fail"); !ok {
+		t.Fatal("retry must install outcome")
+	}
+	// CreateTournament is internal-only — no durable Kafka/outbox row.
+	if h.repo.PendingOutboxLen() != 0 {
+		t.Fatalf("CreateTournament must not emit outbox, pending=%d", h.repo.PendingOutboxLen())
 	}
 }
 
@@ -138,7 +151,7 @@ func TestStrictMatchCompletedIngestValidation(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot0 := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, body)[0].(map[string]any)
 
 	base := map[string]any{
 		"eventId":           "evt-strict",
@@ -188,7 +201,7 @@ func TestAbandonedIngestQuarantinesAndExactReplayStable(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot0 := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, body)[0].(map[string]any)
 	base := time.Date(2026, 7, 10, 21, 0, 0, 0, time.UTC)
 	ingest := map[string]any{
 		"eventId":           "evt-abandon-1",
@@ -218,7 +231,7 @@ func TestAbandonedIngestQuarantinesAndExactReplayStable(t *testing.T) {
 	}
 	bracket = getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot := bracketSlots(t, body)[0].(map[string]any)
 	if slot["status"] != "quarantined" {
 		t.Fatalf("slot status=%v", slot["status"])
 	}
@@ -264,15 +277,16 @@ func TestRoomProvisionFailureKeepsRetryableWork(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/t-room-fail/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	b0 := body["rounds"].([]any)[0].(map[string]any)["batches"].([]any)[0].(map[string]any)
+	_ = body
+	b0 := bracketBatches(t, h, "t-room-fail", 1)[0]
 
 	h.rooms.FailOnCall = 1
 	w = postJSON(t, mux, "/internal/v1/tournaments/t-room-fail/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId": "worker-fail-1",
-		"batchId":   b0["batchId"],
-		"slotFrom":  b0["slotFrom"],
-		"slotTo":    b0["slotTo"],
-		"slotSize":  b0["slotSize"],
+		"batchId":   string(b0.BatchID),
+		"slotFrom":  string(b0.SlotFrom),
+		"slotTo":    string(b0.SlotTo),
+		"slotSize":  len(b0.SlotIndexes),
 	}, corr)
 	res := decodeResult(t, w)
 	if res.Status != envelope.StatusAccepted {
@@ -290,7 +304,7 @@ func TestRoomProvisionFailureKeepsRetryableWork(t *testing.T) {
 
 	tr, _ := h.repo.Get(domain.TournamentID("t-room-fail"))
 	round, _ := tr.Round(1)
-	batch, _ := round.FindBatch(domain.BatchID(b0["batchId"].(string)))
+	batch, _ := round.FindBatch(b0.BatchID)
 	if batch.Status == domain.BatchCompleted {
 		t.Fatal("failed batch must not be completed")
 	}
@@ -312,7 +326,8 @@ func TestProvisioningWorkerDoesNotHoldGlobalLockDuringRoomCalls(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/t-nolock/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	b0 := body["rounds"].([]any)[0].(map[string]any)["batches"].([]any)[0].(map[string]any)
+	_ = body
+	b0 := bracketBatches(t, h, "t-nolock", 1)[0]
 
 	var concurrentOK atomic.Bool
 	gate := make(chan struct{})
@@ -334,10 +349,10 @@ func TestProvisioningWorkerDoesNotHoldGlobalLockDuringRoomCalls(t *testing.T) {
 
 	w := postJSON(t, mux, "/internal/v1/tournaments/t-nolock/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId": "worker-nl",
-		"batchId":   b0["batchId"],
-		"slotFrom":  b0["slotFrom"],
-		"slotTo":    b0["slotTo"],
-		"slotSize":  b0["slotSize"],
+		"batchId":   string(b0.BatchID),
+		"slotFrom":  string(b0.SlotFrom),
+		"slotTo":    string(b0.SlotTo),
+		"slotSize":  len(b0.SlotIndexes),
 	}, corr)
 	if decodeResult(t, w).Status != envelope.StatusAccepted {
 		t.Fatalf("worker: %s", w.Body.String())
@@ -376,7 +391,7 @@ func TestConcurrentIngestExactEventIdempotent(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	slot0 := body["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, body)[0].(map[string]any)
 	base := time.Date(2026, 7, 10, 22, 0, 0, 0, time.UTC)
 	ingest := map[string]any{
 		"eventId":           "evt-conc-1",

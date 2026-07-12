@@ -8,6 +8,13 @@ test interface**. A graphical interface is **explicitly deferred** for later
 refactoring. Deferred UI work must continue to speak only to the Realtime
 Gateway / BFF and must not introduce direct microservice access.
 
+## Stage status
+
+| Stage | Scope | Status |
+| --- | --- | --- |
+| **A** | Auth/session/seed, room utilities, tournament utilities, spectate alias, packaging, offline tests | **Implemented** |
+| **B** | Interactive `play` (live feed + turn board) and headless `bot` (JSONL load) | **Pending** — not implemented yet |
+
 ## Requirements
 
 - `curl` (HTTP/SSE)
@@ -18,10 +25,31 @@ Gateway / BFF and must not introduce direct microservice access.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `UNOARENA_API_URL` | Yes (except `countdown`) | Gateway/BFF base URL. The CLI never calls microservices directly. |
-| `UNOARENA_TOKEN` | No | Default bearer token when `--token` is omitted |
+| `UNOARENA_API_URL` | Yes (except `countdown`, `logout`) | Gateway/BFF base URL. The CLI never calls microservices directly. |
+| `UNOARENA_TOKEN` | No | Default bearer token when `--token` is omitted (after `--token`, before session file) |
+| `UNOARENA_SESSION_FILE` | No | Session file path. Default: `${XDG_STATE_HOME:-$HOME/.local/state}/unoarena/session.json` |
 
-## Commands
+Token resolution for one-shot utilities: `--token` → `UNOARENA_TOKEN` → session file.
+Corrupt or group/world-readable session files fail closed.
+
+## Invocation
+
+Native:
+
+```bash
+export UNOARENA_API_URL=http://127.0.0.1:8080
+./client-checkpoint/bin/unoarena health
+```
+
+Docker (same image targets any BFF via `UNOARENA_API_URL`):
+
+```bash
+docker build -f client-checkpoint/Dockerfile -t uno-arena/client:local ./client-checkpoint
+docker run --rm -e UNOARENA_API_URL=http://host.docker.internal:8080 uno-arena/client:local health
+docker run --rm -e UNOARENA_API_URL=… -e UNOARENA_TOKEN=… uno-arena/client:local whoami
+```
+
+## Canonical commands
 
 All HTTP commands use OpenAPI BFF paths on `UNOARENA_API_URL`. HTTP responses are
 always JSON; `--json` is only meaningful for `countdown` (structured JSON vs text).
@@ -32,30 +60,44 @@ unoarena health
 unoarena leaderboard
 unoarena analytics
 
-# Auth
+# Auth / session
 unoarena register --user <username> --pass <password>
-unoarena login --user <username> --pass <password>
-unoarena whoami --token <bearer-token>
+unoarena login --user <username> --pass <password>   # prints login JSON; also writes session file (0600)
+unoarena logout                                      # removes session file only; idempotent; never prints token
+unoarena whoami [--token <bearer-token>]
+unoarena seed --count <N> [--prefix <p>]             # JSONL credentials; does not write interactive session
 
-# Rooms / command envelopes
-unoarena room create --token <bearer-token> [--command-id <id>] [--payload <json>]
-unoarena command --token <bearer-token> --type <CommandType> \
+# Rooms
+unoarena room create [--max <N>] [--token …]         # generates roomId when omitted; max 2..10
+unoarena room create --token … --payload <json>      # preserved low-level form
+unoarena room list [--status waiting|locked|in_progress] [--limit n] [--cursor c]
+unoarena room join <roomId> [--token …]
+unoarena room leave [<roomId>] [--token …]           # roomId from arg or session current room
+
+# Generic command envelopes
+unoarena command --token … --type <CommandType> \
   [--room-id <roomId>] [--command-id <id>] --expected-sequence <n> \
   [--payload <json>] [--schema-version <n>] [--correlation-id <id>]
 
-# Tournament command envelopes (no room expectedSequenceNumber)
-unoarena tournament create --token <bearer-token> [--command-id <id>] [--payload <json>]
-unoarena tournament register --token <bearer-token> [--command-id <id>] [--payload <json>]
-unoarena tournament close-registration --token <bearer-token> \
-  [--command-id <id>] [--payload <json>]
+# Tournaments
+unoarena tournament create --token … [--command-id <id>] [--payload <json>]
+unoarena tournament register <tournamentId> [--token …]
+unoarena tournament register --token … --payload <json>   # preserved low-level form
+unoarena tournament close-registration --token … [--command-id <id>] [--payload <json>]
+unoarena tournament status <tournamentId> [--token …]
 
-# SSE subscriptions (player/control require bearer token; spectator token optional)
-unoarena stream player --token <bearer-token> --room-id <roomId> [--last-event-id <id>]
-unoarena stream spectator --room-id <roomId> [--token <bearer-token>] [--last-event-id <id>]
-unoarena stream control --token <bearer-token> [--last-event-id <id>]
+# Streams / spectator
+unoarena stream player --token … --room-id <roomId> [--last-event-id <id>]
+unoarena stream spectator --room-id <roomId> [--token …] [--last-event-id <id>]
+unoarena spectate <roomId> [--token …] [--last-event-id <id>]   # canonical alias of stream spectator
+unoarena stream control --token … [--last-event-id <id>]
 
 # Advisory Uno countdown (local only; no HTTP). --json emits structured JSON.
 unoarena countdown --expires-at <RFC3339> --opening-sequence <n> [--now <RFC3339>] [--json]
+
+# Stage B (pending — not implemented)
+# unoarena play --casual …
+# unoarena bot [--casual | --room <id> | --tournament <id>] …
 ```
 
 ### Gateway paths used
@@ -65,15 +107,24 @@ unoarena countdown --expires-at <RFC3339> --opening-sequence <n> [--now <RFC3339
 | `health` | `GET /health` |
 | `register` | `POST /v1/auth/register` |
 | `login` | `POST /v1/auth/login` |
+| `logout` | local session file only |
 | `whoami` | `GET /v1/auth/whoami` (`Authorization: Bearer …`) |
-| `room create` / tournament helpers / `command` without `--room-id` | `POST /v1/commands` |
-| `command --room-id …` | `POST /v1/rooms/{roomId}/commands` (roomId URL-encoded) |
+| `seed` | `POST /v1/auth/register` + `POST /v1/auth/login` per account |
+| `room list` | `GET /v1/rooms` (public; default `status=waiting`; no bearer) |
+| `room create` | `POST /v1/commands` (`CreateRoom`) |
+| `room join` | `GET /v1/spectator/rooms/{roomId}/snapshot` then `POST /v1/rooms/{roomId}/commands` (`JoinRoom`) |
+| `room leave` | `GET /v1/rooms/{roomId}/snapshot` then `POST /v1/rooms/{roomId}/commands` (`LeaveRoom`) |
+| `command --room-id …` | `POST /v1/rooms/{roomId}/commands` |
+| `command` / tournament helpers without room | `POST /v1/commands` |
+| `tournament register` | `POST /v1/commands` (`RegisterPlayer`) |
+| `tournament status` | `GET /v1/tournaments/{id}/standings` + `GET /v1/tournaments/{id}/bracket` |
 | `stream player` | `GET /v1/streams/player?roomId=…` |
-| `stream spectator` | `GET /v1/streams/spectator?roomId=…` |
+| `stream spectator` / `spectate` | `GET /v1/streams/spectator?roomId=…` |
 | `stream control` | `GET /v1/streams/control` |
 | `leaderboard` | `GET /v1/rankings/leaderboards` |
 | `analytics` | `GET /v1/analytics/public` |
 | `countdown` | none (local advisory display) |
+| `play` / `bot` | **stage B pending** |
 
 BFF snapshot routes (OpenAPI; used after SSE `409 snapshot_required` or reconnect) are part of the settled client contract even when invoked via `curl` rather than a dedicated CLI subcommand:
 
@@ -81,6 +132,24 @@ BFF snapshot routes (OpenAPI; used after SSE `409 snapshot_required` or reconnec
 | --- | --- |
 | Player reconnect snapshot | `GET /v1/rooms/{roomId}/snapshot` (bearer required) |
 | Spectator projection snapshot | `GET /v1/spectator/rooms/{roomId}/snapshot` (anonymous-tolerant for public non-terminal rooms; private rooms need session/invite/operator; invalid bearer → `401`) |
+
+Player and spectator snapshots include authoritative `drawPileSize` (count only) for the interactive turn board (§5.C). Deck order, seed, and undrawn card identities are never exposed.
+
+### Seed convention
+
+- Default prefix: `seed`. Usernames are `{prefix}{NNNN}` (1-based, zero-padded to 4), e.g. `seed0001`.
+- Password for each account: `{username}-pass` (deterministic; documented for load harnesses).
+- `register` that reports username already taken is treated as ensure-exists; login still runs.
+- Stdout is JSON Lines only (one object per account: `username`, `password`, `token`, `playerId`, `sessionId`, `result`).
+- Non-zero exit if any account fails. Seeded tokens are **not** written to the interactive session file.
+- Hard max `--count`: 10000.
+
+### Session file
+
+`login` still prints the unchanged login JSON on stdout and atomically writes
+`token` / `playerId` / `sessionId` / `username` (mode `0600`). After accepted
+`room create` / `room join`, `roomId` is stored when a session file already exists;
+accepted `room leave` clears it. `logout` deletes only that file.
 
 ### Command envelope rules
 
@@ -112,12 +181,26 @@ payload includes both `expiresAt` and an opening-sequence field (including neste
 `openingSequence=` label. SSE updates and command results correct the client when
 local display drifts. `countdown --json` emits `openingSequence` (not the legacy alias).
 
+### Tournament test threshold
+
+Tournament start thresholds are backend-owned. For local/capability exercise, configure a
+low capacity on `tournament create` (e.g. `"capacity": 2`) so registration can close
+without a production-scale roster.
+
 ## Offline tests
 
 Ephemeral stdlib fake gateway (no persistent servers, no external packages):
 
 ```bash
+make test-client-checkpoint
+# or:
 ./client-checkpoint/tests/run-tests.sh
+```
+
+Dockerfile packaging structure (no build/pull):
+
+```bash
+make test-client-dockerfile
 ```
 
 ## Capability stack integration harness

@@ -1,5 +1,4 @@
-# Local kind overlay for Ranking durable Postgres.
-# Debezium CDC delivery and Redis leaderboard projection remain PENDING.
+# Local kind overlay for Ranking durable Postgres + Redis leaderboard projection.
 kind: true
 
 replicaCount: 1
@@ -13,10 +12,28 @@ image:
 env:
   SERVICE_NAME: ranking
   DEPLOYMENT_ENV: local
-  # Durable mode: no RANKING_CAPABILITY_MODE; DATABASE_URL from secret.
-  # REDIS_URL / KAFKA_BROKERS intentionally omitted until those slices.
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/4
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: ranking
+  KAFKA_GAME_COMPLETED_TOPIC: room.game.completed
+  KAFKA_GAME_COMPLETED_DLQ_TOPIC: room.game.completed.ranking.dlq
+  KAFKA_PLAYERS_ADVANCED_TOPIC: tournament.players.advanced
+  KAFKA_PLAYERS_ADVANCED_DLQ_TOPIC: tournament.players.advanced.ranking.dlq
+  KAFKA_TOURNAMENT_COMPLETED_TOPIC: tournament.completed
+  KAFKA_TOURNAMENT_COMPLETED_DLQ_TOPIC: tournament.completed.ranking.dlq
+  KAFKA_PLAYER_RATING_UPDATED_TOPIC: ranking.player_rating_updated
+  KAFKA_PLAYER_RATING_UPDATED_DLQ_TOPIC: ranking.player_rating_updated.ranking.dlq
+  # Durable mode: no RANKING_CAPABILITY_MODE; DATABASE_URL + cursor secret from secret.
+  # HTTP games-results / tournament-placements bridges remain ops/test.
+
+leaderboardSnapshotterWorker:
+  enabled: true
+  replicaCount: 1
 
 existingSecret: uno-arena-local-credentials
 secretEnv:
   RANKING_INTERNAL_CREDENTIAL: ranking-internal-credential
   DATABASE_URL: ranking-database-url
+  RANKING_LEADERBOARD_CURSOR_SECRET: ranking-leaderboard-cursor-secret
+  RANKING_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL: analytics-ranking-credential
+  RANKING_ANALYTICS_BACKFILL_CURSOR_SECRET: ranking-analytics-backfill-cursor-secret

@@ -225,6 +225,226 @@ func TestStreamMsgToEvent_UsesPhysicalRedisID(t *testing.T) {
 	}
 }
 
+func TestNormalizeStreamValues_FlatFormPassthrough(t *testing.T) {
+	flat := map[string]interface{}{
+		"event": "CardPlayed", "data": `{"n":1}`, "eventId": "e1", "sequence": "3",
+		"schemaVersion": "2", "playerId": "p1", "sessionId": "s1",
+	}
+	got := normalizeStreamValues(flat)
+	if fieldString(got, "event") != "CardPlayed" || fieldString(got, "data") != `{"n":1}` {
+		t.Fatalf("flat form must pass through, got %#v", got)
+	}
+	if fieldString(got, "playerId") != "p1" || fieldString(got, "sequence") != "3" {
+		t.Fatalf("flat audience/sequence lost: %#v", got)
+	}
+}
+
+func TestNormalizeStreamValues_DebeziumExtendedEnvelope(t *testing.T) {
+	// Realistic Redis sink extended entry after Outbox Event Router + envelope placement.
+	valueJSON := `{
+		"payload": {"card":"R5","roomId":"room_1"},
+		"eventId": "evt_42",
+		"event": "CardPlayed",
+		"schemaVersion": 1,
+		"sequence": 7,
+		"playerId": "p1",
+		"sessionId": "s1"
+	}`
+	values := map[string]interface{}{
+		"key":   `{"payload":"room_1"}`,
+		"value": valueJSON,
+		"ID":    "evt_42", // Outbox router id header (UPPERCASE in extended format)
+	}
+	got := normalizeStreamValues(values)
+	if fieldString(got, "event") != "CardPlayed" {
+		t.Fatalf("event=%q", fieldString(got, "event"))
+	}
+	if fieldString(got, "eventId") != "evt_42" {
+		t.Fatalf("eventId=%q", fieldString(got, "eventId"))
+	}
+	if fieldString(got, "sequence") != "7" {
+		t.Fatalf("sequence=%q want 7", fieldString(got, "sequence"))
+	}
+	if fieldString(got, "schemaVersion") != "1" {
+		t.Fatalf("schemaVersion=%q", fieldString(got, "schemaVersion"))
+	}
+	if fieldString(got, "playerId") != "p1" || fieldString(got, "sessionId") != "s1" {
+		t.Fatalf("audience playerId=%q sessionId=%q", fieldString(got, "playerId"), fieldString(got, "sessionId"))
+	}
+	data := fieldString(got, "data")
+	if !strings.Contains(data, `"card":"R5"`) && !strings.Contains(data, `"card": "R5"`) {
+		t.Fatalf("payload must unwrap into data, got %q", data)
+	}
+}
+
+func TestNormalizeStreamValues_DebeziumExtendedConnectSchemaWrapper(t *testing.T) {
+	valueJSON := `{
+		"schema": {"type":"struct","fields":[],"optional":false},
+		"payload": {
+			"payload": {"turn":3},
+			"eventId": "evt_schema",
+			"event": "TurnAdvanced",
+			"schemaVersion": 2,
+			"sequence": 9,
+			"playerId": "p9",
+			"sessionId": "s9"
+		}
+	}`
+	got := normalizeStreamValues(map[string]interface{}{
+		"key":   "room_1",
+		"value": valueJSON,
+	})
+	ev := streamValuesToEvent("55-1", got)
+	if ev.ID != "55-1" {
+		t.Fatalf("physical id lost: %q", ev.ID)
+	}
+	if ev.Event != "TurnAdvanced" || ev.SchemaVersion != 2 {
+		t.Fatalf("ev=%+v", ev)
+	}
+	if string(ev.Data) != `{"turn":3}` && !strings.Contains(string(ev.Data), `"turn":3`) {
+		t.Fatalf("data=%s", ev.Data)
+	}
+	if fieldString(got, "playerId") != "p9" || fieldString(got, "sequence") != "9" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestNormalizeStreamValues_MalformedExtendedFailsClosed(t *testing.T) {
+	got := normalizeStreamValues(map[string]interface{}{
+		"key": "k", "value": "{not-json",
+	})
+	if fieldString(got, "event") != "" || fieldString(got, "data") != "" {
+		t.Fatalf("malformed extended must not invent fields: %#v", got)
+	}
+	ev := streamValuesToEvent("1-0", got)
+	sess := playerFilterSession(newRedisLiveFeed(nil, nil, "spectator:", NewHub()), "p1", "s1")
+	if keep, _ := sess.filterPlayer(ev, got); keep {
+		t.Fatal("malformed extended entry must be skipped")
+	}
+}
+
+func TestPlayerFilter_DebeziumExtendedAudienceAndDedupe(t *testing.T) {
+	feed := newRedisLiveFeed(nil, nil, "spectator:", NewHub())
+	sess := playerFilterSession(feed, "p1", "s1")
+	msg := redis.XMessage{
+		ID: "10-0",
+		Values: map[string]interface{}{
+			"key": "room_1",
+			"value": `{
+				"payload": {},
+				"eventId": "e_ext_1",
+				"event": "CardPlayed",
+				"schemaVersion": 1,
+				"sequence": 1,
+				"playerId": "p1",
+				"sessionId": "s1"
+			}`,
+		},
+	}
+	values := normalizeStreamValues(msg.Values)
+	ev := streamValuesToEvent(msg.ID, values)
+	keep, _ := sess.filterPlayer(ev, values)
+	if !keep {
+		t.Fatal("matching extended audience must keep")
+	}
+	keep, _ = sess.filterPlayer(ev, values)
+	if keep {
+		t.Fatal("duplicate eventId from extended form must skip")
+	}
+
+	wrong := normalizeStreamValues(map[string]interface{}{
+		"value": `{
+			"payload": {},
+			"eventId": "e_ext_2",
+			"event": "CardPlayed",
+			"schemaVersion": 1,
+			"sequence": 2,
+			"playerId": "other",
+			"sessionId": "s1"
+		}`,
+	})
+	if keep, _ := sess.filterPlayer(streamValuesToEvent("11-0", wrong), wrong); keep {
+		t.Fatal("wrong playerId in extended envelope must skip")
+	}
+}
+
+func TestRedisLiveFeed_DebeziumExtendedResumeAudience(t *testing.T) {
+	stream, err := PlayerFeedTargetStream("room_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended := map[string]interface{}{
+		"key": "room_1",
+		"value": `{
+			"payload": {"ok":true},
+			"eventId": "e1",
+			"event": "CardPlayed",
+			"schemaVersion": 1,
+			"sequence": 1,
+			"playerId": "p1",
+			"sessionId": "s1"
+		}`,
+	}
+	wrongAudience := map[string]interface{}{
+		"key": "room_1",
+		"value": `{
+			"payload": {},
+			"eventId": "e0",
+			"event": "CardPlayed",
+			"schemaVersion": 1,
+			"sequence": 1,
+			"playerId": "other",
+			"sessionId": "other_s"
+		}`,
+	}
+	stubWrong := &stubStreamRedis{
+		entries:  map[string][]redis.XMessage{stream: {{ID: "1-0", Values: wrongAudience}}},
+		blockNil: true,
+	}
+	feed := newRedisLiveFeed(stubWrong, stubWrong, "spectator:", NewHub())
+	_, err = feed.BeginSession(t.Context(), StreamPlayer, "room_1", "s1", "p1", "1-0")
+	if !errors.Is(err, ErrSnapshotRequired) {
+		t.Fatalf("wrong-audience extended marker must require snapshot, err=%v", err)
+	}
+
+	stubOK := &stubStreamRedis{
+		entries: map[string][]redis.XMessage{
+			stream: {
+				{ID: "1-0", Values: extended},
+				{ID: "2-0", Values: map[string]interface{}{
+					"key": "room_1",
+					"value": `{
+						"payload": {"n":2},
+						"eventId": "e2",
+						"event": "CardPlayed",
+						"schemaVersion": 1,
+						"sequence": 2,
+						"playerId": "p1",
+						"sessionId": "s1"
+					}`,
+				}},
+			},
+		},
+		blockNil: true,
+	}
+	feedOK := newRedisLiveFeed(stubOK, stubOK, "spectator:", NewHub())
+	sess, err := feedOK.BeginSession(t.Context(), StreamPlayer, "room_1", "s1", "p1", "1-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	replay := sess.Replay()
+	if len(replay) != 1 {
+		t.Fatalf("replay len=%d want 1", len(replay))
+	}
+	if replay[0].ID != "2-0" || replay[0].Event != "CardPlayed" {
+		t.Fatalf("replay=%+v", replay[0])
+	}
+	if !strings.Contains(string(replay[0].Data), `"n":2`) && !strings.Contains(string(replay[0].Data), `"n": 2`) {
+		t.Fatalf("data=%s", replay[0].Data)
+	}
+}
+
 func TestSpectatorFilter_ClosesOnStreamClosed(t *testing.T) {
 	sess := &redisLiveSession{
 		kind:         StreamSpectator,

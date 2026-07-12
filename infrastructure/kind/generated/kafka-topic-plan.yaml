@@ -22,6 +22,14 @@ spec:
       dlq: 21600000
     note: Explicit kind-short retention.ms by ADR-0032 class
   domainTopics:
+  - name: analytics.projection.rebuild_requested
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 32
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
   - name: analytics.public_projection.updated
     class: business
     retentionClass: business
@@ -86,6 +94,14 @@ spec:
     replicationFactor: 1
     productionPlanningPartitions: 256
     cleanupPolicy: delete
+  - name: spectator.projection.rebuild_requested
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 32
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
   - name: spectator.room_projection.updated
     class: business
     retentionClass: business
@@ -135,6 +151,16 @@ spec:
     productionPlanningPartitions: 32
     cleanupPolicy: delete
   dlqTopics:
+  - name: analytics.projection.rebuild_requested.analytics.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 32
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: analytics.projection.rebuild_requested
+    consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
   - name: identity.session.invalidated.gateway.dlq
     class: dlq
     retentionClass: dlq
@@ -215,6 +241,16 @@ spec:
     sourceTopic: room.spectator-safe.events
     consumer: spectator-view
     note: ADR-0017 scaffolding; consumer process not claimed
+  - name: spectator.projection.rebuild_requested.spectator-view.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 32
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: spectator.projection.rebuild_requested
+    consumer: spectator-view
+    note: ADR-0017 scaffolding; consumer process not claimed
   - name: tournament.completed.analytics.dlq
     class: dlq
     retentionClass: dlq
@@ -224,6 +260,16 @@ spec:
     cleanupPolicy: delete
     sourceTopic: tournament.completed
     consumer: analytics
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: tournament.completed.ranking.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: tournament.completed
+    consumer: ranking
     note: ADR-0017 scaffolding; consumer process not claimed
   - name: tournament.match.assigned.analytics.dlq
     class: dlq

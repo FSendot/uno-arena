@@ -9,32 +9,33 @@ import (
 // fields (public state, terminal flags, and processed outcomes). Restore must
 // not re-apply fake events — it reconstructs aggregate state directly.
 type ProjectionExport struct {
-	RoomID          RoomID                     `json:"roomId"`
-	Status          RoomStatus                 `json:"status"`
-	Visibility      Visibility                 `json:"visibility"`
-	Sequence        SequenceNumber             `json:"sequence"`
-	Seats           []VisibleSeat              `json:"seats"`
-	Discard         VisibleDiscardState        `json:"discard"`
-	Direction       string                     `json:"direction"`
-	CurrentPlayerID PlayerID                   `json:"currentPlayerId"`
-	PenaltyAmount   int                        `json:"penaltyAmount"`
-	PenaltyTarget   PlayerID                   `json:"penaltyTarget"`
-	GameScore       map[PlayerID]int           `json:"gameScore"`
-	MatchWinner     PlayerID                   `json:"matchWinner"`
-	GameCompleted   bool                       `json:"gameCompleted"`
-	MatchCompleted  bool                       `json:"matchCompleted"`
-	Uno             *PublicUnoWindow           `json:"uno,omitempty"`
-	StreamClosed    bool                       `json:"streamClosed"`
-	Outcomes        map[EventID]OutcomeExport  `json:"outcomes"`
+	RoomID          RoomID                    `json:"roomId"`
+	Status          RoomStatus                `json:"status"`
+	Visibility      Visibility                `json:"visibility"`
+	Sequence        SequenceNumber            `json:"sequence"`
+	Seats           []VisibleSeat             `json:"seats"`
+	Discard         VisibleDiscardState       `json:"discard"`
+	Direction       string                    `json:"direction"`
+	CurrentPlayerID PlayerID                  `json:"currentPlayerId"`
+	PenaltyAmount   int                       `json:"penaltyAmount"`
+	PenaltyTarget   PlayerID                  `json:"penaltyTarget"`
+	DrawPileSize    int                       `json:"drawPileSize"`
+	GameScore       map[PlayerID]int          `json:"gameScore"`
+	MatchWinner     PlayerID                  `json:"matchWinner"`
+	GameCompleted   bool                      `json:"gameCompleted"`
+	MatchCompleted  bool                      `json:"matchCompleted"`
+	Uno             *PublicUnoWindow          `json:"uno,omitempty"`
+	StreamClosed    bool                      `json:"streamClosed"`
+	Outcomes        map[EventID]OutcomeExport `json:"outcomes"`
 }
 
 // OutcomeExport is the durable form of ApplyOutcome (stable disposition + facts).
 type OutcomeExport struct {
-	Kind      OutcomeKind      `json:"kind"`
-	EventID   EventID          `json:"eventId"`
-	Sequence  SequenceNumber   `json:"sequence"`
-	Rejection *Rejection       `json:"rejection,omitempty"`
-	Facts     []Fact           `json:"facts"`
+	Kind      OutcomeKind    `json:"kind"`
+	EventID   EventID        `json:"eventId"`
+	Sequence  SequenceNumber `json:"sequence"`
+	Rejection *Rejection     `json:"rejection,omitempty"`
+	Facts     []Fact         `json:"facts"`
 }
 
 // ExportState copies every projection field needed for exact Redis restore.
@@ -68,6 +69,7 @@ func (p *SpectatorRoomProjection) ExportState() ProjectionExport {
 		CurrentPlayerID: p.currentPlayer,
 		PenaltyAmount:   p.penaltyAmount,
 		PenaltyTarget:   p.penaltyTarget,
+		DrawPileSize:    p.drawPileSize,
 		GameScore:       score,
 		MatchWinner:     p.matchWinner,
 		GameCompleted:   p.gameCompleted,
@@ -103,6 +105,10 @@ func RestoreProjection(exp ProjectionExport) (*SpectatorRoomProjection, error) {
 	p.currentPlayer = exp.CurrentPlayerID
 	p.penaltyAmount = exp.PenaltyAmount
 	p.penaltyTarget = exp.PenaltyTarget
+	if exp.DrawPileSize < 0 {
+		return nil, fmt.Errorf("projection export: drawPileSize must be >= 0")
+	}
+	p.drawPileSize = exp.DrawPileSize
 	if exp.GameScore != nil {
 		p.gameScore = make(map[PlayerID]int, len(exp.GameScore))
 		for k, v := range exp.GameScore {

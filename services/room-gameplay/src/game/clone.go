@@ -23,6 +23,7 @@ func (g *Game) Clone() *Game {
 		placement:     append([]PlayerID(nil), g.placement...),
 		cardPoints:    cloneIntMap(g.cardPoints),
 		outcomes:      cloneOutcomes(g.outcomes),
+		drawPileSize:  g.drawPileSize,
 	}
 	if g.uno != nil {
 		uw := *g.uno

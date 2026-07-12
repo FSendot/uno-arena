@@ -92,6 +92,12 @@ CREATE INDEX IF NOT EXISTS rooms_status_idx
 CREATE INDEX IF NOT EXISTS rooms_updated_at_idx
     ON rooms (updated_at);
 
+-- Bounded public room listing keyset (visibility=public, status filter, room_id ASC).
+-- Supports Gateway/BFF GET /v1/rooms → internal public-list without OFFSET/full scan.
+CREATE INDEX IF NOT EXISTS rooms_public_list_idx
+    ON rooms (status, room_id)
+    WHERE visibility = 'public';
+
 -- ---------------------------------------------------------------------------
 -- Roster / seats (lock order #2 after rooms).
 -- ---------------------------------------------------------------------------
@@ -322,6 +328,10 @@ CREATE INDEX IF NOT EXISTS integration_outbox_events_room_idx
 
 CREATE INDEX IF NOT EXISTS integration_outbox_events_created_idx
     ON integration_outbox_events (created_at);
+
+-- Analytics backfill keyset pages by (topic, outbox_id); never OFFSET.
+CREATE INDEX IF NOT EXISTS integration_outbox_events_topic_outbox_idx
+    ON integration_outbox_events (topic, outbox_id);
 
 -- ---------------------------------------------------------------------------
 -- Realtime outbox (Redis Streams via Debezium Server). NO published_at.

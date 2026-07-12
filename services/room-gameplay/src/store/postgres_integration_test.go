@@ -691,7 +691,7 @@ func TestIntegration_NoMatchingGIEventLeavesPending(t *testing.T) {
 	// Plant a pending intent with no corresponding GI append.
 	err := sessions.BeginReconciliationIntent(context.Background(), "orphan_cmd", "room_orphan", 0,
 		[]byte(`{"commandId":"orphan_cmd"}`), app.DurableAcceptedCommit{
-			Session: domain.OpenSession(mustCreateRoom(t, "orphan_cmd", "room_orphan")),
+			Session:   domain.OpenSession(mustCreateRoom(t, "orphan_cmd", "room_orphan")),
 			CommandID: "orphan_cmd", CommandType: app.CmdCreateRoom, CreatePath: true,
 			Outcome: domain.CommandOutcome{Kind: domain.OutcomeAccepted, CommandID: "orphan_cmd"},
 		})
@@ -887,6 +887,10 @@ func TestIntegration_DurableProvision(t *testing.T) {
 	if gi.Len() != 1 {
 		t.Fatalf("expected GI append on durable provision, got %d", gi.Len())
 	}
+	firstRoomID := provisionPayloadRoomID(t, res.Result.Payload)
+	if firstRoomID != "room_prov" {
+		t.Fatalf("durable first success roomId=%q want room_prov payload=%s", firstRoomID, res.Result.Payload)
+	}
 	rid, ok := sessions.GetProvision(context.Background(), app.ProvisionKey{
 		TournamentID: "t1", RoundNumber: 1, SlotID: "slot-a",
 	})
@@ -903,6 +907,23 @@ func TestIntegration_DurableProvision(t *testing.T) {
 	if gi.Len() != 1 {
 		t.Fatalf("duplicate provision must not re-append GI: %d", gi.Len())
 	}
+	dupRoomID := provisionPayloadRoomID(t, res2.Result.Payload)
+	if dupRoomID != "room_prov" {
+		t.Fatalf("durable duplicate roomId=%q want room_prov", dupRoomID)
+	}
+}
+
+func provisionPayloadRoomID(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	roomID, _ := payload["roomId"].(string)
+	if roomID == "" {
+		t.Fatalf("missing roomId in %s", raw)
+	}
+	return roomID
 }
 
 func TestIntegration_PendingIntentBlocksSecondAppend(t *testing.T) {
@@ -1106,7 +1127,7 @@ func TestIntegration_DoneIntentFailClosed(t *testing.T) {
 	}
 	err := sessions.BeginReconciliationIntent(context.Background(), "done_cmd", "room_done", 0,
 		[]byte(`{}`), app.DurableAcceptedCommit{
-			Session: domain.OpenSession(mustCreateRoom(t, "done_cmd2", "room_done2")),
+			Session:   domain.OpenSession(mustCreateRoom(t, "done_cmd2", "room_done2")),
 			CommandID: "done_cmd", CommandType: app.CmdCreateRoom, CreatePath: true,
 			Outcome: domain.CommandOutcome{Kind: domain.OutcomeAccepted, CommandID: "done_cmd"},
 		})
@@ -1251,7 +1272,7 @@ func TestIntegration_ReservationActionRecoveredOnReconcile(t *testing.T) {
 		CommandID: "st", Type: app.CmdStartMatch, SchemaVersion: 1,
 		PlayerID: "host", SessionID: "s", RoomID: "room_res_rec",
 		ExpectedSequenceNumber: int64Ptr(3),
-		Payload: mustJSON(map[string]any{"gameId": "g1"}),
+		Payload:                mustJSON(map[string]any{"gameId": "g1"}),
 	})
 
 	deals.FailConfirm = fmt.Errorf("confirm down")
@@ -1360,6 +1381,176 @@ func mustAcceptCmd(t *testing.T, svc *app.Service, in app.CommandInput) {
 	}
 	if res.Result.Status != "accepted" {
 		t.Fatalf("%+v", res.Result)
+	}
+}
+
+func TestIntegration_AnalyticsBackfill_KeysetReadOnly(t *testing.T) {
+	restore := app.SetAnalyticsBackfillCursorMACKeyForTest("pg-analytics-backfill-cursor")
+	t.Cleanup(restore)
+
+	pool := openPool(t)
+	ctx := context.Background()
+	at := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		ts := at.Add(time.Duration(i) * time.Minute)
+		payload, _ := json.Marshal(map[string]any{
+			"eventId": fmt.Sprintf("pg-%d", i), "eventType": "GameplayMetric", "schemaVersion": 1,
+			"correlationId": "c", "occurredAt": ts.UTC().Format(time.RFC3339Nano),
+			"roomId": "room_pg", "visibility": "anonymized_adhoc", "metricType": "play",
+		})
+		var id int64
+		err := pool.QueryRow(ctx, `
+			INSERT INTO integration_outbox_events (
+				event_id, event_type, topic, partition_key, schema_version, room_id,
+				payload, correlation_id, occurred_at
+			) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8)
+			RETURNING outbox_id
+		`, fmt.Sprintf("pg-eid-%d", i), "GameplayMetric", "room.gameplay.metrics", "room_pg",
+			"room_pg", payload, "c", ts).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	// Noise topic must not leak into room.gameplay.metrics pages.
+	_, err := pool.Exec(ctx, `
+		INSERT INTO integration_outbox_events (
+			event_id, event_type, topic, partition_key, schema_version, room_id, payload
+		) VALUES ('noise','MatchCompleted','room.match.completed','room_pg',1,'room_pg','{"eventId":"noise"}')
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reader := store.NewAnalyticsBackfillStore(pool)
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: app.NewMemorySessionRepository(), Integrity: app.NewFakeGameIntegrity(),
+		Publisher: app.NewFakeEventPublisher(), Audit: app.NewFakeAuditSink(),
+		Deals: app.NewFakeDealSource(), Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	svc.SetAnalyticsBackfillReader(reader)
+
+	fromCP, toCP := fmt.Sprintf("%d", ids[0]), fmt.Sprintf("%d", ids[len(ids)-1])
+	page1, err := svc.AnalyticsBackfill(ctx, app.AnalyticsBackfillRequest{
+		RecoveryJobID: "pg-job", SourceTopic: "room.gameplay.metrics", SchemaVersion: 1,
+		FromCheckpoint: fromCP, ToCheckpoint: toCP, Limit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Records) != 2 || page1.NextCursor == "" {
+		t.Fatalf("page1=%+v", page1)
+	}
+	page2, err := svc.AnalyticsBackfill(ctx, app.AnalyticsBackfillRequest{
+		RecoveryJobID: "pg-job", SourceTopic: "room.gameplay.metrics", SchemaVersion: 1,
+		FromCheckpoint: fromCP, ToCheckpoint: toCP, Limit: 2, Cursor: page1.NextCursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page3, err := svc.AnalyticsBackfill(ctx, app.AnalyticsBackfillRequest{
+		RecoveryJobID: "pg-job", SourceTopic: "room.gameplay.metrics", SchemaVersion: 1,
+		FromCheckpoint: fromCP, ToCheckpoint: toCP, Limit: 2, Cursor: page2.NextCursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := len(page1.Records) + len(page2.Records) + len(page3.Records)
+	if total != 5 || page3.NextCursor != "" {
+		t.Fatalf("total=%d next3=%q", total, page3.NextCursor)
+	}
+
+	var countBefore, countAfter int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM integration_outbox_events`).Scan(&countBefore)
+	_, _ = svc.AnalyticsBackfill(ctx, app.AnalyticsBackfillRequest{
+		RecoveryJobID: "pg-job", SourceTopic: "room.gameplay.metrics", SchemaVersion: 1,
+		FromCheckpoint: fromCP, ToCheckpoint: toCP, Limit: 100,
+	})
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM integration_outbox_events`).Scan(&countAfter)
+	if countBefore != countAfter {
+		t.Fatalf("outbox mutated: %d -> %d", countBefore, countAfter)
+	}
+
+	var idx int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		WHERE tablename = 'integration_outbox_events'
+		  AND indexname = 'integration_outbox_events_topic_outbox_idx'
+	`).Scan(&idx); err != nil || idx != 1 {
+		t.Fatalf("baseline topic/outbox index missing: idx=%d err=%v", idx, err)
+	}
+}
+
+func TestPostgresPublicList_KeysetPrivacyAndIndex(t *testing.T) {
+	pool := openPool(t)
+	ctx := context.Background()
+	restore := app.SetPublicListCursorMACKeyForTest("pg-public-list-cursor")
+	defer restore()
+
+	sessions := store.NewSessionStore(pool)
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: sessions, Commands: sessions,
+		Integrity: app.NewFakeGameIntegrity(), Publisher: app.NewFakeEventPublisher(),
+		Audit: app.NewFakeAuditSink(), Deals: app.NewFakeDealSource(),
+		Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	svc.SetPublicListReader(sessions)
+
+	for _, tc := range []struct {
+		id, host string
+		vis      domain.Visibility
+	}{
+		{"room_a", "h1", domain.VisibilityPublic},
+		{"room_b", "h2", domain.VisibilityPublic},
+		{"room_c", "h3", domain.VisibilityPublic},
+		{"room_priv", "hp", domain.VisibilityPrivate},
+	} {
+		room, out := domain.CreateRoom(domain.CreateRoomCommand{
+			CommandID: domain.CommandID("cmd_" + tc.id), RoomID: domain.RoomID(tc.id),
+			HostID: domain.PlayerID(tc.host), Visibility: tc.vis, MaxSeats: 4,
+		})
+		if out.Rejection != nil {
+			t.Fatal(out.Rejection)
+		}
+		uow, err := sessions.BeginCreate(ctx, domain.RoomID(tc.id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := uow.CommitAccepted(app.DurableAcceptedCommit{
+			Session: domain.OpenSession(room), CommandID: "cmd_" + tc.id, CommandType: "CreateRoom",
+			Outcome: out, CreatePath: true, IntegrityRevision: 1, SetIntegrityRevision: true, LogOffset: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page1, err := svc.PublicList(ctx, app.PublicListQuery{Status: "waiting", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Rooms) != 2 || page1.NextCursor == "" {
+		t.Fatalf("page1=%+v", page1)
+	}
+	for _, r := range page1.Rooms {
+		if r.Visibility != "public" || r.RoomID == "room_priv" {
+			t.Fatalf("privacy %#v", r)
+		}
+	}
+	page2, err := svc.PublicList(ctx, app.PublicListQuery{Status: "waiting", Limit: 2, Cursor: page1.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2.Rooms) != 1 || page2.NextCursor != "" {
+		t.Fatalf("page2=%+v", page2)
+	}
+
+	var idx int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		WHERE tablename = 'rooms' AND indexname = 'rooms_public_list_idx'
+	`).Scan(&idx); err != nil || idx != 1 {
+		t.Fatalf("rooms_public_list_idx missing: idx=%d err=%v", idx, err)
 	}
 }
 

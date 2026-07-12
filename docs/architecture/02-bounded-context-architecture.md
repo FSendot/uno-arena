@@ -60,6 +60,7 @@ Own the room lifecycle, Uno rules, turn sequencing, command validation, and oper
 - sequence-number validation
 - hand and turn legality
 - penalty windows and timers
+- authoritative `drawPileSize` projection (count only; sourced from Game Integrity reservation `remaining`)
 - player feed read API and stream
 - sanitized gameplay metrics policy
 
@@ -75,7 +76,7 @@ Own the room lifecycle, Uno rules, turn sequencing, command validation, and oper
 
 **Interfaces**
 
-- Synchronous through BFF: `POST /v1/rooms`, `POST /v1/rooms/{roomId}/commands`, player snapshot/read APIs for reconnect.
+- Synchronous through BFF: `POST /v1/rooms` (create via command envelope), `GET /v1/rooms` (bounded public room list for CLI `room list` / `play --casual`), `POST /v1/rooms/{roomId}/commands`, player snapshot/read APIs for reconnect.
 - Internal synchronous: append/deck calls to Game Integrity before publication.
 - Asynchronous integration through Kafka: room business streams such as `room.game.completed` and `room.match.completed`, plus sanitized projection/metrics streams such as `room.spectator-safe.events` and `room.gameplay.metrics`.
 - Realtime delivery through Redis Streams: Room Gameplay commits ordered player-safe entries to its Postgres realtime outbox; a dedicated Debezium Server Redis-sink pipeline for the Room context database delivers them to the stateless BFF/SSE tier. Spectator View atomically publishes ordered spectator entries with its Redis projection after consuming `room.spectator-safe.events`; the BFF never converts raw player feeds into spectator output.
@@ -87,12 +88,16 @@ The BFF validates the external session first, then forwards the internal request
 
 | Interface | Required principal |
 | --- | --- |
+| `GET /v1/rooms` | Public (no player bearer). Bounded public-only room summaries for CLI matchmaking (`room list` / `play --casual`). Gateway proxies Room `GET /internal/v1/rooms/public-list` with the Gateway↔Room scoped credential. Default `status=waiting`; optional waiting/locked/in_progress; limit default 50 / max 100; opaque Room-owned HMAC cursor (`ROOM_PUBLIC_LIST_CURSOR_SECRET`). Never returns private rooms, hands, session/invite/GI data, or roster identities beyond `hostId`. |
 | `POST /v1/rooms` | Authenticated player; Identity eligibility must allow ad-hoc play or the tournament assignment being requested. |
 | `POST /v1/rooms/{roomId}/commands` | Authenticated player whose session was authoritatively validated by Identity at the BFF boundary; Room verifies the signed internal principal, active membership, turn ownership, and `expectedSequenceNumber`. Rejection emits a structured operational/security audit record and never appends Game Integrity. |
 | `GET /v1/rooms/{roomId}/snapshot` | Authenticated player with current or reconnect-eligible membership; response may include only that player's private hand/draw facts plus public Uno absolute UTC `expiresAt` and `openingSequence` when a window is open. Used after SSE `409 snapshot_required` or reconnect. |
 | `GET /v1/rooms/{roomId}/events` | Authenticated player SSE stream through the BFF; membership and last-seen sequence are checked before resume. Unknown/evicted `Last-Event-ID` returns `409 snapshot_required`. SSE corrects advisory CLI countdown using server `expiresAt` and `openingSequence`. |
+| `GET /internal/v1/rooms/public-list` | Gateway↔Room scoped service credential (`SERVICE_CREDENTIAL` / `ROOM_SERVICE_CREDENTIAL`); bounded public-only keyset page for BFF `GET /v1/rooms`; producer-owned opaque HMAC cursor (`ROOM_PUBLIC_LIST_CURSOR_SECRET`, API-only); default 50 / max 100; one-row lookahead for `nextCursor`. |
 | `POST /internal/v1/rooms/{roomId}/timer-commands` | Room Timer Worker service credential; Room Gameplay rechecks timer keys before applying outcomes. `ExpireUnoWindow` rechecks absolute UTC `expiresAt` plus the opening room sequence; `ForfeitPlayer` rechecks the persisted reconnect deadline keyed by `(roomId, playerId, disconnectVersion)` and does not gain an Uno opening-sequence field. |
 | `POST /internal/v1/rooms/provision` | Tournament Orchestration/provisioning-worker service credential; idempotent by `(tournamentId, roundNumber, slotId)`. |
+| `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` | Spectator projection-rebuilder credential (`ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`); query requires `failedCheckpoint`, `recoveryJobId`, `schemaVersion=1`; returns `SnapshotSanitized`-compatible public state plus authoritative room sequence and `resumeCheckpoint`. Never includes private hands, deck order, player-feed, or Game Integrity data. Implemented; rebuilder Deployment remains disabled pending live recovery tests. |
+| `POST /internal/v1/rooms/analytics-backfill` | Analytics projection-rebuilder credential (`ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL`); producer-owned HMAC opaque keyset cursor (`ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET`); paired bounded range required; page default 100 / hard max 1000; read-only append-only outbox source; returns canonical AsyncAPI facts for `room.gameplay.metrics` and `room.match.completed` only. |
 
 **Dependencies**
 
@@ -114,6 +119,7 @@ Own technical integrity only: append-only game history, replay, auditability, an
 - replay position and log offsets
 - audit export
 - deterministic recovery inputs
+- authoritative deck remaining counts returned on deal/draw reservations (`remaining` after confirm; never deck order/seed/card identities beyond reserved material)
 
 **Notes**
 
@@ -168,11 +174,18 @@ Own tournament lifecycle, registration, provisioning, room assignment, round clo
 
 - Postgres is authoritative.
 - Tournament calculates `PlayersAdvanced`; Room Gameplay does not.
-- Redis can hold a bracket projection for fast read access.
+- `PlayersAdvanced.roundNumber` is the achieved advancement depth for its listed players. `TournamentCompleted.finalStandings` is the complete final-room order from first to last, and its first entry is the champion; no redundant `championId` is published.
+- `PlayersAdvanced` carries 1–3 unique player IDs: normally the top three, with fewer allowed only for an authoritative undersized/forfeit outcome.
+- Redis can hold a bracket projection for fast read access (not wired in the local durable slice yet).
+- Public bracket reads return compact tournament/round summary metadata plus an opaque-cursor slot page: 100 slots by default and at most 1,000. A response never serializes the complete million-player bracket.
+- Public standings reads return a compact projection (`phase`, `registeredCount`, `currentRound`, ordered `finalStandings` ≤10) without whole-aggregate hydration or registered-player lists.
+- Bracket cursors are live keysets over stable `(roundNumber, slotIndex)` identity. Pages expose projection version/time; slot state may advance between requests without invalidating the cursor.
+- The current bounded Gateway/Tournament standings and bracket proxy does not yet close private-tournament visibility enforcement (architecture still requires participant or operator role for private tournaments); that remains an architecture gap.
+- Durable franz-go consumer for `room.match.completed` is implemented when `KAFKA_BROKERS` is set.
 
 **Interfaces**
 
-- Synchronous through BFF: tournament creation, registration, compact tournament command envelopes, bracket/read APIs.
+- Synchronous through BFF: tournament creation, registration, compact tournament command envelopes, bracket/standings read APIs.
 - Internal synchronous: provisioning workers call Room Gameplay idempotently to create tournament rooms using `(tournamentId, roundNumber, slotId)`.
 - Asynchronous input: `room.match.completed`.
 - Asynchronous output: `tournament.match.assigned`, `tournament.match.result_recorded`, `tournament.players.advanced`, `tournament.round.completed`, `tournament.completed` (AsyncAPI Kafka channels; offline HTTP bridges remain destination-specific transforms).
@@ -190,6 +203,7 @@ Tournament Orchestration receives BFF-forwarded principals for public routes and
 | `GET /v1/tournaments/{tournamentId}/standings` | Anonymous-tolerant for public standings; private tournaments require participant or operator role. |
 | `POST /internal/v1/tournaments/{tournamentId}/match-results` | Tournament Orchestration consumer/service credential only; fed by deduped `room.match.completed` consumption. |
 | `POST /internal/v1/tournaments/{tournamentId}/rounds/{roundNumber}/provisioning-batches` | Sharded provisioning worker service credential; bounded by worker admission/backpressure. |
+| `POST /internal/v1/tournaments/analytics-backfill` | Analytics projection-rebuilder credential (`TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL`); producer-owned HMAC opaque keyset cursor (`TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET`); paired bounded range required; page default 100 / hard max 1000; read-only append-only outbox source; returns canonical AsyncAPI facts for Tournament topics Analytics consumes. |
 
 **Dependencies**
 
@@ -213,13 +227,22 @@ Maintain persistent ranking state and rating history.
 **Notes**
 
 - Postgres is authoritative.
-- Redis is a cache for leaderboard reads.
+- Redis is a cache for leaderboard reads (not wired in the local durable slice yet).
+- Public leaderboard reads use opaque cursor pagination with 100 entries by default and a hard maximum of 500. The complete board remains page-queryable; `LeaderboardSnapshotPublished` is a separate bounded top-100 public view.
+- Leaderboard cursors are live keysets over the last `(rating, playerId)` boundary. Pages expose projection version/time and guarantee page-local consistency, not a frozen million-player generation across requests.
+- Score-changing Ranking transactions durably mark their board dirty. A Ranking-owned worker coalesces changes and publishes at most one top-100 snapshot per board every 15 seconds under durable version/checkpoint locking; zero-delta results do not dirty the board.
 - Updates are async and derived from authoritative room or tournament results.
+- Durable multi-topic franz-go consumers for `room.game.completed`, `tournament.players.advanced`, and `tournament.completed` (per-source Ranking DLQs) are implemented when `KAFKA_BROKERS` is set. Tournament-performance failures are event-local; Ranking does not quarantine the whole tournament.
+- Tournament Placement Rating is a lifetime cumulative achievement score: accepted tournament-performance facts can add points but never subtract them. It is not a second Elo system.
+- Every accepted `PlayersAdvanced` fact gives each listed player 10 advancement points. `roundNumber` records depth but does not multiply the award, so achievement grows linearly with rounds advanced.
+- `TournamentCompleted` adds a top-heavy final-placement bonus. Advancement points already reward reaching the final; the completion bonus intentionally differentiates the champion and podium.
+- Final-placement bonuses for first through tenth are `100, 70, 50, 35, 25, 20, 15, 10, 5, 0` points. A smaller final uses the applicable prefix; no position below tenth exists in the final room.
+- Ranking applies each `PlayersAdvanced` or `TournamentCompleted` fact atomically across all affected players, locking player rows in stable ID order. A malformed/conflicting participant prevents the entire event from changing ratings.
 
 **Interfaces**
 
 - Synchronous through BFF: leaderboard and rating-history queries.
-- Asynchronous input: eligible `room.game.completed` for casual Elo and tournament placement facts from Tournament Orchestration.
+- Asynchronous input: eligible `room.game.completed` for casual Elo plus `tournament.players.advanced` and `tournament.completed` for tournament-placement rating.
 - Asynchronous output: `ranking.player_rating_updated`, `ranking.leaderboard_snapshot_published` (AsyncAPI Kafka channels).
 
 **Synchronous interface authorization**
@@ -231,12 +254,13 @@ Ranking has no synchronous write API for clients; rating changes come from authe
 | `GET /v1/rankings/leaderboards` | Anonymous-tolerant for public leaderboards; authenticated session may personalize region/friend filters. |
 | `GET /v1/players/{playerId}/rating-history` | Same authenticated player, an operator/admin role, or anonymous access to a public summary without private moderation details. |
 | `GET /internal/v1/rankings/rebuild-status` | Ranking operator/service role only. |
+| `POST /internal/v1/rankings/analytics-backfill` | Analytics projection-rebuilder credential (`RANKING_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL`); producer-owned HMAC opaque keyset cursor (`RANKING_ANALYTICS_BACKFILL_CURSOR_SECRET`); paired bounded range required; page default 100 / hard max 1000; read-only append-only outbox source; returns canonical AsyncAPI facts for `ranking.player_rating_updated` (includes `projectionVersion`) and `ranking.leaderboard_snapshot_published`. |
 
 **Dependencies**
 
-- Upstream: Room Gameplay publishes completed, non-abandoned ad-hoc game results; Tournament Orchestration publishes tournament placement facts.
+- Upstream: Room Gameplay publishes completed, non-abandoned ad-hoc game results; Tournament Orchestration publishes advancement depth and ordered final standings without rating deltas.
 - Downstream: BFF reads leaderboards/rating history; Analytics may consume public rating facts.
-- Contract ownership: Ranking owns rating rules, rating history, public leaderboard snapshots, and the separation between casual Elo and tournament placement rating.
+- Contract ownership: Ranking owns rating rules, rating history, public leaderboard snapshots, and the separation between casual Elo and tournament placement rating. The upstream tournament `eventId` is the per-player `placementEventId` used with `(playerId, tournamentId)` for durable idempotency.
 
 ## 6. Spectator View
 
@@ -255,13 +279,15 @@ Serve privacy-filtered room projections to anonymous observers and read-only con
 - Redis is the materialized projection store.
 - It is rebuilt from committed safe events and sanitized snapshots.
 - It never becomes the source of truth for private gameplay data.
-- Durable Redis projection + Redis-backed spectator SSE are implemented when `REDIS_URL` and scoped credentials are set; capability memory remains behind explicit non-prod `SPECTATOR_CAPABILITY_MODE`. **Kafka consumer for `room.spectator-safe.events` is pending** (HTTP internal ingest is a test/ops bridge only).
+- Durable Redis projection + Redis-backed spectator SSE are implemented when `REDIS_URL` and scoped credentials are set; capability memory remains behind explicit non-prod `SPECTATOR_CAPABILITY_MODE`. Durable Kafka consumer for `room.spectator-safe.events` is implemented when `KAFKA_BROKERS` is set (HTTP internal ingest remains a test/ops bridge only).
+- Post-retention and quarantine recovery (ADR-0039) is implemented: consume `spectator.projection.rebuild_requested` (`roomId` key; idempotency `(recoveryJobId, roomId, failedCheckpoint)`; DLQ `spectator.projection.rebuild_requested.spectator-view.dlq`), call Room `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot`, CAS/fence Redis generation-swap against live room sequence/generation (atomic idempotency marker + fenced quarantine release in the same Lua transaction), replay bounded held post-gap records (max 1000), and release quarantine only after continuity is proven. `projectionRebuilder.enabled=false` in default/staging/production/`kind` until live recovery tests pass.
 - New spectator connections are allowed while the room is `waiting`, `locked`, or `in_progress`, subject to public/private authorization. Admission is denied in `completed`/`cancelled` after `RoomCompleted` or `RoomCancelled`, and existing spectator streams close at that terminal room/match state (not at individual game end in a best-of-three).
 
 **Interfaces**
 
 - Synchronous through BFF: spectator room snapshot query for initial load or reconnect.
 - Asynchronous input: `room.spectator-safe.events`.
+- Asynchronous recovery control: `spectator.projection.rebuild_requested` (and worker-owned DLQ).
 - Asynchronous output: `spectator.room_projection.updated`.
 
 **Synchronous interface authorization**
@@ -276,7 +302,7 @@ Spectator View is anonymous-tolerant only because it serves a separate privacy-f
 
 **Dependencies**
 
-- Upstream: Room Gameplay publishes already safe room facts and sanitized snapshots.
+- Upstream: Room Gameplay publishes already safe room facts and sanitized snapshots; Room also owns the internal spectator-recovery-snapshot API used by the Spectator projection-rebuilder.
 - Downstream: BFF reads spectator projections and streams them to spectator clients.
 - Contract ownership: Spectator View owns the projection schema and visibility policy; it does not accept raw private gameplay or Game Integrity log data.
 
@@ -297,12 +323,15 @@ Provide non-authoritative analytics, public aggregates, and derived reporting vi
 
 - This is a narrow bounded context, not a generic reporting bucket.
 - It consumes sanitized/public events, including `room.gameplay.metrics`.
+- Durable multi-topic franz-go ingestion of the nine configured AsyncAPI topics is implemented when `KAFKA_BROKERS` is set.
+- Post-retention and quarantine recovery (ADR-0039) is implemented: consume `analytics.projection.rebuild_requested` (`recoveryJobId` key; idempotency `(recoveryJobId, sourceTopic, pageCursor)`; DLQ `analytics.projection.rebuild_requested.analytics.dlq`), page Room/Tournament/Ranking `POST .../analytics-backfill` APIs (paired range; producer default page 100 / hard max 1000; Analytics worker default page 1000), apply under a durable ClickHouse rebuilding generation/lease (deterministic generation, lease readback, active/building dual-write, server-side clone) so live dual-write joins the fence, and claim continuity only after every requested page/checkpoint is reconciled. ClickHouse remains non-transactional (projection-before-marker check-then-act; same-generation redelivery idempotent via FINAL). `projectionRebuilder.enabled=false` in default/staging/production/`kind` until live recovery tests pass.
 - Its outputs are derived and non-authoritative.
 
 **Interfaces**
 
 - Synchronous through BFF: public reporting/statistics queries.
 - Asynchronous input: anonymized ad-hoc gameplay metrics, public tournament gameplay metrics, tournament lifecycle/advancement facts, and public rating facts.
+- Asynchronous recovery control: `analytics.projection.rebuild_requested` (and worker-owned DLQ).
 - Asynchronous output: optional public analytics refresh notifications.
 
 **Synchronous interface authorization**
@@ -318,7 +347,7 @@ Analytics exposes only derived, non-authoritative read models through the BFF.
 
 **Dependencies**
 
-- Upstream: Room Gameplay, Tournament Orchestration, and Ranking publish sanitized or public facts.
+- Upstream: Room Gameplay, Tournament Orchestration, and Ranking publish sanitized or public facts and own their internal analytics-backfill APIs for the topics Analytics consumes.
 - Downstream: BFF and public reporting consumers query derived read models.
 - Contract ownership: Analytics owns public reporting schemas and ingestion idempotency, but not gameplay, advancement, rating, privacy, or audit decisions.
 

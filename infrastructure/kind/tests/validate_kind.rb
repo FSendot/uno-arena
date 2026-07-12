@@ -185,6 +185,201 @@ fail_collect(failures, "missing test-redis-aof.sh") unless File.file?(redis_aof_
 fail_collect(failures, "missing test-redis-aof-structure.sh") unless File.file?(redis_aof_struct)
 puts "ok redis-local-aof"
 
+# --- Debezium Server (Room realtime → Redis); structure only, no delivery claim ---
+DEBEZIUM_SERVER_ARM_DIGEST = "sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b"
+DEBEZIUM_SERVER_SOURCE_IMAGE = "quay.io/debezium/server:3.6.0.Final@#{DEBEZIUM_SERVER_ARM_DIGEST}"
+DEBEZIUM_SERVER_STALE_TAG = "docker.io/uno-arena/debezium-server:3.6.0.Final-65ba00e8de90"
+DEBEZIUM_SERVER_SHORT_STALE = "uno-arena/debezium-server:3.6.0.Final-65ba00e8de90"
+debezium_server_path = File.join(MANIFESTS, "80-debezium-server/debezium-server-room-realtime.yaml")
+fail_collect(failures, "missing Debezium Server manifest") unless File.file?(debezium_server_path)
+ds_text = File.read(debezium_server_path)
+fail_collect(failures, "Debezium Server must use exact source #{DEBEZIUM_SERVER_SOURCE_IMAGE}") unless ds_text.include?(DEBEZIUM_SERVER_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Server must record ARM64 source digest #{DEBEZIUM_SERVER_ARM_DIGEST}") unless ds_text.include?(DEBEZIUM_SERVER_ARM_DIGEST)
+fail_collect(failures, "Debezium Server must use imagePullPolicy Never") unless ds_text.include?("imagePullPolicy: Never")
+fail_collect(failures, "Debezium Server must not use IfNotPresent") if ds_text.include?("imagePullPolicy: IfNotPresent")
+ds_images = ds_text.scan(/^\s+image:\s+(\S+)\s*$/).flatten
+fail_collect(failures, "Debezium Server Deployment image must be #{DEBEZIUM_SERVER_SOURCE_IMAGE}") unless ds_images.include?(DEBEZIUM_SERVER_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Server must deploy digest (@sha256) image refs") if ds_images.any? { |i| !i.include?("@") }
+fail_collect(failures, "Debezium Server must use quay.io/debezium/server image") if ds_images.any? { |i| !i.start_with?("quay.io/debezium/server:") }
+fail_collect(failures, "Debezium Server must not use stale runtime tag #{DEBEZIUM_SERVER_STALE_TAG}") if ds_text.include?(DEBEZIUM_SERVER_STALE_TAG)
+fail_collect(failures, "Debezium Server must not use short stale tag #{DEBEZIUM_SERVER_SHORT_STALE}") if ds_text.match?(/^\s+(?:image|RUNTIME_IMAGE):\s+#{Regexp.escape(DEBEZIUM_SERVER_SHORT_STALE)}\s*$/)
+fail_collect(failures, "Debezium Server must not claim RUNTIME_IMAGE") if ds_text.include?("RUNTIME_IMAGE")
+fail_collect(failures, "Debezium Server must use Redis sink") unless ds_text.include?("debezium.sink.type=redis")
+fail_collect(failures, "Debezium Server must use Redis DB 2") unless ds_text.include?("debezium.sink.redis.db.index=2")
+fail_collect(failures, "Debezium Server must use extended Redis message format") unless ds_text.include?("message.format=extended")
+fail_collect(failures, "Debezium Server must use room_cdc_realtime_outbox publication") unless ds_text.include?("room_cdc_realtime_outbox")
+fail_collect(failures, "Debezium Server must capture realtime_outbox_events") unless ds_text.include?("realtime_outbox_events")
+fail_collect(failures, "Debezium Server must use unique slot debezium_server_room_realtime") unless ds_text.include?("debezium_server_room_realtime")
+fail_collect(failures, "Debezium Server must route by target_stream") unless ds_text.include?("route.by.field=target_stream")
+# Property-file escape: Ruby '\\' => one '\'; need four backslashes for file's \\${...}.
+fail_collect(failures, "Debezium Server route.topic.replacement must use \\\\${routedByValue} (SmallRye escape)") unless ds_text.include?("route.topic.replacement=\\\\${routedByValue}")
+fail_collect(failures, "Debezium Server must not use bare unescaped route.topic.replacement=${routedByValue}") if ds_text.match?(/^\s*debezium\.transforms\.outbox\.route\.topic\.replacement=\$\{routedByValue\}\s*$/)
+fail_collect(failures, "Debezium Server offset key must be room-realtime unique") unless ds_text.include?("metadata:debezium:room-realtime:offsets")
+fail_collect(failures, "Debezium Server must not set unsupported offset Redis db.index") if ds_text.include?("offset.storage.redis.db.index")
+fail_collect(failures, "Debezium Server must not configure Redis schema history") if ds_text.match?(/schema\.history|SchemaHistory|schema_history/i)
+fail_collect(failures, "Debezium Server must use snapshot.mode=no_data") unless ds_text.include?("snapshot.mode=no_data")
+fail_collect(failures, "Debezium Server must use official format.key=json") unless ds_text.include?("debezium.format.key=json")
+fail_collect(failures, "Debezium Server must use official format.value=json") unless ds_text.include?("debezium.format.value=json")
+fail_collect(failures, "Debezium Server must use official format.header=json") unless ds_text.include?("debezium.format.header=json")
+fail_collect(failures, "Debezium Server must not use source converter aliases") if ds_text.match?(/debezium\.source\.(key|value)\.converter/)
+fail_collect(failures, "Debezium Server must not re-place payload via additional.placement") if ds_text.match?(/payload:envelope:(payload|data)/)
+fail_collect(failures, "Debezium Server must not be Kafka Connect image") if ds_text.match?(%r{debezium/connect|connect-distributed}i)
+fail_collect(failures, "Debezium Server docs must not claim live delivery") if ds_text.match?(/proves live|live Postgres→Redis delivery verified/i)
+ds_struct = File.join(KIND, "scripts/test-debezium-server-structure.sh")
+ds_load = File.join(KIND, "scripts/load-debezium-server.sh")
+ds_status = File.join(KIND, "scripts/status-debezium-server.sh")
+fail_collect(failures, "missing test-debezium-server-structure.sh") unless File.file?(ds_struct)
+fail_collect(failures, "missing load-debezium-server.sh") unless File.file?(ds_load)
+fail_collect(failures, "missing status-debezium-server.sh") unless File.file?(ds_status)
+ds_load_text = File.read(ds_load)
+fail_collect(failures, "Debezium Server loader must record ARM64 source digest") unless ds_load_text.include?(DEBEZIUM_SERVER_ARM_DIGEST.delete_prefix("sha256:"))
+fail_collect(failures, "Debezium Server loader must stage exact source image") unless ds_load_text.include?(DEBEZIUM_SERVER_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Server loader must docker exec into kind node") unless ds_load_text.include?("docker exec")
+fail_collect(failures, "Debezium Server loader must crictl pull") unless ds_load_text.include?("crictl pull")
+fail_collect(failures, "Debezium Server loader must verify via crictl inspecti") unless ds_load_text.include?("crictl inspecti")
+fail_collect(failures, "Debezium Server loader must verify arm64") unless ds_load_text.include?("arm64")
+fail_collect(failures, "Debezium Server loader must not kind load") if ds_load_text.match?(/kind\s+load\s+docker-image/)
+fail_collect(failures, "Debezium Server loader must remove stale runtime tag") unless ds_load_text.include?(DEBEZIUM_SERVER_STALE_TAG)
+fail_collect(failures, "Debezium Server loader must fail closed on docker.io/library/import-") unless ds_load_text.include?("docker.io/library/import-")
+fail_collect(failures, "Debezium Server loader must fail closed on /import- repoDigests") unless ds_load_text.include?("/import-")
+fail_collect(failures, "Debezium Server loader must name stale kind-import metadata") unless ds_load_text.include?("stale kind-import metadata")
+fail_collect(failures, "Debezium Server loader import rejection must require reset/recreate") unless ds_load_text.match?(%r{reset/recreate|reset.*recreate})
+fail_collect(failures, "Debezium Server loader import rejection must require node-native loader rerun") unless ds_load_text.include?("node-native loader")
+fail_collect(failures, "Debezium Server loader must not encode ctr content / containerd restart remediation") if ds_load_text.match?(/ctr\s+content|content\s+remove|restart\s+containerd|containerd\s+restart/i)
+puts "ok debezium-server-room-realtime"
+
+# --- Debezium Kafka Connect (four outbox routers); structure only, no delivery claim ---
+DEBEZIUM_CONNECT_ARM_DIGEST = "sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada"
+DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7"
+DEBEZIUM_CONNECT_SOURCE_IMAGE = "quay.io/debezium/connect:3.6.0.Final@#{DEBEZIUM_CONNECT_ARM_DIGEST}"
+DEBEZIUM_CONNECT_STALE_TAG = "docker.io/uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
+DEBEZIUM_CONNECT_SHORT_STALE = "uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
+debezium_connect_path = File.join(MANIFESTS, "80-debezium/connect.yaml")
+debezium_register_path = File.join(MANIFESTS, "80-debezium/job-register-connectors.yaml")
+fail_collect(failures, "missing Debezium Connect manifest") unless File.file?(debezium_connect_path)
+fail_collect(failures, "missing Debezium connector registration Job") unless File.file?(debezium_register_path)
+dc_text = File.read(debezium_connect_path)
+dr_text = File.read(debezium_register_path)
+fail_collect(failures, "Debezium Connect must use exact source #{DEBEZIUM_CONNECT_SOURCE_IMAGE}") unless dc_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Connect must record ARM64 source digest #{DEBEZIUM_CONNECT_ARM_DIGEST}") unless dc_text.include?(DEBEZIUM_CONNECT_ARM_DIGEST)
+fail_collect(failures, "Debezium Connect must document multiarch index #{DEBEZIUM_CONNECT_MULTIARCH_DIGEST}") unless dc_text.include?(DEBEZIUM_CONNECT_MULTIARCH_DIGEST)
+fail_collect(failures, "Debezium Connect register Job must use same exact source") unless dr_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Connect register Job must record ARM64 source digest") unless dr_text.include?(DEBEZIUM_CONNECT_ARM_DIGEST)
+fail_collect(failures, "Debezium Connect must use 3.6.0.Final") unless dc_text.include?("3.6.0.Final")
+fail_collect(failures, "Debezium Connect must use imagePullPolicy Never") unless dc_text.include?("imagePullPolicy: Never")
+fail_collect(failures, "Debezium Connect register Job must use imagePullPolicy Never") unless dr_text.include?("imagePullPolicy: Never")
+fail_collect(failures, "Debezium Connect must not use IfNotPresent") if dc_text.include?("imagePullPolicy: IfNotPresent") || dr_text.include?("imagePullPolicy: IfNotPresent")
+dc_images = dc_text.scan(/^\s+image:\s+(\S+)\s*$/).flatten
+dr_images = dr_text.scan(/^\s+image:\s+(\S+)\s*$/).flatten
+fail_collect(failures, "Debezium Connect Deployment image must be #{DEBEZIUM_CONNECT_SOURCE_IMAGE}") unless dc_images.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Connect Job image must be #{DEBEZIUM_CONNECT_SOURCE_IMAGE}") unless dr_images.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Connect Deployment and Job must share the same image") unless (dc_images & dr_images).include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Connect must deploy digest (@sha256) image refs") if (dc_images + dr_images).any? { |i| !i.include?("@") }
+fail_collect(failures, "Debezium Connect must use quay.io/debezium/connect images") if (dc_images + dr_images).any? { |i| !i.start_with?("quay.io/debezium/connect:") }
+fail_collect(failures, "Debezium Connect must not use stale runtime tag #{DEBEZIUM_CONNECT_STALE_TAG}") if (dc_text + dr_text).include?(DEBEZIUM_CONNECT_STALE_TAG)
+fail_collect(failures, "Debezium Connect must not use short stale tag #{DEBEZIUM_CONNECT_SHORT_STALE}") if (dc_text + dr_text).match?(/^\s+(?:image|RUNTIME_IMAGE):\s+#{Regexp.escape(DEBEZIUM_CONNECT_SHORT_STALE)}\s*$/)
+fail_collect(failures, "Debezium Connect must not claim RUNTIME_IMAGE") if dc_text.include?("RUNTIME_IMAGE")
+fail_collect(failures, "Debezium Connect must target kafka.uno-arena.svc.cluster.local:9092") unless dc_text.include?("kafka.uno-arena.svc.cluster.local:9092")
+%w[connect-configs connect-offsets connect-status].each do |topic|
+  fail_collect(failures, "Debezium Connect must use internal topic #{topic}") unless dc_text.include?(topic)
+end
+fail_collect(failures, "Debezium Connect must set RF1 for config storage") unless dc_text.include?("CONFIG_STORAGE_REPLICATION_FACTOR")
+connector_keys = dc_text.scan(/^[[:space:]]*(connector-[a-z0-9-]+\.json):/).flatten
+fail_collect(failures, "Debezium Connect must define exactly 4 connector templates, got #{connector_keys.inspect}") unless connector_keys.size == 4
+%w[
+  connector-identity-outbox.json
+  connector-room-integration-outbox.json
+  connector-tournament-outbox.json
+  connector-ranking-outbox.json
+].each do |key|
+  fail_collect(failures, "missing connector template #{key}") unless connector_keys.include?(key)
+end
+%w[
+  identity_cdc_outbox
+  room_cdc_integration_outbox
+  tournament_cdc_outbox
+  ranking_cdc_outbox
+].each do |pub|
+  fail_collect(failures, "Debezium Connect missing publication #{pub}") unless dc_text.include?(pub)
+end
+%w[
+  identity_outbox_slot
+  room_integration_outbox_slot
+  tournament_outbox_slot
+  ranking_outbox_slot
+].each do |slot|
+  fail_collect(failures, "Debezium Connect missing unique slot #{slot}") unless dc_text.include?(slot)
+end
+fail_collect(failures, "publication.autocreate.mode must be disabled on all connectors") unless dc_text.scan(/"publication\.autocreate\.mode":\s*"disabled"/).size == 4
+fail_collect(failures, "plugin.name must be pgoutput on all connectors") unless dc_text.scan(/"plugin\.name":\s*"pgoutput"/).size == 4
+fail_collect(failures, "snapshot.mode must be no_data on all connectors") unless dc_text.scan(/"snapshot\.mode":\s*"no_data"/).size == 4
+fail_collect(failures, "snapshot.mode=never must not remain") if dc_text.include?('"snapshot.mode": "never"')
+fail_collect(failures, "Outbox EventRouter required") unless dc_text.include?("io.debezium.transforms.outbox.EventRouter")
+fail_collect(failures, "outbox must route by topic column") unless dc_text.include?('"transforms.outbox.route.by.field": "topic"')
+fail_collect(failures, "outbox must key by partition_key") unless dc_text.include?('"transforms.outbox.table.field.event.key": "partition_key"')
+fail_collect(failures, "outbox must id by event_id") unless dc_text.include?('"transforms.outbox.table.field.event.id": "event_id"')
+fail_collect(failures, "outbox must payload by payload") unless dc_text.include?('"transforms.outbox.table.field.event.payload": "payload"')
+fail_collect(failures, "outbox must map event_type") unless dc_text.include?("event_type:header:type")
+fail_collect(failures, "room connector must timestamp by occurred_at") unless dc_text.include?('"transforms.outbox.table.field.event.timestamp": "occurred_at"')
+fail_collect(failures, "schemas must be disabled for JSON values") unless dc_text.include?('"value.converter.schemas.enable": "false"')
+fail_collect(failures, "Connect worker must not set KEY_CONVERTER (connectors own converters)") if dc_text.match?(/^\s+- name: KEY_CONVERTER\s*$/)
+fail_collect(failures, "Kafka Connect must not capture realtime_outbox") if dc_text.include?("realtime_outbox_events")
+fail_collect(failures, "no Heartbeat SMT / heartbeat.action.query") if dc_text.match?(/Heartbeat|heartbeat\.action\.query/i)
+fail_collect(failures, "Connect Deployment missing readinessProbe") unless dc_text.include?("readinessProbe:")
+fail_collect(failures, "Connect Deployment missing livenessProbe") unless dc_text.include?("livenessProbe:")
+fail_collect(failures, "Connect probes should use curl") unless dc_text.include?("curl")
+# Heap must be explicit and safely below the container memory limit (image default -Xmx2G OOMs at 1536Mi).
+fail_collect(failures, "Connect must set KAFKA_HEAP_OPTS (reject image-default unbounded heap)") unless dc_text.match?(/^\s+- name: KAFKA_HEAP_OPTS\s*$/)
+dc_mem_limit = dc_text[/limits:\s*\n\s+memory:\s*(\d+)Mi/, 1]&.to_i
+dc_heap_opts = dc_text[/- name:\s*KAFKA_HEAP_OPTS\s*\n\s+value:\s*"([^"]+)"/, 1]
+fail_collect(failures, "Connect memory limit Mi missing") if dc_mem_limit.nil? || dc_mem_limit <= 0
+fail_collect(failures, "Connect KAFKA_HEAP_OPTS value missing") if dc_heap_opts.nil? || dc_heap_opts.empty?
+if dc_heap_opts
+  fail_collect(failures, "Connect must not use image-default -Xmx2G") if dc_heap_opts.match?(/-Xmx2[Gg]/)
+  xmx = dc_heap_opts.match(/-Xmx(\d+)([MmGg])/)
+  fail_collect(failures, "Connect KAFKA_HEAP_OPTS must include -XmxNNNM") unless xmx
+  if xmx
+    xmx_mi = xmx[2].upcase == "G" ? xmx[1].to_i * 1024 : xmx[1].to_i
+    fail_collect(failures, "Connect -Xmx #{xmx_mi}Mi must be below memory limit #{dc_mem_limit}Mi") if xmx_mi >= dc_mem_limit
+  end
+  fail_collect(failures, "Connect KAFKA_HEAP_OPTS must include -Xms") unless dc_heap_opts.match?(/-Xms\d+[Mm]/)
+end
+fail_collect(failures, "register Job must PUT connector config") unless dr_text.include?("PUT") && dr_text.include?("/connectors/")
+fail_collect(failures, "register Job must use uno-arena-local-credentials") unless dr_text.include?("uno-arena-local-credentials")
+fail_collect(failures, "register Job must fail closed on FAILED") unless dr_text.match?(/FAILED|fail closed|failed closed/i)
+fail_collect(failures, "register Job must capture status checker rc in else branch") unless dr_text.match?(/else\s+rc=\$\?/m) && dr_text.include?('[[ "${rc}" -eq 1 ]]')
+fail_collect(failures, "register Job must require snapshot.mode=no_data") unless dr_text.include?("snapshot.mode must be no_data")
+local_images_cm = File.read(File.join(MANIFESTS, "01-local-secrets.yaml"))
+fail_collect(failures, "local images ConfigMap missing DEBEZIUM_CONNECT_IMAGE") unless local_images_cm.include?("DEBEZIUM_CONNECT_IMAGE")
+fail_collect(failures, "local images ConfigMap must record Connect exact source") unless local_images_cm.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "local images ConfigMap missing DEBEZIUM_SERVER_IMAGE") unless local_images_cm.include?("DEBEZIUM_SERVER_IMAGE")
+fail_collect(failures, "local images ConfigMap must record Server exact source") unless local_images_cm.include?(DEBEZIUM_SERVER_SOURCE_IMAGE)
+fail_collect(failures, "local images ConfigMap must not use Connect stale runtime tag") if local_images_cm.include?(DEBEZIUM_CONNECT_STALE_TAG)
+fail_collect(failures, "local images ConfigMap must not use Server stale runtime tag") if local_images_cm.include?(DEBEZIUM_SERVER_STALE_TAG)
+dc_struct = File.join(KIND, "scripts/test-debezium-connect-structure.sh")
+dc_load = File.join(KIND, "scripts/load-debezium-connect.sh")
+dc_status = File.join(KIND, "scripts/test-debezium-connectors.sh")
+fail_collect(failures, "missing test-debezium-connect-structure.sh") unless File.file?(dc_struct)
+fail_collect(failures, "missing load-debezium-connect.sh") unless File.file?(dc_load)
+fail_collect(failures, "missing test-debezium-connectors.sh") unless File.file?(dc_status)
+dc_load_text = File.read(dc_load)
+fail_collect(failures, "Debezium Connect loader must record ARM64 source digest") unless dc_load_text.include?(DEBEZIUM_CONNECT_ARM_DIGEST.delete_prefix("sha256:"))
+fail_collect(failures, "Debezium Connect loader must stage exact source image") unless dc_load_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
+fail_collect(failures, "Debezium Connect loader must docker exec into kind node") unless dc_load_text.include?("docker exec")
+fail_collect(failures, "Debezium Connect loader must crictl pull") unless dc_load_text.include?("crictl pull")
+fail_collect(failures, "Debezium Connect loader must verify via crictl inspecti") unless dc_load_text.include?("crictl inspecti")
+fail_collect(failures, "Debezium Connect loader must verify arm64") unless dc_load_text.include?("arm64")
+fail_collect(failures, "Debezium Connect loader must not kind load") if dc_load_text.match?(/kind\s+load\s+docker-image/)
+fail_collect(failures, "Debezium Connect loader must remove stale runtime tag") unless dc_load_text.include?(DEBEZIUM_CONNECT_STALE_TAG)
+fail_collect(failures, "Debezium Connect loader must fail closed on docker.io/library/import-") unless dc_load_text.include?("docker.io/library/import-")
+fail_collect(failures, "Debezium Connect loader must fail closed on /import- repoDigests") unless dc_load_text.include?("/import-")
+fail_collect(failures, "Debezium Connect loader must name stale kind-import metadata") unless dc_load_text.include?("stale kind-import metadata")
+fail_collect(failures, "Debezium Connect loader import rejection must require reset/recreate") unless dc_load_text.match?(%r{reset/recreate|reset.*recreate})
+fail_collect(failures, "Debezium Connect loader import rejection must require node-native loader rerun") unless dc_load_text.include?("node-native loader")
+fail_collect(failures, "Debezium Connect loader must not encode ctr content / containerd restart remediation") if dc_load_text.match?(/ctr\s+content|content\s+remove|restart\s+containerd|containerd\s+restart/i)
+fail_collect(failures, "Connect status script must not claim delivery alone") unless File.read(dc_status).match?(/does not|no delivery claim|not claim/i)
+puts "ok debezium-kafka-connect"
+
 # --- Game Integrity local envelope key config (ADR-0024) ---
 local_secrets = File.read(File.join(MANIFESTS, "01-local-secrets.yaml"))
 fail_collect(failures, "local secrets missing GI envelope provider ConfigMap") unless local_secrets.include?("uno-arena-local-gi-envelope")
@@ -357,9 +552,13 @@ fail_collect(failures, "tournament values.kind.yaml must use existingSecret=uno-
 fail_collect(failures, "tournament values.kind.yaml must map DATABASE_URL") unless tour_kind_vals.include?("DATABASE_URL: tournament-database-url")
 fail_collect(failures, "tournament values.kind.yaml must set DEPLOYMENT_ENV=local") unless tour_kind_vals.match?(/DEPLOYMENT_ENV:\s*local/)
 fail_collect(failures, "tournament values.kind.yaml must set kind: true") unless tour_kind_vals.match?(/^kind:\s*true\b/)
-fail_collect(failures, "tournament values.kind.yaml must keep provisioningWorker disabled") unless tour_kind_vals.match?(/provisioningWorker:\s*\n\s*enabled:\s*false/)
+fail_collect(failures, "tournament values.kind.yaml must keep provisioningWorker enabled for kind") unless tour_kind_vals.match?(/provisioningWorker:\s*\n\s*enabled:\s*true/)
+fail_collect(failures, "tournament values.kind.yaml must keep seedingWorker enabled for kind") unless tour_kind_vals.match?(/seedingWorker:\s*\n\s*enabled:\s*true/)
+fail_collect(failures, "tournament values.kind.yaml must keep completionWorker enabled for kind") unless tour_kind_vals.match?(/completionWorker:\s*\n\s*enabled:\s*true/)
 fail_collect(failures, "tournament chart missing _helpers.tpl") unless File.file?(File.join(tournament_chart, "templates/_helpers.tpl"))
 fail_collect(failures, "tournament chart missing helm-test.sh") unless File.file?(File.join(tournament_chart, "helm-test.sh"))
+fail_collect(failures, "tournament chart missing seeding-worker-deployment.yaml") unless File.file?(File.join(tournament_chart, "templates/seeding-worker-deployment.yaml"))
+fail_collect(failures, "tournament chart missing completion-worker-deployment.yaml") unless File.file?(File.join(tournament_chart, "templates/completion-worker-deployment.yaml"))
 
 each_manifest(MANIFESTS) do |path, doc|
   next unless doc.is_a?(Hash) && doc["kind"] == "Deployment"
@@ -376,14 +575,28 @@ if helm_ok
     fail_collect(failures, "tournament kind render must not emit empty digest image ref") if tour_rendered.match?(%r{image:\s*"?uno-arena/tournament-orchestration@"?})
     fail_collect(failures, "tournament kind render missing DATABASE_URL binding") unless tour_rendered.include?("DATABASE_URL") && tour_rendered.include?("tournament-database-url")
     fail_collect(failures, "tournament kind render must not use NodePort/LoadBalancer") if tour_rendered.match?(/type:\s*(NodePort|LoadBalancer)/)
-    fail_collect(failures, "tournament kind render must not enable provisioning worker") if tour_rendered.include?("tournament-provisioning")
+    fail_collect(failures, "tournament kind render missing provisioning worker") unless tour_rendered.include?("tournament-provisioning")
+    fail_collect(failures, "tournament kind render missing seeding worker") unless tour_rendered.include?("tournament-seeding")
+    fail_collect(failures, "tournament kind render missing completion worker") unless tour_rendered.include?("tournament-round-completion")
   else
     fail_collect(failures, "helm template tournament values.kind.yaml failed: #{tour_rendered.lines.first}")
   end
   tour_staging = `#{helm_bin} template tournament-staging #{tournament_chart} -f #{File.join(tournament_chart, "values.yaml")} -f #{File.join(tournament_chart, "values.staging.yaml")} 2>&1`
   fail_collect(failures, "tournament staging without digest must fail helm render") if $?.success?
+  if tour_staging.include?("tournament-seeding") || tour_staging.include?("seeding-worker")
+    fail_collect(failures, "tournament staging must keep seeding worker disabled")
+  end
+  if tour_staging.include?("tournament-round-completion") || tour_staging.include?("completion-worker")
+    fail_collect(failures, "tournament staging must keep completion worker disabled")
+  end
   tour_prod = `#{helm_bin} template tournament-prod #{tournament_chart} -f #{File.join(tournament_chart, "values.yaml")} -f #{File.join(tournament_chart, "values.production.yaml")} 2>&1`
   fail_collect(failures, "tournament production without digest must fail helm render") if $?.success?
+  if tour_prod.include?("tournament-seeding") || tour_prod.include?("seeding-worker")
+    fail_collect(failures, "tournament production must keep seeding worker disabled")
+  end
+  if tour_prod.include?("tournament-round-completion") || tour_prod.include?("completion-worker")
+    fail_collect(failures, "tournament production must keep completion worker disabled")
+  end
 end
 puts "ok tournament-kind-helm"
 
@@ -436,8 +649,13 @@ fail_collect(failures, "spectator values.kind.yaml must use existingSecret=uno-a
 fail_collect(failures, "spectator values.kind.yaml must set REDIS_URL DB 5") unless spec_kind_vals.match?(%r{REDIS_URL:.*6379/5})
 fail_collect(failures, "spectator values.kind.yaml must set DEPLOYMENT_ENV=local") unless spec_kind_vals.match?(/DEPLOYMENT_ENV:\s*local/)
 fail_collect(failures, "spectator values.kind.yaml must set kind: true") unless spec_kind_vals.match?(/^kind:\s*true\b/)
-fail_collect(failures, "spectator values.kind.yaml must keep projectionRebuilder disabled") unless spec_kind_vals.match?(/projectionRebuilder:\s*\n\s*enabled:\s*false/)
-fail_collect(failures, "spectator values.kind.yaml must omit KAFKA_BROKERS (Kafka PENDING)") if spec_kind_vals.include?("KAFKA_BROKERS")
+fail_collect(failures, "spectator values.kind.yaml must keep projectionRebuilder.enabled=false until live recovery proof") unless spec_kind_vals.match?(/projectionRebuilder:\s*\n\s*enabled:\s*false/)
+fail_collect(failures, "spectator values.kind.yaml must set ROOM_GAMEPLAY_URL for rebuilder") unless spec_kind_vals.include?("ROOM_GAMEPLAY_URL")
+fail_collect(failures, "spectator values.kind.yaml must map ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL") unless spec_kind_vals.include?("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL")
+fail_collect(failures, "spectator values.kind.yaml must set KAFKA_PROJECTION_REBUILD_TOPIC") unless spec_kind_vals.include?("KAFKA_PROJECTION_REBUILD_TOPIC")
+fail_collect(failures, "spectator values.kind.yaml must set KAFKA_BROKERS") unless spec_kind_vals.include?("KAFKA_BROKERS")
+fail_collect(failures, "spectator values.kind.yaml must set KAFKA_SPECTATOR_SAFE_TOPIC") unless spec_kind_vals.include?("KAFKA_SPECTATOR_SAFE_TOPIC")
+fail_collect(failures, "spectator values.kind.yaml must set KAFKA_SPECTATOR_SAFE_DLQ_TOPIC") unless spec_kind_vals.include?("KAFKA_SPECTATOR_SAFE_DLQ_TOPIC")
 fail_collect(failures, "missing spectator _helpers.tpl") unless File.file?(File.join(spectator_chart, "templates/_helpers.tpl"))
 fail_collect(failures, "missing spectator helm-test.sh") unless File.file?(File.join(spectator_chart, "helm-test.sh"))
 if helm_ok
@@ -448,6 +666,17 @@ if helm_ok
   fail_collect(failures, "spectator kind render must use local tag image") unless spec_rendered.include?("uno-arena/spectator-view:local")
   fail_collect(failures, "spectator kind render must be ClusterIP") unless spec_rendered.match?(/type:\s*ClusterIP/)
   fail_collect(failures, "spectator kind render must include REDIS_URL") unless spec_rendered.include?("REDIS_URL")
+  fail_collect(failures, "spectator kind render must omit projection-rebuilder while disabled") if spec_rendered.include?("spectator-projection-rebuilder")
+  # Template privilege checks use an explicit enable flip — not a live recovery claim.
+  spec_rebuilder = `#{helm_bin} template spectator-kind-rebuilder #{spectator_chart} -f #{spectator_kind_values} --set projectionRebuilder.enabled=true 2>&1`
+  unless $?.success?
+    fail_collect(failures, "helm template spectator rebuilder enable flip failed: #{spec_rebuilder.lines.first}")
+  end
+  fail_collect(failures, "spectator rebuilder template must include WORKER_ROLE") unless spec_rebuilder.include?("spectator-projection-rebuilder")
+  fail_collect(failures, "spectator rebuilder must not expose containerPort") if spec_rebuilder.match?(/projection-rebuilder[\s\S]*?containerPort:\s*8080/)
+  fail_collect(failures, "spectator rebuilder must not use readinessProbe") if spec_rebuilder.match?(/name: projection-rebuilder[\s\S]*?readinessProbe:/)
+  fail_collect(failures, "spectator rebuilder must not mount SPECTATOR_VIEW_INTERNAL_CREDENTIAL") if spec_rebuilder.match?(/name: projection-rebuilder[\s\S]*?SPECTATOR_VIEW_INTERNAL_CREDENTIAL/)
+  fail_collect(failures, "spectator rebuilder must mount ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL") unless spec_rebuilder.include?("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL")
   spec_staging = `#{helm_bin} template spectator-staging #{spectator_chart} -f #{File.join(spectator_chart, "values.yaml")} -f #{File.join(spectator_chart, "values.staging.yaml")} 2>&1`
   fail_collect(failures, "spectator staging without digest must fail helm render") if $?.success?
   spec_prod = `#{helm_bin} template spectator-prod #{spectator_chart} -f #{File.join(spectator_chart, "values.yaml")} -f #{File.join(spectator_chart, "values.production.yaml")} 2>&1`
@@ -470,11 +699,20 @@ fail_collect(failures, "gateway values.kind.yaml must set GATEWAY_PLAYER_FEED_RE
 fail_collect(failures, "gateway values.kind.yaml must set GATEWAY_SPECTATOR_REDIS_URL DB 5") unless gw_kind_vals.match?(%r{GATEWAY_SPECTATOR_REDIS_URL:.*6379/5})
 fail_collect(failures, "gateway values.kind.yaml must set DEPLOYMENT_ENV=local") unless gw_kind_vals.match?(/DEPLOYMENT_ENV:\s*local/)
 fail_collect(failures, "gateway values.kind.yaml must set kind: true") unless gw_kind_vals.match?(/^kind:\s*true\b/)
-fail_collect(failures, "gateway values.kind.yaml must omit KAFKA_BROKERS (Kafka PENDING)") if gw_kind_vals.include?("KAFKA_BROKERS")
+fail_collect(failures, "gateway values.kind.yaml must set KAFKA_BROKERS") unless gw_kind_vals.include?("KAFKA_BROKERS")
+fail_collect(failures, "gateway values.kind.yaml must set KAFKA_CONSUMER_GROUP=gateway") unless gw_kind_vals.match?(/KAFKA_CONSUMER_GROUP:\s*gateway/)
+fail_collect(failures, "gateway values.kind.yaml must set KAFKA_SESSION_INVALIDATED_TOPIC") unless gw_kind_vals.include?("identity.session.invalidated")
+fail_collect(failures, "gateway values.kind.yaml must set gateway DLQ topic") unless gw_kind_vals.include?("identity.session.invalidated.gateway.dlq")
+fail_collect(failures, "gateway values.kind.yaml must set GATEWAY_SESSION_INVALIDATION_TTL") unless gw_kind_vals.include?("GATEWAY_SESSION_INVALIDATION_TTL")
+fail_collect(failures, "gateway values.kind.yaml SI TTL must be 7h (ADR-0029: kind source 30m + DLQ 6h)") unless gw_kind_vals.match?(/GATEWAY_SESSION_INVALIDATION_TTL:\s*"7h"/)
+fail_collect(failures, "gateway values.kind.yaml must document ADR-0029 SI TTL rationale") unless gw_kind_vals.include?("ADR-0029")
+fail_collect(failures, "gateway values.kind.yaml must not claim Debezium PENDING") if gw_kind_vals.match?(/debezium.*PENDING|PENDING.*[Dd]ebezium/i)
 fail_collect(failures, "gateway values.kind.yaml must omit GATEWAY_CAPABILITY_MODE") if gw_kind_vals.include?("GATEWAY_CAPABILITY_MODE")
 fail_collect(failures, "gateway values.kind.yaml must omit GATEWAY_ALLOW_FAKES") if gw_kind_vals.include?("GATEWAY_ALLOW_FAKES")
 fail_collect(failures, "missing gateway _helpers.tpl") unless File.file?(File.join(gateway_chart, "templates/_helpers.tpl"))
 fail_collect(failures, "missing gateway helm-test.sh") unless File.file?(File.join(gateway_chart, "helm-test.sh"))
+fail_collect(failures, "missing gateway SI Redis admission live proof script") unless File.file?(File.join(KIND, "scripts/test-gateway-si-redis-admission-live.sh"))
+fail_collect(failures, "missing gateway session-invalidation live alias script") unless File.file?(File.join(KIND, "scripts/test-gateway-session-invalidation-live.sh"))
 if helm_ok
   gw_rendered = `#{helm_bin} template gateway-kind #{gateway_chart} -f #{gateway_kind_values} 2>&1`
   unless $?.success?
@@ -483,6 +721,8 @@ if helm_ok
   fail_collect(failures, "gateway kind render must use local tag image") unless gw_rendered.include?("uno-arena/gateway:local")
   fail_collect(failures, "gateway kind render must be ClusterIP") unless gw_rendered.match?(/type:\s*ClusterIP/)
   fail_collect(failures, "gateway kind render must include REDIS_URL") unless gw_rendered.include?("REDIS_URL")
+  fail_collect(failures, "gateway kind render must include KAFKA_BROKERS") unless gw_rendered.include?("KAFKA_BROKERS")
+  fail_collect(failures, "gateway kind render must include session invalidated topic") unless gw_rendered.include?("identity.session.invalidated")
   gw_staging = `#{helm_bin} template gateway-staging #{gateway_chart} -f #{File.join(gateway_chart, "values.yaml")} -f #{File.join(gateway_chart, "values.staging.yaml")} 2>&1`
   fail_collect(failures, "gateway staging without digest must fail helm render") if $?.success?
   gw_prod = `#{helm_bin} template gateway-prod #{gateway_chart} -f #{File.join(gateway_chart, "values.yaml")} -f #{File.join(gateway_chart, "values.production.yaml")} 2>&1`
@@ -808,6 +1048,8 @@ if File.file?(plan_path)
     fail_collect(failures, "DLQ #{t['name']} retentionClass") unless t["retentionClass"] == "dlq"
   end
   fail_collect(failures, "missing ranking DLQ scaffolding") unless dlq.any? { |t| t["name"] == "room.game.completed.ranking.dlq" }
+  fail_collect(failures, "missing ranking players.advanced DLQ") unless dlq.any? { |t| t["name"] == "tournament.players.advanced.ranking.dlq" }
+  fail_collect(failures, "missing ranking tournament.completed DLQ") unless dlq.any? { |t| t["name"] == "tournament.completed.ranking.dlq" }
   connect = spec.fetch("connectInternalTopics")
   %w[connect-configs connect-offsets connect-status].each do |name|
     fail_collect(failures, "missing connect topic #{name}") unless connect.any? { |t| t["name"] == name && t["replicationFactor"] == 1 && t["cleanupPolicy"] == "compact" }
@@ -952,6 +1194,21 @@ puts "ok bootstrap-image-source"
 apply = File.read(File.join(KIND, "scripts/apply.sh"))
 fail_collect(failures, "apply.sh must wait for datastore rollouts before bootstrap Jobs") unless apply.index("70-bootstrap") && apply.index("rollout status") && apply.index("rollout status") < apply.index("70-bootstrap")
 fail_collect(failures, "apply.sh must wait for Job completion") unless apply.include?("wait --for=condition=complete")
+fail_collect(failures, "apply.sh must apply Debezium Server after bootstrap") unless apply.include?("80-debezium-server")
+fail_collect(failures, "apply.sh must wait for debezium-server-room-realtime rollout") unless apply.include?("debezium-server-room-realtime")
+fail_collect(failures, "apply.sh must rollout restart debezium-server-room-realtime after apply") unless apply.include?('rollout restart "deployment/debezium-server-room-realtime"')
+server_apply_i = apply.index('kubectl apply -f "${MANIFESTS_DIR}/80-debezium-server"')
+server_restart_i = apply.index('rollout restart "deployment/debezium-server-room-realtime"')
+server_wait_i = apply.index('rollout status "deployment/debezium-server-room-realtime"')
+fail_collect(failures, "apply.sh must order Server apply → restart → wait") unless server_apply_i && server_restart_i && server_wait_i && server_apply_i < server_restart_i && server_restart_i < server_wait_i
+fail_collect(failures, "apply.sh must apply Debezium Connect after bootstrap") unless apply.match?(%r{80-debezium"})
+fail_collect(failures, "apply.sh must wait for debezium-connect rollout") unless apply.include?("debezium-connect")
+fail_collect(failures, "apply.sh must wait for register-debezium-connectors") unless apply.include?("register-debezium-connectors")
+fail_collect(failures, "apply.sh must delete register-debezium-connectors before recreate") unless apply.include?("delete job/register-debezium-connectors") && apply.include?("--ignore-not-found")
+wait_src = File.read(File.join(KIND, "scripts/wait.sh"))
+fail_collect(failures, "wait.sh must include debezium-server-room-realtime") unless wait_src.include?("debezium-server-room-realtime")
+fail_collect(failures, "wait.sh must include debezium-connect") unless wait_src.include?("debezium-connect")
+fail_collect(failures, "wait.sh must include register-debezium-connectors") unless wait_src.include?("register-debezium-connectors")
 
 # kubectl apply -f <dir> loads every file; realm/auxiliary JSON is not a Kubernetes object.
 # ConfigMap already embeds the realm — apply only keycloak.yaml (or any dir that is YAML-only).

@@ -36,21 +36,25 @@ type pendingReservation struct {
 	Deal         *DealMaterial
 	Cards        []CardDTO
 	Shape        string
+	// RemainingAfter is the draw-pile size that will be true after confirm
+	// (current Remaining minus reserved cards). Stored so duplicates return the same value.
+	RemainingAfter int
 }
 
 // confirmedOp records a confirmed deal/draw for idempotency and audit.
 // Retained under the original reservation ID so Confirm(originalID) is idempotent.
 type confirmedOp struct {
-	ReservationID string
-	OperationID   domain.DrawOperationID
-	Kind          reservationKind
-	Seats         []string
-	CardsPerHand  int
-	Count         int
-	Shape         string
-	Deal          *DealMaterial
-	Cards         []CardDTO
-	FromPointer   int
+	ReservationID  string
+	OperationID    domain.DrawOperationID
+	Kind           reservationKind
+	Seats          []string
+	CardsPerHand   int
+	Count          int
+	Shape          string
+	Deal           *DealMaterial
+	Cards          []CardDTO
+	FromPointer    int
+	RemainingAfter int
 }
 
 // DeckState holds per room+game deck, reservations, and confirmed operations.

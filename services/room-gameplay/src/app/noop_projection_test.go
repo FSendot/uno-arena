@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"unoarena/services/room-gameplay/domain"
 	"unoarena/shared/envelope"
@@ -161,7 +162,7 @@ func TestBuildFeedEvents_AcceptedNoOp_NoSpectator(t *testing.T) {
 	prev := int64(noop.Sequence) // unchanged by no-op
 	evs, high := BuildFeedEvents(sess, int64(noop.Sequence), 1, "corr", "l2", noop.Facts, []FeedAudience{
 		{PlayerID: "host", SessionID: "s"},
-	}, prev)
+	}, prev, time.Unix(1, 0).UTC())
 	if len(evs) != 0 || high != 0 {
 		t.Fatalf("no-op must emit no feed events: evs=%d high=%d", len(evs), high)
 	}

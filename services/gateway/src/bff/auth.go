@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"unoarena/shared/correlation"
 )
@@ -156,4 +157,102 @@ func (s *Server) handlePublicAnalytics(w http.ResponseWriter, r *http.Request) {
 	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
 		_, _ = w.Write([]byte("\n"))
 	}
+}
+
+// handleTournamentReads proxies Tournament bracket/standings/assignment reads.
+// Paths: GET /v1/tournaments/{tournamentId}/bracket|standings
+//        GET /v1/tournaments/{tournamentId}/players/{playerId}/assignment
+func (s *Server) handleTournamentReads(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/v1/tournaments/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	corr := s.correlation(r)
+
+	var (
+		tournamentID string
+		resource     string
+		playerID     string
+	)
+	switch {
+	case len(parts) == 2 && parts[0] != "" && (parts[1] == "bracket" || parts[1] == "standings"):
+		tournamentID, resource = parts[0], parts[1]
+	case len(parts) == 4 && parts[0] != "" && parts[1] == "players" && parts[2] != "" && parts[3] == "assignment":
+		tournamentID, playerID, resource = parts[0], parts[2], "assignment"
+	default:
+		s.writeErr(w, r, http.StatusNotFound, "not_found", "not found", "")
+		return
+	}
+	if r.Method != http.MethodGet {
+		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
+		return
+	}
+
+	var principal *Principal
+	if tok, ok := bearerToken(r); ok {
+		p, err := s.identity.ValidateSession(r.Context(), tok, corr)
+		if err != nil {
+			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid session", "")
+			return
+		}
+		principal = &p
+	}
+
+	if resource == "assignment" {
+		if principal == nil {
+			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "missing bearer token", "")
+			return
+		}
+		if !principal.OperatorScope && principal.PlayerID != playerID {
+			s.writeErr(w, r, http.StatusForbidden, "forbidden", "forbidden", "")
+			return
+		}
+	}
+
+	var (
+		raw json.RawMessage
+		err error
+	)
+	switch resource {
+	case "bracket":
+		raw, err = s.tournament.Bracket(r.Context(), tournamentID, r.URL.RawQuery, corr, principal)
+	case "standings":
+		raw, err = s.tournament.Standings(r.Context(), tournamentID, corr, principal)
+	case "assignment":
+		raw, err = s.tournament.Assignment(r.Context(), tournamentID, playerID, corr, principal)
+	}
+	if err != nil {
+		s.writeTournamentReadErr(w, r, err, resource)
+		return
+	}
+	w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		_, _ = w.Write([]byte("\n"))
+	}
+}
+
+func (s *Server) writeTournamentReadErr(w http.ResponseWriter, r *http.Request, err error, resource string) {
+	if he, ok := err.(*httpStatusError); ok {
+		switch he.status {
+		case http.StatusBadRequest:
+			s.writeErr(w, r, http.StatusBadRequest, "bad_request", "invalid tournament read query", "")
+			return
+		case http.StatusUnauthorized:
+			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "authentication required", "")
+			return
+		case http.StatusForbidden:
+			s.writeErr(w, r, http.StatusForbidden, "forbidden", "forbidden", "")
+			return
+		case http.StatusNotFound:
+			msg := "tournament not found"
+			if resource == "assignment" {
+				msg = "assignment not found"
+			}
+			s.writeErr(w, r, http.StatusNotFound, "not_found", msg, "")
+			return
+		}
+	}
+	msg := "tournament " + resource + " unavailable"
+	s.writeErr(w, r, http.StatusBadGateway, "upstream_error", msg, "")
 }

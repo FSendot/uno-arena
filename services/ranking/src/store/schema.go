@@ -16,7 +16,7 @@ const (
 	ExpectedMigrationVersion = "001_init"
 	ExpectedBootstrapVersion = "001_init"
 	// ExpectedSchemaChecksum is SHA-256 of services/ranking/migrations/001_init.sql.
-	ExpectedSchemaChecksum = "d9b8e2e33cfcdaa23b33b3e93e7688520eb5a47f9e72690ead4b0f3d636558b9"
+	ExpectedSchemaChecksum = "15c581e3a46eb703045faa3dbb6edd005b68266eec4cce9df12fa0dcff050181"
 )
 
 // SchemaExpectation holds the exact version/checksum VerifySchema requires.

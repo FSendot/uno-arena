@@ -114,6 +114,9 @@ type FakeRoom struct {
 	SnapshotErr          error
 	LastSnapshotRoomID   string
 	LastSnapshotPlayerID string
+	PublicListJSON       json.RawMessage
+	PublicListErr        error
+	LastPublicListQuery  string
 }
 
 // NewFakeRoom creates a room client that accepts by default.
@@ -174,13 +177,36 @@ func (f *FakeRoom) PlayerSnapshot(_ context.Context, roomID, playerID string, _ 
 	return f.SnapshotJSON, nil
 }
 
-// FakeTournament records dispatched tournament commands.
+func (f *FakeRoom) PublicList(_ context.Context, rawQuery string, _ correlation.Headers) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastPublicListQuery = rawQuery
+	if f.PublicListErr != nil {
+		return nil, f.PublicListErr
+	}
+	if len(f.PublicListJSON) == 0 {
+		return json.RawMessage(`{"schemaVersion":1,"rooms":[]}`), nil
+	}
+	return f.PublicListJSON, nil
+}
+
+// FakeTournament records dispatched tournament commands and serves configurable reads.
 type FakeTournament struct {
-	mu         sync.Mutex
-	Dispatched []CommandDispatch
-	Results    map[string]envelope.Result
-	Default    envelope.Result
-	Err        error
+	mu               sync.Mutex
+	Dispatched       []CommandDispatch
+	Results          map[string]envelope.Result
+	Default          envelope.Result
+	Err              error
+	BracketJSON      json.RawMessage
+	StandingsJSON    json.RawMessage
+	AssignmentJSON   json.RawMessage
+	BracketErr       error
+	StandingsErr     error
+	AssignmentErr    error
+	LastBracketQuery string
+	LastCorr         correlation.Headers
+	LastPrincipal    *Principal
+	LastAssignmentID string
 }
 
 // NewFakeTournament creates a tournament client that accepts by default.
@@ -218,6 +244,50 @@ func (f *FakeTournament) SubmitCommand(_ context.Context, req CommandDispatch) (
 		out.SchemaVersion = envelope.CurrentSchemaVersion
 	}
 	return out, nil
+}
+
+func (f *FakeTournament) Bracket(_ context.Context, _ string, rawQuery string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastBracketQuery = rawQuery
+	f.LastCorr = corr
+	f.LastPrincipal = principal
+	if f.BracketErr != nil {
+		return nil, f.BracketErr
+	}
+	if len(f.BracketJSON) == 0 {
+		return json.RawMessage(`{"tournamentId":"t1","projectionVersion":1,"generatedAt":"2026-01-01T00:00:00Z","summary":{},"slots":[]}`), nil
+	}
+	return f.BracketJSON, nil
+}
+
+func (f *FakeTournament) Standings(_ context.Context, _ string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastCorr = corr
+	f.LastPrincipal = principal
+	if f.StandingsErr != nil {
+		return nil, f.StandingsErr
+	}
+	if len(f.StandingsJSON) == 0 {
+		return json.RawMessage(`{"tournamentId":"t1","projectionVersion":1,"generatedAt":"2026-01-01T00:00:00Z","phase":"registration","registeredCount":0,"currentRound":0,"finalStandings":[]}`), nil
+	}
+	return f.StandingsJSON, nil
+}
+
+func (f *FakeTournament) Assignment(_ context.Context, _, playerID string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastCorr = corr
+	f.LastPrincipal = principal
+	f.LastAssignmentID = playerID
+	if f.AssignmentErr != nil {
+		return nil, f.AssignmentErr
+	}
+	if len(f.AssignmentJSON) == 0 {
+		return json.RawMessage(`{"tournamentId":"t1","playerId":"` + playerID + `","visibility":"public","phase":"registration","registrationStatus":"registered","currentRound":0,"assignment":null}`), nil
+	}
+	return f.AssignmentJSON, nil
 }
 
 func (f *FakeTournament) DispatchCount() int {

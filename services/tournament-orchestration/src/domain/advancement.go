@@ -9,12 +9,13 @@ import (
 
 // Sentinel errors for standings validation and non-final advancement.
 var (
-	ErrInvalidPlayerID      = errors.New("invalid player id")
-	ErrDuplicatePlayerID    = errors.New("duplicate player id")
-	ErrNegativeMatchWins    = errors.New("negative match wins")
-	ErrNegativeCardPoints   = errors.New("negative cumulative card points")
-	ErrZeroCompletionTime   = errors.New("zero final-game completion time")
-	ErrInsufficientEligible = errors.New("fewer than three eligible players for advancement")
+	ErrInvalidPlayerID       = errors.New("invalid player id")
+	ErrDuplicatePlayerID     = errors.New("duplicate player id")
+	ErrNegativeMatchWins     = errors.New("negative match wins")
+	ErrNegativeCardPoints    = errors.New("negative cumulative card points")
+	ErrZeroCompletionTime    = errors.New("zero final-game completion time")
+	ErrInsufficientEligible  = errors.New("no eligible players for advancement")
+	ErrInvalidFinalStandings = errors.New("final standings must contain 1..10 unique players")
 )
 
 // RankStandings orders players for advancement / final placement without mutating
@@ -49,9 +50,10 @@ func RankStandings(standings []PlayerMatchStanding) ([]PlayerMatchStanding, erro
 	return out, nil
 }
 
-// TopThree returns exactly AdvancersPerMatch non-forfeited players for non-final
+// TopThree returns one to AdvancersPerMatch non-forfeited players for non-final
 // advancement, ordered by RankStandings. Forfeited players never advance.
-// Returns ErrInsufficientEligible when fewer than three eligible players remain.
+// One or two are valid when an undersized/forfeit outcome leaves fewer eligible
+// players; empty advancement is ErrInsufficientEligible.
 func TopThree(standings []PlayerMatchStanding) ([]PlayerID, error) {
 	ranked, err := RankStandings(standings)
 	if err != nil {
@@ -67,10 +69,13 @@ func TopThree(standings []PlayerMatchStanding) ([]PlayerID, error) {
 			return eligible, nil
 		}
 	}
-	return nil, ErrInsufficientEligible
+	if len(eligible) == 0 {
+		return nil, ErrInsufficientEligible
+	}
+	return eligible, nil
 }
 
-// SelectAdvancers returns the top AdvancersPerMatch eligible players for a non-final match.
+// SelectAdvancers returns up to AdvancersPerMatch eligible players for a non-final match.
 // Prefer TopThree; this wrapper preserves older call sites and returns nil on error.
 func SelectAdvancers(standings []PlayerMatchStanding) []PlayerID {
 	ids, err := TopThree(standings)
@@ -87,6 +92,24 @@ func ChampionFromStandings(standings []PlayerMatchStanding) (PlayerID, bool) {
 		return "", false
 	}
 	return ranked[0].PlayerID, true
+}
+
+// ValidateFinalStandings enforces AsyncAPI cardinality: 1..FinalPlayerThreshold unique players.
+func ValidateFinalStandings(ids []PlayerID) error {
+	if len(ids) < 1 || len(ids) > FinalPlayerThreshold {
+		return ErrInvalidFinalStandings
+	}
+	seen := make(map[PlayerID]struct{}, len(ids))
+	for _, id := range ids {
+		if !id.Valid() {
+			return ErrInvalidFinalStandings
+		}
+		if _, dup := seen[id]; dup {
+			return ErrInvalidFinalStandings
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 func validateStandings(standings []PlayerMatchStanding) error {

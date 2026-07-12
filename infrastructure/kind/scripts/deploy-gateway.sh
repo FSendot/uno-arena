@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Explicit: helm upgrade --install Gateway into kind (no static duplicate Deployment).
-# Requires local Redis + image loaded. Kafka SessionInvalidated consumer remains PENDING.
-# Debezium player-feed sink remains PENDING (prove SSE via manual XADD).
+# Requires local Redis + image loaded. Kafka SessionInvalidated consumer is wired via values.kind.
+# Room realtime player feeds arrive via Debezium Server → Redis DB2 (Gateway XREAD).
 # Never exposes Gateway publicly beyond chart Service (ClusterIP).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,4 +27,4 @@ helm upgrade --install "${RELEASE}" "${CHART}" \
 
 echo "waiting for deployment/${RELEASE}"
 kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/${RELEASE}" --timeout="${TIMEOUT}"
-echo "ok kind-deploy-gateway release=${RELEASE} (Kafka/Debezium PENDING)"
+echo "ok kind-deploy-gateway release=${RELEASE} (SessionInvalidated Kafka + Redis LiveFeed wired)"

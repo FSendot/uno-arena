@@ -118,12 +118,17 @@ start_fake() {
   export UNOARENA_API_URL="$API_URL"
 }
 
+SESSION_DIR="$(mktemp -d /tmp/unoarena-session-XXXXXX)"
+export UNOARENA_SESSION_FILE="${SESSION_DIR}/session.json"
+unset UNOARENA_TOKEN || true
+
 stop_fake() {
   if [ -n "${FAKE_PID:-}" ]; then
     kill "$FAKE_PID" 2>/dev/null || true
     wait "$FAKE_PID" 2>/dev/null || true
   fi
-  rm -f /tmp/unoarena-fake-url.$$ /tmp/unoarena-fake-err.$$ /tmp/unoarena-test-out.$$ /tmp/unoarena-test-err.$$ /tmp/unoarena-py-assert-err.$$ /tmp/unoarena-player-err.$$ /tmp/unoarena-spec-err.$$
+  rm -rf "$SESSION_DIR"
+  rm -f /tmp/unoarena-fake-url.$$ /tmp/unoarena-fake-err.$$ /tmp/unoarena-test-out.$$ /tmp/unoarena-test-err.$$ /tmp/unoarena-py-assert-err.$$ /tmp/unoarena-player-err.$$ /tmp/unoarena-spec-err.$$ /tmp/unoarena-seed-out.$$
 }
 
 trap stop_fake EXIT
@@ -195,7 +200,7 @@ assert_contains "unknown room-scoped mentions catalog" "public catalog" "$(cat /
 WHO="$("$CLI" whoami --token "$TOKEN" --correlation-id corr-who)"
 assert_eq "whoami username" "alice" "$(json_field "$WHO" username)"
 
-ROOM="$("$CLI" room create --token "$TOKEN" --command-id cmd-room-1 --correlation-id corr-room --schema-version 1)"
+ROOM="$("$CLI" room create --token "$TOKEN" --command-id cmd-room-1 --correlation-id corr-room --schema-version 1 --payload '{}')"
 assert_eq "room create status" "accepted" "$(json_field "$ROOM" status)"
 assert_eq "room create type" "CreateRoom" "$(json_field "$ROOM" type)"
 
@@ -480,6 +485,197 @@ py_assert_request "no legacy identity paths" '
 legacy = [r for r in requests if r["path"] in ("/register", "/login", "/whoami")]
 assert not legacy, legacy
 '
+
+echo "==> session persistence / logout / whoami fallback"
+rm -f "$UNOARENA_SESSION_FILE"
+LOGIN_SESS="$("$CLI" login --user sessuser --pass secret --correlation-id corr-sess-login)"
+assert_eq "login still prints token" "tok-sessuser" "$(json_field "$LOGIN_SESS" token)"
+assert_eq "session file mode 0600" "600" "$(python3 -c 'import os,stat; print(oct(os.stat("'"$UNOARENA_SESSION_FILE"'").st_mode & 0o777)[2:])')"
+SESS_JSON="$(cat "$UNOARENA_SESSION_FILE")"
+assert_eq "session token field" "tok-sessuser" "$(json_field "$SESS_JSON" token)"
+assert_eq "session playerId field" "player-sessuser" "$(json_field "$SESS_JSON" playerId)"
+assert_eq "session sessionId field" "sess-sessuser" "$(json_field "$SESS_JSON" sessionId)"
+assert_eq "session username field" "sessuser" "$(json_field "$SESS_JSON" username)"
+
+WHO_SESS="$("$CLI" whoami --correlation-id corr-who-sess)"
+assert_eq "whoami from session file" "sessuser" "$(json_field "$WHO_SESS" username)"
+
+LOGOUT_OUT="$("$CLI" logout)"
+assert_contains "logout ok json" '"status":"ok"' "$LOGOUT_OUT"
+case "$LOGOUT_OUT" in
+  *tok-*) echo "not ok - logout must not print token" >&2; FAIL=$((FAIL + 1)) ;;
+  *) echo "ok - logout does not print token"; PASS=$((PASS + 1)) ;;
+esac
+[ ! -e "$UNOARENA_SESSION_FILE" ]
+echo "ok - logout removed session file"
+PASS=$((PASS + 1))
+LOGOUT2="$("$CLI" logout)"
+assert_contains "logout idempotent" '"status":"ok"' "$LOGOUT2"
+
+# Corrupt / unsafe session fails closed for whoami fallback
+printf '%s\n' '{"token":"x"}' >"$UNOARENA_SESSION_FILE"
+chmod 600 "$UNOARENA_SESSION_FILE"
+assert_exit "corrupt session fails closed" 1 "$CLI" whoami
+assert_contains "corrupt session error" "corrupt session" "$(cat /tmp/unoarena-test-err.$$)"
+
+printf '%s\n' '{"token":"tok-x","playerId":"p","sessionId":"s","username":"u"}' >"$UNOARENA_SESSION_FILE"
+chmod 644 "$UNOARENA_SESSION_FILE"
+assert_exit "world-readable session fails closed" 1 "$CLI" whoami
+assert_contains "unsafe session error" "unsafe" "$(cat /tmp/unoarena-test-err.$$)"
+rm -f "$UNOARENA_SESSION_FILE"
+
+# --token still wins over env and session
+printf '%s\n' '{"token":"tok-sess","playerId":"p","sessionId":"s","username":"sess"}' >"$UNOARENA_SESSION_FILE"
+chmod 600 "$UNOARENA_SESSION_FILE"
+WHO_FLAG="$("$CLI" whoami --token tok-alice --correlation-id corr-who-flag)"
+assert_eq "whoami --token overrides session" "alice" "$(json_field "$WHO_FLAG" username)"
+WHO_ENV="$(UNOARENA_TOKEN=tok-alice "$CLI" whoami --correlation-id corr-who-env)"
+assert_eq "whoami UNOARENA_TOKEN overrides session" "alice" "$(json_field "$WHO_ENV" username)"
+rm -f "$UNOARENA_SESSION_FILE"
+
+echo "==> seed JSONL / register-or-ensure"
+SEED_OUT="$("$CLI" seed --count 2 --prefix load 2>/tmp/unoarena-test-err.$$)"
+printf '%s\n' "$SEED_OUT" >/tmp/unoarena-seed-out.$$
+SEED_LINES="$(printf '%s\n' "$SEED_OUT" | python3 -c 'import sys; print(sum(1 for line in sys.stdin if line.strip()))')"
+assert_eq "seed emits one JSON object per account" "2" "$SEED_LINES"
+printf '%s\n' "$SEED_OUT" | python3 -c '
+import json, sys
+lines = [json.loads(l) for l in sys.stdin if l.strip()]
+assert lines[0]["username"] == "load0001"
+assert lines[0]["password"] == "load0001-pass"
+assert lines[0]["token"] == "tok-load0001"
+assert lines[0]["playerId"] == "player-load0001"
+assert lines[0]["sessionId"] == "sess-load0001"
+assert lines[0]["result"] == "ok"
+assert lines[1]["username"] == "load0002"
+assert lines[1]["result"] == "ok"
+print("ok")
+' >/dev/null
+echo "ok - seed JSONL fields"
+PASS=$((PASS + 1))
+[ ! -e "$UNOARENA_SESSION_FILE" ] || [ ! -s "$UNOARENA_SESSION_FILE" ]
+echo "ok - seed does not persist interactive session"
+PASS=$((PASS + 1))
+
+SEED_RERUN="$("$CLI" seed --count 1 --prefix load)"
+assert_eq "seed rerun result exists" "exists" "$(printf '%s\n' "$SEED_RERUN" | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["result"])')"
+assert_eq "seed rerun still returns token" "tok-load0001" "$(json_field "$SEED_RERUN" token)"
+
+assert_exit "seed count 0 rejected" 1 "$CLI" seed --count 0
+assert_exit "seed count over max rejected" 1 "$CLI" seed --count 10001
+
+echo "==> room list / create generated / join leave sequence"
+LIST="$("$CLI" room list --correlation-id corr-room-list)"
+assert_contains "room list public roomId" '"roomId": "room-public-1"' "$LIST"
+assert_contains "room list visibility public" '"visibility": "public"' "$LIST"
+
+py_assert_request "room list hits GET /v1/rooms without bearer" '
+lists = [r for r in requests if r["path"] == "/v1/rooms" and r["method"] == "GET"]
+assert lists, "missing room list"
+assert lists[0]["headers"].get("x-correlation-id") == "corr-room-list"
+assert "authorization" not in lists[0]["headers"]
+'
+
+GEN_ROOM="$("$CLI" room create --token tok-alice --command-id cmd-gen-room --correlation-id corr-gen-room --max 4)"
+assert_eq "generated room create accepted" "accepted" "$(json_field "$GEN_ROOM" status)"
+py_assert_request "generated CreateRoom includes roomId + maxSeats" '
+cmds = [r for r in requests if r["path"] == "/v1/commands" and r["headers"].get("x-correlation-id") == "corr-gen-room"]
+assert cmds, "missing generated CreateRoom"
+body = json.loads(cmds[0]["body"])
+assert body["type"] == "CreateRoom"
+assert isinstance(body["payload"].get("roomId"), str) and body["payload"]["roomId"]
+assert body["payload"].get("maxSeats") == 4
+'
+
+assert_exit "room create max 1 rejected" 1 \
+  "$CLI" room create --token tok-alice --max 1
+assert_exit "room create max 11 rejected" 1 \
+  "$CLI" room create --token tok-alice --max 11
+
+# Login to establish session for room tracking
+"$CLI" login --user alice --pass secret >/dev/null
+JOIN="$("$CLI" room join room-join-1 --command-id cmd-join-1 --correlation-id corr-join)"
+assert_eq "room join accepted" "accepted" "$(json_field "$JOIN" status)"
+assert_eq "session tracks joined room" "room-join-1" "$(json_field "$(cat "$UNOARENA_SESSION_FILE")" roomId)"
+
+py_assert_request "join uses spectator snapshot sequence then JoinRoom" '
+snaps = [r for r in requests if r["path"] == "/v1/spectator/rooms/room-join-1/snapshot"]
+assert snaps, "missing spectator snapshot"
+joins = [r for r in requests if r["path"] == "/v1/rooms/room-join-1/commands" and r["headers"].get("x-correlation-id") == "corr-join"]
+assert joins, "missing JoinRoom"
+body = json.loads(joins[0]["body"])
+assert body["type"] == "JoinRoom"
+assert body["expectedSequenceNumber"] == 0
+assert body["payload"] == {"roomId": "room-join-1"}
+'
+
+LEAVE="$("$CLI" room leave --command-id cmd-leave-1 --correlation-id corr-leave)"
+assert_eq "room leave accepted" "accepted" "$(json_field "$LEAVE" status)"
+LEAVE_SESS="$(cat "$UNOARENA_SESSION_FILE")"
+case "$LEAVE_SESS" in
+  *'"roomId"'*) echo "not ok - roomId should be cleared after leave" >&2; FAIL=$((FAIL + 1)) ;;
+  *) echo "ok - session room cleared after leave"; PASS=$((PASS + 1)) ;;
+esac
+
+py_assert_request "leave uses player snapshot sequence then LeaveRoom" '
+ps = [r for r in requests if r["path"] == "/v1/rooms/room-join-1/snapshot"]
+assert ps, "missing player snapshot"
+leaves = [r for r in requests if r["path"] == "/v1/rooms/room-join-1/commands" and r["headers"].get("x-correlation-id") == "corr-leave"]
+assert leaves, "missing LeaveRoom"
+body = json.loads(leaves[0]["body"])
+assert body["type"] == "LeaveRoom"
+assert "expectedSequenceNumber" in body
+assert body["payload"] == {"roomId": "room-join-1"}
+'
+
+assert_exit "room join missing roomId fails" 2 env UNOARENA_API_URL="$UNOARENA_API_URL" UNOARENA_SESSION_FILE="$UNOARENA_SESSION_FILE" "$CLI" room join
+assert_exit "room leave without room or session room fails" 1 \
+  env UNOARENA_API_URL="$UNOARENA_API_URL" UNOARENA_SESSION_FILE="${SESSION_DIR}/empty-session.json" \
+  "$CLI" room leave --token tok-alice
+assert_contains "room leave missing room message" "room leave requires" "$(cat /tmp/unoarena-test-err.$$)"
+
+echo "==> tournament positional register/status"
+TREG_POS="$("$CLI" tournament register t-pos-1 --token tok-alice --command-id cmd-treg-pos --correlation-id corr-treg-pos)"
+assert_eq "positional tournament register type" "RegisterPlayer" "$(json_field "$TREG_POS" type)"
+py_assert_request "positional register maps tournamentId+playerId" '
+regs = [r for r in requests if r["path"] == "/v1/commands" and r["headers"].get("x-correlation-id") == "corr-treg-pos"]
+assert regs, "missing positional register"
+body = json.loads(regs[0]["body"])
+assert body["type"] == "RegisterPlayer"
+assert body["payload"] == {"tournamentId": "t-pos-1", "playerId": "player-alice"}, body["payload"]
+'
+
+TSTAT="$("$CLI" tournament status t-pos-1 --correlation-id corr-tstat)"
+assert_eq "tournament status id" "t-pos-1" "$(json_field "$TSTAT" tournamentId)"
+assert_contains "tournament status standings" '"points":3' "$TSTAT"
+assert_contains "tournament status bracket" '"slotId":"s1"' "$TSTAT"
+py_assert_request "tournament status calls standings and bracket" '
+st = [r for r in requests if r["path"] == "/v1/tournaments/t-pos-1/standings"]
+br = [r for r in requests if r["path"] == "/v1/tournaments/t-pos-1/bracket"]
+assert st and br, (st, br)
+'
+
+echo "==> spectate alias"
+SPEC_ALIAS="$("$CLI" spectate room-1 --last-event-id 6 --correlation-id corr-spectate-alias 2>/tmp/unoarena-spec-err.$$)"
+assert_contains "spectate alias SSE event" "SpectatorUpdate" "$SPEC_ALIAS"
+py_assert_request "spectate alias hits spectator stream" '
+ss = [r for r in requests if r["path"] == "/v1/streams/spectator" and r["headers"].get("x-correlation-id") == "corr-spectate-alias"]
+assert ss, "missing spectate alias request"
+assert ss[0]["query"].get("roomId") == ["room-1"]
+assert ss[0]["headers"].get("last-event-id") == "6"
+'
+
+echo "==> Dockerfile structure"
+DF="${ROOT}/Dockerfile"
+[ -f "$DF" ] || die "missing client-checkpoint/Dockerfile"
+assert_contains "Dockerfile has ENTRYPOINT" "ENTRYPOINT" "$(cat "$DF")"
+assert_contains "Dockerfile installs curl" "curl" "$(cat "$DF")"
+assert_contains "Dockerfile installs bash" "bash" "$(cat "$DF")"
+assert_contains "Dockerfile installs python" "python" "$(cat "$DF")"
+assert_contains "Dockerfile uses nonroot USER" "USER " "$(cat "$DF")"
+[ -f "${ROOT}/.dockerignore" ]
+echo "ok - .dockerignore present"
+PASS=$((PASS + 1))
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

@@ -164,11 +164,14 @@ type ReserveDrawRequest struct {
 }
 
 // ReservationResult is returned from reserve operations.
+// Remaining is the draw-pile size that will be true after this reservation is confirmed
+// (current remaining minus reserved cards). Exact duplicate reserves return the same value.
 type ReservationResult struct {
 	Kind          domain.OutcomeKind
 	ReservationID string
 	Deal          *DealMaterial
 	Cards         []CardDTO
+	Remaining     int
 }
 
 // ReserveDeal peeks deal material without advancing the draw pointer.
@@ -233,7 +236,7 @@ func (s *Service) ReserveDeal(ctx context.Context, req ReserveDealRequest) (Rese
 			}
 			result = ReservationResult{
 				Kind: domain.OutcomeDuplicate, ReservationID: prior.ReservationID,
-				Deal: cloneDealPtr(prior.Deal),
+				Deal: cloneDealPtr(prior.Deal), Remaining: prior.RemainingAfter,
 			}
 			return nil
 		}
@@ -247,6 +250,7 @@ func (s *Service) ReserveDeal(ctx context.Context, req ReserveDealRequest) (Rese
 			}
 			result = ReservationResult{
 				Kind: domain.OutcomeDuplicate, ReservationID: prior.ID, Deal: cloneDealPtr(prior.Deal),
+				Remaining: prior.RemainingAfter,
 			}
 			return nil
 		}
@@ -284,15 +288,18 @@ func (s *Service) ReserveDeal(ctx context.Context, req ReserveDealRequest) (Rese
 			Hands: hands, DiscardTop: discard, ActiveColor: active,
 			CurrentSeat: 0, Direction: "clockwise",
 		}
+		remainingAfter := st.Deck.Remaining() - need
 		pending := &pendingReservation{
 			ID: resID, RoomID: domain.RoomID(req.RoomID), GameID: domain.GameID(req.GameID),
 			OperationID: opID, Kind: reservationDeal, Seats: append([]string(nil), req.Seats...),
 			CardsPerHand: perHand, Count: need, CardCount: need,
-			Deal: cloneDealPtr(&material), Shape: shape,
+			Deal: cloneDealPtr(&material), Shape: shape, RemainingAfter: remainingAfter,
 		}
 		st.Pending[resID] = pending
 		st.ByOp[opID] = pending
-		result = ReservationResult{Kind: domain.OutcomeAccepted, ReservationID: resID, Deal: &material}
+		result = ReservationResult{
+			Kind: domain.OutcomeAccepted, ReservationID: resID, Deal: &material, Remaining: remainingAfter,
+		}
 		return nil
 	})
 	if errors.Is(err, ErrStreamNotFound) {
@@ -357,7 +364,7 @@ func (s *Service) ReserveDraw(ctx context.Context, req ReserveDrawRequest) (Rese
 			}
 			result = ReservationResult{
 				Kind: domain.OutcomeDuplicate, ReservationID: prior.ReservationID,
-				Cards: cloneCards(prior.Cards),
+				Cards: cloneCards(prior.Cards), Remaining: prior.RemainingAfter,
 			}
 			return nil
 		}
@@ -371,6 +378,7 @@ func (s *Service) ReserveDraw(ctx context.Context, req ReserveDrawRequest) (Rese
 			}
 			result = ReservationResult{
 				Kind: domain.OutcomeDuplicate, ReservationID: prior.ID, Cards: cloneCards(prior.Cards),
+				Remaining: prior.RemainingAfter,
 			}
 			return nil
 		}
@@ -391,14 +399,17 @@ func (s *Service) ReserveDraw(ctx context.Context, req ReserveDrawRequest) (Rese
 		if err != nil {
 			return err
 		}
+		remainingAfter := st.Deck.Remaining() - req.Count
 		pending := &pendingReservation{
 			ID: resID, RoomID: domain.RoomID(req.RoomID), GameID: domain.GameID(req.GameID),
 			OperationID: opID, Kind: reservationDraw, Count: req.Count,
-			CardCount: req.Count, Cards: cloneCards(dtos), Shape: shape,
+			CardCount: req.Count, Cards: cloneCards(dtos), Shape: shape, RemainingAfter: remainingAfter,
 		}
 		st.Pending[resID] = pending
 		st.ByOp[opID] = pending
-		result = ReservationResult{Kind: domain.OutcomeAccepted, ReservationID: resID, Cards: dtos}
+		result = ReservationResult{
+			Kind: domain.OutcomeAccepted, ReservationID: resID, Cards: dtos, Remaining: remainingAfter,
+		}
 		return nil
 	})
 	if errors.Is(err, ErrStreamNotFound) {
@@ -451,7 +462,7 @@ func (s *Service) ConfirmReservation(ctx context.Context, roomID, gameID, reserv
 			Seats: append([]string(nil), pending.Seats...), CardsPerHand: pending.CardsPerHand,
 			Count: pending.Count, Shape: pending.Shape,
 			Deal: cloneDealPtr(pending.Deal), Cards: cloneCards(pending.Cards),
-			FromPointer: from,
+			FromPointer: from, RemainingAfter: pending.RemainingAfter,
 		}
 		st.Confirmed[pending.OperationID] = rec
 		st.ConfirmedByID[reservationID] = rec

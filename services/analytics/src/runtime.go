@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"unoarena/services/analytics/store"
 )
@@ -16,6 +18,75 @@ type analyticsRuntime struct {
 	readyReason string
 	creds       ProducerCredentials
 	chStore     *store.AnalyticsStore
+	kafka       *analyticsKafkaLifecycle
+}
+
+type analyticsKafkaLifecycle struct {
+	consumer   *AnalyticsKafkaConsumer
+	client     *franzAnalyticsClient
+	cancel     context.CancelFunc
+	done       chan struct{}
+	healthy    atomic.Bool
+	stoppedErr atomic.Value // error
+}
+
+func (l *analyticsKafkaLifecycle) start(parent context.Context) {
+	if l == nil || l.consumer == nil {
+		return
+	}
+	l.healthy.Store(true)
+	ctx, cancel := context.WithCancel(parent)
+	l.cancel = cancel
+	l.done = make(chan struct{})
+	go func() {
+		defer close(l.done)
+		err := l.consumer.Run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			l.healthy.Store(false)
+			l.stoppedErr.Store(err)
+			log.Printf(`{"level":"error","service":"analytics","event":"kafka_consumer_stopped","err":%q}`, sanitizeLogErr(err))
+			return
+		}
+		l.healthy.Store(false)
+		l.stoppedErr.Store(fmt.Errorf("kafka consumer exited unexpectedly"))
+		log.Printf(`{"level":"error","service":"analytics","event":"kafka_consumer_stopped","err":"exited unexpectedly"}`)
+	}()
+}
+
+func (l *analyticsKafkaLifecycle) stop() {
+	if l == nil {
+		return
+	}
+	if l.cancel != nil {
+		l.cancel()
+		l.cancel = nil
+	}
+	if l.done != nil {
+		<-l.done
+		l.done = nil
+	}
+	if l.client != nil {
+		_ = l.client.Close()
+		l.client = nil
+	}
+	l.healthy.Store(false)
+}
+
+func (l *analyticsKafkaLifecycle) Healthy() bool {
+	if l == nil {
+		return true
+	}
+	return l.healthy.Load()
+}
+
+func sanitizeLogErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return sanitizeDLQErrorSummary(err.Error())
 }
 
 func envTruthy(name string) bool {
@@ -54,23 +125,50 @@ func wireAnalyticsRuntime() (analyticsRuntime, error) {
 
 	credReason := scopedCredentialReadyReason(creds)
 
-	// Durable mode: CLICKHOUSE_URL set and not explicit capability.
-	if chURL != "" && !capability {
-		if credReason != "" {
+	// Capability mode: ignore Kafka env entirely; memory store only when opted in on non-prod.
+	if capability {
+		if !isNonProd(deploymentEnv) {
 			return analyticsRuntime{
 				app:         NewMemoryAnalyticsStore(),
-				mode:        "durable",
+				mode:        "misconfigured",
 				ready:       false,
-				readyReason: "durable_dependencies_missing: " + credReason,
+				readyReason: "capability_mode_forbidden_in_production",
 				creds:       creds,
 			}, nil
 		}
+		mem := NewMemoryAnalyticsStore()
+		ready := credReason == ""
+		return analyticsRuntime{
+			app:         mem,
+			mode:        "capability",
+			ready:       ready,
+			readyReason: credReason,
+			creds:       creds,
+		}, nil
+	}
+
+	// Durable mode: CLICKHOUSE_URL set and not explicit capability.
+	if chURL != "" {
+		missing := make([]string, 0, 4)
+		if credReason != "" {
+			missing = append(missing, credReason)
+		}
 		if chUser == "" || chPass == "" {
+			missing = append(missing, "CLICKHOUSE_USER/CLICKHOUSE_PASSWORD")
+		}
+		kafkaCfg, kafkaEnabled, err := LoadAnalyticsKafkaConfigFromEnv()
+		if err != nil {
+			return analyticsRuntime{}, fmt.Errorf("kafka config: %w", err)
+		}
+		if !kafkaEnabled {
+			missing = append(missing, "kafka")
+		}
+		if len(missing) > 0 {
 			return analyticsRuntime{
 				app:         NewMemoryAnalyticsStore(),
 				mode:        "durable",
 				ready:       false,
-				readyReason: "durable_dependencies_missing: CLICKHOUSE_USER/CLICKHOUSE_PASSWORD",
+				readyReason: "durable_dependencies_missing: " + strings.Join(missing, ", "),
 				creds:       creds,
 			}, nil
 		}
@@ -81,44 +179,57 @@ func wireAnalyticsRuntime() (analyticsRuntime, error) {
 			return analyticsRuntime{}, fmt.Errorf("clickhouse client: %w", err)
 		}
 		chs := store.NewAnalyticsStore(client)
-		return analyticsRuntime{
+		life, err := newAnalyticsKafkaLifecycle(kafkaCfg, chs)
+		if err != nil {
+			return analyticsRuntime{}, err
+		}
+		rt := analyticsRuntime{
 			app:     chs,
 			mode:    "durable",
 			ready:   true,
 			creds:   creds,
 			chStore: chs,
-		}, nil
-	}
-
-	// Capability memory only when explicitly opted in on non-production.
-	if !capability || !isNonProd(deploymentEnv) {
-		reason := "clickhouse_unconfigured"
-		if capability && !isNonProd(deploymentEnv) {
-			reason = "capability_mode_forbidden_in_production"
+			kafka:   life,
 		}
-		return analyticsRuntime{
-			app:         NewMemoryAnalyticsStore(),
-			mode:        "misconfigured",
-			ready:       false,
-			readyReason: reason,
-			creds:       creds,
-		}, nil
+		return rt, nil
 	}
 
-	mem := NewMemoryAnalyticsStore()
-	ready := credReason == ""
 	return analyticsRuntime{
-		app:         mem,
-		mode:        "capability",
-		ready:       ready,
-		readyReason: credReason,
+		app:         NewMemoryAnalyticsStore(),
+		mode:        "misconfigured",
+		ready:       false,
+		readyReason: "clickhouse_unconfigured",
 		creds:       creds,
 	}, nil
+}
+
+func newAnalyticsKafkaLifecycle(cfg AnalyticsKafkaConfig, app AnalyticsIngester) (*analyticsKafkaLifecycle, error) {
+	client, err := newFranzAnalyticsClient(cfg)
+	if err != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		return nil, fmt.Errorf("kafka client: %w", err)
+	}
+	consumer := &AnalyticsKafkaConsumer{
+		source:  client,
+		dlq:     client,
+		handler: app,
+		cfg:     cfg,
+		clock:   systemClock{},
+	}
+	return &analyticsKafkaLifecycle{consumer: consumer, client: client}, nil
 }
 
 func (rt analyticsRuntime) durableReady(ctx context.Context) error {
 	if rt.chStore == nil {
 		return fmt.Errorf("durable store unconfigured")
 	}
-	return rt.chStore.Ready(ctx)
+	if err := rt.chStore.Ready(ctx); err != nil {
+		return err
+	}
+	if rt.kafka != nil && !rt.kafka.Healthy() {
+		return fmt.Errorf("kafka_consumer_stopped")
+	}
+	return nil
 }

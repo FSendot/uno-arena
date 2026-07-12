@@ -13,7 +13,8 @@ Workers are bundled with their owning service's Helm chart as separate `Deployme
 |---|---|
 | Room Timer Worker | Room Gameplay Service |
 | Tournament Provisioning Workers | Tournament Orchestration Service |
+| Tournament Seeding Workers | Tournament Orchestration Service |
 | Projection Rebuilders | Spectator Projection Service / Analytics Service |
 
 ## Consequences
-Workers are versioned with their owning service chart, but **default/staging/production keep worker Deployments disabled** (`timerWorker.enabled` / `provisioningWorker.enabled` / `projectionRebuilder.enabled` = `false`). Current service binaries do not implement `WORKER_ROLE` loops, and production timer/Kafka/rebuild adapters are absent; enabling the templates today would launch duplicate HTTP servers rather than worker loops. Re-enable only after those loops and durable adapters exist. If a worker's operational lifecycle later diverges from its owning service (e.g., independent scaling), extract it into its own pipeline service at that point.
+Workers are versioned with their owning service chart, but **default/staging/production keep worker Deployments disabled** (`timerWorker.enabled` / `provisioningWorker.enabled` / `seedingWorker.enabled` / `projectionRebuilder.enabled` = `false`). Kind enables provisioning and seeding workers (2 replicas) to exercise `FOR UPDATE SKIP LOCKED`. Spectator/Analytics projection rebuilders implement ADR-0039 rebuild-request consumers and context-owned snapshot/backfill callers, but stay disabled in default/staging/production/`kind` until real end-to-end worker live recovery tests pass. Re-enable other workers outside kind only after those loops and durable adapters exist. If a worker's operational lifecycle later diverges from its owning service (e.g., independent scaling), extract it into its own pipeline service at that point.

@@ -1,9 +1,9 @@
 {{- /*
-  BLOCKED: spectator-view binary does not implement a
-  WORKER_ROLE=spectator-projection-rebuilder loop, and production Kafka consumer /
-  rebuild adapters are absent. Default/staging/production/kind keep
-  projectionRebuilder.enabled=false so Helm does not launch a duplicate HTTP server.
-  Kafka ingestion for room.spectator-safe.events remains PENDING.
+  Spectator projection-rebuilder: same image as API; WORKER_ROLE=spectator-projection-rebuilder
+  consumes spectator.projection.rebuild_requested (ADR-0039). HTTP-free — no ports/probes.
+  Least privilege: Redis + Kafka rebuild/held-DLQ settings + Room URL + scoped recovery
+  credential only (never the Spectator API internal credential / gateway secrets).
+  Default/staging/production keep enabled=false. Kind enables after structure proof lane.
 */ -}}
 {{- if .Values.projectionRebuilder.enabled }}
 apiVersion: apps/v1
@@ -14,7 +14,7 @@ metadata:
     app: {{ .Release.Name }}-projection-rebuilder
     app.kubernetes.io/part-of: {{ .Release.Name }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.projectionRebuilder.replicaCount | default 1 }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}-projection-rebuilder
@@ -24,6 +24,7 @@ spec:
         app: {{ .Release.Name }}-projection-rebuilder
         app.kubernetes.io/part-of: {{ .Release.Name }}
     spec:
+      terminationGracePeriodSeconds: 45
       containers:
         - name: projection-rebuilder
           image: {{ include "spectator-view.image" . | quote }}
@@ -31,14 +32,47 @@ spec:
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
             - name: WORKER_ROLE
               value: "spectator-projection-rebuilder"
-            {{- if .Values.existingSecret }}
-            - name: SPECTATOR_VIEW_INTERNAL_CREDENTIAL
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            {{- if .Values.env.SPECTATOR_REDIS_KEY_PREFIX }}
+            - name: SPECTATOR_REDIS_KEY_PREFIX
+              value: {{ .Values.env.SPECTATOR_REDIS_KEY_PREFIX | quote }}
+            {{- end }}
+            {{- if .Values.env.SPECTATOR_REDIS_STREAM_MAXLEN }}
+            - name: SPECTATOR_REDIS_STREAM_MAXLEN
+              value: {{ .Values.env.SPECTATOR_REDIS_STREAM_MAXLEN | quote }}
+            {{- end }}
+            - name: KAFKA_BROKERS
+              value: {{ .Values.env.KAFKA_BROKERS | quote }}
+            - name: KAFKA_SPECTATOR_SAFE_TOPIC
+              value: {{ .Values.env.KAFKA_SPECTATOR_SAFE_TOPIC | default "room.spectator-safe.events" | quote }}
+            - name: KAFKA_SPECTATOR_SAFE_DLQ_TOPIC
+              value: {{ .Values.env.KAFKA_SPECTATOR_SAFE_DLQ_TOPIC | default "room.spectator-safe.events.spectator-view.dlq" | quote }}
+            - name: KAFKA_CONSUMER_GROUP
+              value: {{ .Values.env.KAFKA_CONSUMER_GROUP | default "spectator-view" | quote }}
+            - name: ROOM_GAMEPLAY_URL
+              value: {{ .Values.projectionRebuilder.env.ROOM_GAMEPLAY_URL | quote }}
+            - name: KAFKA_PROJECTION_REBUILD_GROUP
+              value: {{ .Values.projectionRebuilder.env.KAFKA_PROJECTION_REBUILD_GROUP | default "spectator-view-projection-rebuilder" | quote }}
+            - name: KAFKA_PROJECTION_REBUILD_TOPIC
+              value: {{ .Values.projectionRebuilder.env.KAFKA_PROJECTION_REBUILD_TOPIC | default "spectator.projection.rebuild_requested" | quote }}
+            - name: KAFKA_PROJECTION_REBUILD_DLQ_TOPIC
+              value: {{ .Values.projectionRebuilder.env.KAFKA_PROJECTION_REBUILD_DLQ_TOPIC | default "spectator.projection.rebuild_requested.spectator-view.dlq" | quote }}
+            {{- /* Scoped Room recovery credential only — never inject Spectator API credential. */ -}}
+            {{- if and .Values.existingSecret .Values.projectionRebuilder.secretEnv }}
+            {{- range $envName, $key := .Values.projectionRebuilder.secretEnv }}
+            {{- if and $key (ne $key "") }}
+            - name: {{ $envName }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.existingSecret | quote }}
-                  key: {{ index .Values.secretEnv "SPECTATOR_VIEW_INTERNAL_CREDENTIAL" | quote }}
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

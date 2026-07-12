@@ -1,0 +1,5 @@
+# Keep the CLI image small: only the entrypoint script is required at runtime.
+*
+!bin/
+!bin/unoarena
+!Dockerfile

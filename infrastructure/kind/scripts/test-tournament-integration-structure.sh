@@ -79,7 +79,8 @@ if grep -E 'lsof' "${ADAPTER}" >/dev/null 2>&1; then
   die "adapter must not use lsof"
 fi
 
-# Runtime user DSN to temp DB only; drives make test-tournament-integration.
+# Runtime user DSN to temp DB only; drives make test-tournament-integration
+# which runs store then main-package service durable integration sequentially.
 if ! grep -F 'tournament_runtime' "${ADAPTER}" >/dev/null 2>&1; then
   die "adapter must use tournament_runtime for the test DSN"
 fi
@@ -95,6 +96,28 @@ fi
 if ! grep -E 'make[[:space:]]+test-tournament-integration' "${ADAPTER}" >/dev/null 2>&1; then
   die "adapter must run make test-tournament-integration"
 fi
+if ! grep -E 'store \+ main-package|store and main-package|store \+ main' "${ADAPTER}" >/dev/null 2>&1; then
+  die "adapter comments/output must mention store and main-package service integration lanes"
+fi
+
+# Makefile must run store integration then main-package (.) sequentially.
+MAKEFILE="$(cd "${SCRIPT_DIR}/../../.." && pwd)/Makefile"
+[[ -f "${MAKEFILE}" ]] || die "Makefile missing: ${MAKEFILE}"
+recipe="$(awk '
+  /^test-tournament-integration:/ { in_t=1; next }
+  in_t && /^[^#[:space:]]/ { exit }
+  in_t { print }
+' "${MAKEFILE}")"
+if ! grep -E '\./store/\.\.\.' <<<"${recipe}" >/dev/null 2>&1; then
+  die "Makefile test-tournament-integration must run ./store/... first"
+fi
+if ! grep -E '[[:space:]]\.$' <<<"${recipe}" >/dev/null 2>&1; then
+  die "Makefile test-tournament-integration must run main-package service integration (.)"
+fi
+store_line="$(grep -n '\./store/\.\.\.' <<<"${recipe}" | head -n1 | cut -d: -f1)"
+main_line="$(grep -nE '[[:space:]]\.$' <<<"${recipe}" | head -n1 | cut -d: -f1)"
+[[ -n "${store_line}" && -n "${main_line}" ]] || die "Makefile must define both store and main integration lanes"
+(( store_line < main_line )) || die "Makefile must run ./store/... before main-package ."
 
 # Trap must terminate backends + DROP DATABASE for this DB only.
 if ! grep -E 'trap[[:space:]]+cleanup[[:space:]]+EXIT' "${ADAPTER}" >/dev/null 2>&1; then

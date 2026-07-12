@@ -50,10 +50,12 @@ type SourceTopic string
 
 const (
 	SourceRoomGameplayMetrics           SourceTopic = "room.gameplay.metrics"
+	SourceRoomMatchCompleted            SourceTopic = "room.match.completed"
 	SourceTournamentMatchAssigned       SourceTopic = "tournament.match.assigned"
 	SourceTournamentMatchResultRecorded SourceTopic = "tournament.match.result_recorded"
 	SourceTournamentPlayersAdvanced     SourceTopic = "tournament.players.advanced"
 	SourceTournamentRoundCompleted      SourceTopic = "tournament.round.completed"
+	SourceTournamentCompleted           SourceTopic = "tournament.completed"
 	SourceRankingPlayerRatingUpdated    SourceTopic = "ranking.player_rating_updated"
 	SourceRankingLeaderboardSnapshot    SourceTopic = "ranking.leaderboard_snapshot_published"
 )
@@ -63,10 +65,12 @@ func (s SourceTopic) String() string { return string(s) }
 func (s SourceTopic) Valid() bool {
 	switch s {
 	case SourceRoomGameplayMetrics,
+		SourceRoomMatchCompleted,
 		SourceTournamentMatchAssigned,
 		SourceTournamentMatchResultRecorded,
 		SourceTournamentPlayersAdvanced,
 		SourceTournamentRoundCompleted,
+		SourceTournamentCompleted,
 		SourceRankingPlayerRatingUpdated,
 		SourceRankingLeaderboardSnapshot:
 		return true
@@ -92,6 +96,7 @@ const (
 	RejectDisallowedField  RejectionCode = "disallowed_field"
 	RejectAnonymization    RejectionCode = "anonymization_required"
 	RejectNonPublicSource  RejectionCode = "non_public_source"
+	RejectPayloadConflict  RejectionCode = "payload_conflict"
 )
 
 // Rejection is a typed non-mutating outcome detail.
@@ -114,6 +119,7 @@ const (
 	OutcomeAccepted    OutcomeKind = "accepted"
 	OutcomeDuplicate   OutcomeKind = "duplicate"
 	OutcomeQuarantined OutcomeKind = "quarantined"
+	OutcomeIgnored     OutcomeKind = "ignored"
 )
 
 // ApplyOutcome is the stable result of projecting one upstream event.

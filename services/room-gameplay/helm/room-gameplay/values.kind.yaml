@@ -32,6 +32,10 @@ secretEnv:
   SERVICE_CREDENTIAL: room-service-credential
   ROOM_SERVICE_CREDENTIAL: room-service-credential
   ROOM_TIMER_SERVICE_CREDENTIAL: room-timer-service-credential
+  ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL: room-spectator-recovery-service-credential
+  ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL: analytics-room-credential
+  ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET: room-analytics-backfill-cursor-secret
+  ROOM_PUBLIC_LIST_CURSOR_SECRET: room-public-list-cursor-secret
   GATEWAY_SERVICE_CREDENTIAL: room-to-gateway-credential
   IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
   ROOM_IDENTITY_CREDENTIAL: room-identity-credential

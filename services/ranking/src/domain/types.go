@@ -24,7 +24,7 @@ type RatingHistoryReason string
 
 const (
 	ReasonCasualGameCompleted     RatingHistoryReason = "casual_game_completed"
-	ReasonTournamentPlacement     RatingHistoryReason = "tournament_placement"
+	ReasonTournamentAdvancement   RatingHistoryReason = "tournament_advancement"
 	ReasonTournamentFinalStanding RatingHistoryReason = "tournament_final_standing"
 )
 
@@ -101,7 +101,8 @@ type RatingHistoryEntry struct {
 	EventID          EventID
 	TournamentID     TournamentID
 	PlacementEventID PlacementEventID
-	Placement        int
+	Placement        int // final standing place; 0 when advancement
+	AdvancementDepth int // PlayersAdvanced roundNumber; 0 when final standing / casual
 }
 
 // PlayerRatingSnapshot is a public read of one player's ratings.
@@ -131,15 +132,16 @@ type ApplyCasualEloUpdateCommand struct {
 	Participants  []RatedPlacement
 }
 
-// ApplyTournamentPlacementUpdateCommand applies a tournament placement/final standing fact.
+// ApplyTournamentPlacementUpdateCommand applies a tournament advancement or final-standing fact.
+// Ranking computes the award from Reason + RoundNumber/Placement; callers never supply a delta.
 type ApplyTournamentPlacementUpdateCommand struct {
 	CommandID        CommandID
 	EventID          EventID
 	PlayerID         PlayerID
 	TournamentID     TournamentID
 	PlacementEventID PlacementEventID
-	Placement        int
-	Delta            int
+	Placement        int // final standing 1..10; must be 0 for advancement
+	RoundNumber      int // advancement depth; must be 0 for final standing
 	Reason           RatingHistoryReason
 }
 

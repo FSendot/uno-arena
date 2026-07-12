@@ -77,7 +77,7 @@ done
 
 export SPECTATOR_REDIS_URL="redis://127.0.0.1:${LOCAL_PORT}/${SAFE_DB}"
 echo "SPECTATOR_REDIS_URL=${SPECTATOR_REDIS_URL}"
-echo "note: Kafka consumer remains PENDING; suite uses generated-prefix cleanup only"
+echo "note: suite verifies Redis/Lua quarantine behavior (generated-prefix cleanup); does not exercise live Kafka delivery"
 
 make -C "${REPO_ROOT}" test-spectator-integration
 

@@ -8,6 +8,7 @@ type RestoreTournamentInput struct {
 	Capacity          int
 	RetryBudget       int
 	BatchSize         int
+	Visibility        TournamentVisibility // empty defaults to public
 	Registrations     map[PlayerID]struct{}
 	RegistrationOrder []PlayerID
 	Rounds            map[int]*Round
@@ -64,12 +65,17 @@ func RestoreTournament(in RestoreTournamentInput) *Tournament {
 	if batch <= 0 {
 		batch = DefaultBatchSize
 	}
+	vis := in.Visibility
+	if vis == "" {
+		vis = TournamentVisibilityPublic
+	}
 	return &Tournament{
 		id:                in.ID,
 		phase:             in.Phase,
 		capacity:          in.Capacity,
 		retryBudget:       retry,
 		batchSize:         batch,
+		visibility:        vis,
 		registrations:     clonePlayerSet(regs),
 		registrationOrder: append([]PlayerID(nil), in.RegistrationOrder...),
 		rounds:            cloneRounds(rounds),

@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	maxCASRetries      = 8
-	defaultGeneration  = "1"
+	maxCASRetries       = 8
+	defaultGeneration   = "1"
 	defaultStreamMaxLen = 1024 // approximate MAXLEN for local proof; snapshot covers trim
 )
 
@@ -35,6 +35,10 @@ type RedisProjectionStore struct {
 	rdb          redis.UniversalClient
 	keys         KeySpace
 	streamMaxLen int64
+	// Optional Kafka consumer identity enables atomic ADR-0017 quarantine on
+	// OutcomeQuarantined / OutcomeDropped commits. HTTP-only stores leave these empty.
+	kafkaGroup string
+	kafkaTopic string
 }
 
 // NewRedisProjectionStore constructs a durable store.
@@ -64,6 +68,14 @@ func (s *RedisProjectionStore) WithStreamMaxLen(n int64) *RedisProjectionStore {
 	return &cp
 }
 
+// WithKafkaIdentity enables atomic Kafka aggregate quarantine on domain drop/quarantine.
+func (s *RedisProjectionStore) WithKafkaIdentity(consumerGroup, sourceTopic string) *RedisProjectionStore {
+	cp := *s
+	cp.kafkaGroup = strings.TrimSpace(consumerGroup)
+	cp.kafkaTopic = strings.TrimSpace(sourceTopic)
+	return &cp
+}
+
 // StreamMaxLen returns the configured approximate MAXLEN.
 func (s *RedisProjectionStore) StreamMaxLen() int64 { return s.streamMaxLen }
 
@@ -83,7 +95,16 @@ func (s *RedisProjectionStore) LoadScripts(ctx context.Context) error {
 	if err := applyCommitScript.Load(ctx, s.rdb).Err(); err != nil {
 		return err
 	}
-	return rebuildSwapScript.Load(ctx, s.rdb).Err()
+	if err := rebuildSwapScript.Load(ctx, s.rdb).Err(); err != nil {
+		return err
+	}
+	if err := recoveryRebuildSwapScript.Load(ctx, s.rdb).Err(); err != nil {
+		return err
+	}
+	if err := kafkaQuarantineReleaseScript.Load(ctx, s.rdb).Err(); err != nil {
+		return err
+	}
+	return kafkaQuarantineScript.Load(ctx, s.rdb).Err()
 }
 
 // FlushPrefixedKeys deletes only keys under this store's prefix (integration cleanup).
@@ -448,11 +469,41 @@ func (s *RedisProjectionStore) commitApply(
 	args = append(args, appendStream, eventType, sseID, dataJSON, seqStr, closeFlag,
 		strconv.FormatInt(s.streamMaxLen, 10), explicitID)
 
+	markQuarantine := "0"
+	if s.kafkaGroup != "" && s.kafkaTopic != "" &&
+		(out.Kind == domain.OutcomeQuarantined || out.Kind == domain.OutcomeDropped) {
+		markQuarantine = "1"
+		class := ClassificationForDomainOutcome(out)
+		reason := "quarantined"
+		if out.Rejection != nil {
+			if out.Rejection.Message != "" {
+				reason = out.Rejection.Message
+			} else {
+				reason = string(out.Rejection.Code)
+			}
+		}
+		reason = sanitizeQuarantineReason(reason)
+		args = append(args, markQuarantine,
+			s.kafkaGroup,
+			s.kafkaTopic,
+			class,
+			reason,
+			string(out.EventID),
+			"", // correlationId not available on domain outcome
+			"0",
+			"0",
+			time.Now().UTC().Format(time.RFC3339Nano),
+		)
+	} else {
+		args = append(args, markQuarantine)
+	}
+
 	res, err := applyCommitScript.Run(ctx, s.rdb, []string{
 		s.keys.Meta(roomID),
 		s.keys.State(roomID),
 		s.keys.Outcomes(roomID),
 		streamKey,
+		s.keys.KafkaQuarantine(roomID),
 	}, args...).Text()
 	if err != nil {
 		return "", err

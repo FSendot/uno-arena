@@ -7,14 +7,22 @@ image:
 env:
   SERVICE_NAME: spectator-view
   REDIS_URL: redis://redis:6379/5
-  # KAFKA_BROKERS omitted until Kafka consumer slice; HTTP internal ingest is test/ops bridge.
+  # Kafka brokers/group/topics are environment-specific (see values.kind / staging / production).
   SPECTATOR_REDIS_KEY_PREFIX: "spectator:"
   # Approximate Redis stream MAXLEN (~); trimmed history falls back to snapshot.
   SPECTATOR_REDIS_STREAM_MAXLEN: "1024"
 
-# BLOCKED: binary has no WORKER_ROLE=spectator-projection-rebuilder loop; Kafka rebuild absent.
+# Default/staging/production keep disabled (ADR-0013 / ADR-0039).
 projectionRebuilder:
   enabled: false
+  replicaCount: 1
+  env:
+    ROOM_GAMEPLAY_URL: http://room-gameplay:8080
+    KAFKA_PROJECTION_REBUILD_GROUP: spectator-view-projection-rebuilder
+    KAFKA_PROJECTION_REBUILD_TOPIC: spectator.projection.rebuild_requested
+    KAFKA_PROJECTION_REBUILD_DLQ_TOPIC: spectator.projection.rebuild_requested.spectator-view.dlq
+  secretEnv:
+    ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL: room-spectator-recovery-service-credential
 
 # Cross-chart: spectator-view-internal-credential == gateway gateway-spectator-service-credential
 #              == room spectator-view-internal-credential secret value (Room→Spectator).

@@ -1,8 +1,9 @@
 {{- /*
-  BLOCKED: analytics binary does not implement a
-  WORKER_ROLE=analytics-projection-rebuilder loop, and production ClickHouse/Kafka
-  rebuild adapters are absent. Default/staging/production keep
-  projectionRebuilder.enabled=false so Helm does not launch a duplicate HTTP server.
+  Analytics projection-rebuilder: same image as API; WORKER_ROLE=analytics-projection-rebuilder
+  consumes analytics.projection.rebuild_requested (ADR-0039). HTTP-free — no ports/probes.
+  Least privilege: ClickHouse + Kafka rebuild/DLQ/follow-up + three producer URLs + three
+  scoped pair credentials only (never ops credential / Gateway secrets).
+  Default/staging/production/kind keep enabled=false until live recovery proof.
 */ -}}
 {{- if .Values.projectionRebuilder.enabled }}
 apiVersion: apps/v1
@@ -13,7 +14,7 @@ metadata:
     app: {{ .Release.Name }}-projection-rebuilder
     app.kubernetes.io/part-of: {{ .Release.Name }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.projectionRebuilder.replicaCount | default 1 }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}-projection-rebuilder
@@ -23,6 +24,7 @@ spec:
         app: {{ .Release.Name }}-projection-rebuilder
         app.kubernetes.io/part-of: {{ .Release.Name }}
     spec:
+      terminationGracePeriodSeconds: 45
       containers:
         - name: projection-rebuilder
           image: {{ include "analytics.image" . | quote }}
@@ -30,28 +32,39 @@ spec:
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
             - name: WORKER_ROLE
               value: "analytics-projection-rebuilder"
             - name: CLICKHOUSE_URL
               value: {{ .Values.env.CLICKHOUSE_URL | quote }}
             - name: CLICKHOUSE_DB
               value: {{ .Values.env.CLICKHOUSE_DB | quote }}
-            {{- if .Values.existingSecret }}
-            - name: ANALYTICS_OPS_CREDENTIAL
+            - name: KAFKA_BROKERS
+              value: {{ .Values.env.KAFKA_BROKERS | quote }}
+            - name: ROOM_GAMEPLAY_URL
+              value: {{ .Values.projectionRebuilder.env.ROOM_GAMEPLAY_URL | quote }}
+            - name: TOURNAMENT_ORCHESTRATION_URL
+              value: {{ .Values.projectionRebuilder.env.TOURNAMENT_ORCHESTRATION_URL | quote }}
+            - name: RANKING_URL
+              value: {{ .Values.projectionRebuilder.env.RANKING_URL | quote }}
+            - name: KAFKA_PROJECTION_REBUILD_GROUP
+              value: {{ .Values.projectionRebuilder.env.KAFKA_PROJECTION_REBUILD_GROUP | default "analytics-projection-rebuilder" | quote }}
+            - name: KAFKA_PROJECTION_REBUILD_TOPIC
+              value: {{ .Values.projectionRebuilder.env.KAFKA_PROJECTION_REBUILD_TOPIC | default "analytics.projection.rebuild_requested" | quote }}
+            - name: KAFKA_PROJECTION_REBUILD_DLQ_TOPIC
+              value: {{ .Values.projectionRebuilder.env.KAFKA_PROJECTION_REBUILD_DLQ_TOPIC | default "analytics.projection.rebuild_requested.analytics.dlq" | quote }}
+            {{- /* Scoped pair credentials only — never inject ops credential. */ -}}
+            {{- if and .Values.existingSecret .Values.projectionRebuilder.secretEnv }}
+            {{- range $envName, $key := .Values.projectionRebuilder.secretEnv }}
+            {{- if and $key (ne $key "") }}
+            - name: {{ $envName }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.existingSecret | quote }}
-                  key: {{ index .Values.secretEnv "ANALYTICS_OPS_CREDENTIAL" | quote }}
-            - name: CLICKHOUSE_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.existingSecret | quote }}
-                  key: {{ index .Values.secretEnv "CLICKHOUSE_USER" | quote }}
-            - name: CLICKHOUSE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.existingSecret | quote }}
-                  key: {{ index .Values.secretEnv "CLICKHOUSE_PASSWORD" | quote }}
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

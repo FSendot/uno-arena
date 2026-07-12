@@ -35,6 +35,7 @@ type FeedAudience struct {
 // Accepted no-ops (no facts and no room-sequence advance vs prevRoomSequence) emit nothing.
 // Spectator SequenceNumber is the authoritative room sequence (first=1, contiguous).
 // playerStartSeq is the first player-feed sequence to assign; returns player high-water.
+// Spectator Payload is the full AsyncAPI SpectatorSafeEvent envelope JSON.
 func BuildFeedEvents(
 	sess *domain.Session,
 	roomSequence int64,
@@ -43,6 +44,7 @@ func BuildFeedEvents(
 	facts []domain.Fact,
 	audiences []FeedAudience,
 	prevRoomSequence int64,
+	occurredAt time.Time,
 ) ([]PublishedEvent, int64) {
 	out := make([]PublishedEvent, 0, len(facts)*len(audiences)+1)
 	seq := playerStartSeq
@@ -58,6 +60,9 @@ func BuildFeedEvents(
 	if len(facts) == 0 && !stateAdvanced {
 		return nil, 0
 	}
+	at := occurredAt.UTC().Format(time.RFC3339Nano)
+	// Callers pass a clock-derived time; zero remains the deterministic zero-UTC stamp
+	// (no hidden wall-clock fallback).
 	for i, f := range facts {
 		data := copyStringMapAny(f.Data)
 		raw, _ := json.Marshal(map[string]any{
@@ -80,6 +85,7 @@ func BuildFeedEvents(
 				SchemaVersion:  1,
 				CorrelationID:  correlationID,
 				CausationID:    commandID,
+				OccurredAt:     at,
 				PlayerID:       aud.PlayerID,
 				SessionID:      aud.SessionID,
 				Payload:        raw,
@@ -91,18 +97,34 @@ func BuildFeedEvents(
 
 	if sess != nil && sess.Room() != nil && roomSequence >= 1 {
 		eventType := spectatorEventType(sess.Room())
+		eventID := commandID + "-ss"
 		specData := BuildPublicSpectatorSnapshot(sess)
-		specRaw, _ := json.Marshal(specData)
+		envelope := map[string]any{
+			"schemaVersion":  1,
+			"eventId":        eventID,
+			"eventType":      eventType,
+			"roomId":         roomID,
+			"sequenceNumber": roomSequence,
+			"correlationId":  correlationID,
+			"causationId":    commandID,
+			"occurredAt":     at,
+			"payload":        specData,
+		}
+		if uw, ok := specData["unoWindow"]; ok {
+			envelope["unoWindow"] = uw
+		}
+		specRaw, _ := json.Marshal(envelope)
 		out = append(out, PublishedEvent{
 			Topic:          TopicSpectatorSafe,
 			Stream:         StreamSpectator,
 			RoomID:         roomID,
-			EventID:        commandID + "-ss",
+			EventID:        eventID,
 			EventType:      eventType,
 			SequenceNumber: roomSequence,
 			SchemaVersion:  1,
 			CorrelationID:  correlationID,
 			CausationID:    commandID,
+			OccurredAt:     at,
 			Payload:        specRaw,
 		})
 	}
@@ -157,6 +179,7 @@ func BuildPublicSpectatorSnapshot(sess *domain.Session) map[string]any {
 		if pub.CurrentPlayer != "" {
 			data["currentPlayerId"] = string(pub.CurrentPlayer)
 		}
+		data["drawPileSize"] = pub.DrawPileSize
 		data["penaltyAmount"] = pub.PenaltyAmount
 		if pub.PenaltyTarget != "" {
 			data["penaltyTarget"] = string(pub.PenaltyTarget)

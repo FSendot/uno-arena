@@ -46,6 +46,14 @@ CHART="${REPO_ROOT}/services/tournament-orchestration/helm/tournament-orchestrat
 [[ -f "${CHART}/helm-test.sh" ]] || { echo "FAIL: missing helm-test.sh" >&2; fail=1; }
 [[ -f "${CHART}/templates/_helpers.tpl" ]] || { echo "FAIL: missing _helpers.tpl" >&2; fail=1; }
 
+KIND_VALUES="${CHART}/values.kind.yaml"
+check "${KIND_VALUES}" "KAFKA_BROKERS"
+check "${KIND_VALUES}" "kafka.uno-arena.svc.cluster.local:9092"
+check "${KIND_VALUES}" "KAFKA_CONSUMER_GROUP"
+check "${KIND_VALUES}" "KAFKA_MATCH_COMPLETED_TOPIC"
+check "${KIND_VALUES}" "KAFKA_MATCH_COMPLETED_DLQ_TOPIC"
+check "${KIND_VALUES}" "room.match.completed.tournament-orchestration.dlq"
+
 SECRETS="${MANIFESTS_DIR}/01-local-secrets.yaml"
 check "${SECRETS}" "tournament-database-url"
 

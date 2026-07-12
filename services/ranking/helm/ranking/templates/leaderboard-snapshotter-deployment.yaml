@@ -1,0 +1,50 @@
+{{- /*
+  Leaderboard snapshotter: same image as API; WORKER_ROLE=ranking-leaderboard-snapshotter
+  claims dirty boards with FOR UPDATE SKIP LOCKED and publishes top-100 snapshots (ADR-0038).
+  DB-only — no Kafka, Redis, or HTTP. Default/staging/production keep enabled=false.
+*/ -}}
+{{- if .Values.leaderboardSnapshotterWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-leaderboard-snapshotter
+  labels:
+    app: {{ .Release.Name }}-leaderboard-snapshotter
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.leaderboardSnapshotterWorker.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-leaderboard-snapshotter
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-leaderboard-snapshotter
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: leaderboard-snapshotter
+          image: {{ include "ranking.image" . | quote }}
+          imagePullPolicy: {{ include "ranking.imagePullPolicy" . }}
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
+            - name: WORKER_ROLE
+              value: "ranking-leaderboard-snapshotter"
+            {{- if .Values.existingSecret }}
+            {{- range $envName, $key := .Values.secretEnv }}
+            {{- if and $key (eq $envName "DATABASE_URL") }}
+            - name: {{ $envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

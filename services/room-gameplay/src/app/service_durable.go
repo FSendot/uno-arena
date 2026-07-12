@@ -210,8 +210,9 @@ func (s *Service) commitAcceptedDurable(
 	gameID := string(stage.GameID())
 	audiences := s.feedAudiencesDurable(uow, roomID, stage.Room(), in)
 	playerStart := uow.PeekStreamSeq() + 1
-	feedEvents, playerHighWater := BuildFeedEvents(stage, seq, playerStart, in.CorrelationID, in.CommandID, out.Facts, audiences, prevSeq)
-	completion := BuildCompletionEvents(stage.Room(), stage.Game(), gameID, seq, in.CorrelationID, in.CommandID, out.Facts, s.deps.Clock.Now())
+	now := s.deps.Clock.Now()
+	feedEvents, playerHighWater := BuildFeedEvents(stage, seq, playerStart, in.CorrelationID, in.CommandID, out.Facts, audiences, prevSeq, now)
+	completion := BuildCompletionEvents(stage.Room(), stage.Game(), gameID, seq, in.CorrelationID, in.CommandID, out.Facts, now)
 	all := append(feedEvents, completion...)
 
 	// Precompute repair material BEFORE GI Append (intent closes the GI-success-before-marker gap).
@@ -300,9 +301,11 @@ func (s *Service) commitAcceptedDurable(
 		return CommandResult{Err: err}
 	}
 	// Durable mode: no DrainOutbox / MultiDestinationPublisher polling.
-	return CommandResult{Result: envelope.Accepted(in.CommandID, in.Type, &seq, MustJSON(map[string]any{
-		"facts": factNames(out.Facts),
-	}))}
+	acceptedPayload := map[string]any{"facts": factNames(out.Facts)}
+	if in.Type == "ProvisionTournamentRoom" {
+		acceptedPayload["roomId"] = roomID
+	}
+	return CommandResult{Result: envelope.Accepted(in.CommandID, in.Type, &seq, MustJSON(acceptedPayload))}
 }
 
 func performReservationAction(ctx context.Context, deals DealSource, req DurableAcceptedCommit) error {

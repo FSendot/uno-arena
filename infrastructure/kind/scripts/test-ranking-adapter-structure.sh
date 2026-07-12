@@ -46,6 +46,19 @@ CHART="${REPO_ROOT}/services/ranking/helm/ranking"
 [[ -f "${CHART}/helm-test.sh" ]] || { echo "FAIL: missing helm-test.sh" >&2; fail=1; }
 [[ -f "${CHART}/templates/_helpers.tpl" ]] || { echo "FAIL: missing _helpers.tpl" >&2; fail=1; }
 
+KIND_VALUES="${CHART}/values.kind.yaml"
+check "${KIND_VALUES}" "KAFKA_BROKERS"
+check "${KIND_VALUES}" "kafka.uno-arena.svc.cluster.local:9092"
+check "${KIND_VALUES}" "KAFKA_CONSUMER_GROUP"
+check "${KIND_VALUES}" "KAFKA_GAME_COMPLETED_TOPIC"
+check "${KIND_VALUES}" "KAFKA_GAME_COMPLETED_DLQ_TOPIC"
+check "${KIND_VALUES}" "KAFKA_PLAYERS_ADVANCED_TOPIC"
+check "${KIND_VALUES}" "KAFKA_PLAYERS_ADVANCED_DLQ_TOPIC"
+check "${KIND_VALUES}" "KAFKA_TOURNAMENT_COMPLETED_TOPIC"
+check "${KIND_VALUES}" "KAFKA_TOURNAMENT_COMPLETED_DLQ_TOPIC"
+! grep -qiE 'debezium.*PENDING|PENDING.*[Dd]ebezium' "${KIND_VALUES}" \
+  || { echo "FAIL: values.kind must not claim Debezium PENDING" >&2; fail=1; }
+
 SECRETS="${MANIFESTS_DIR}/01-local-secrets.yaml"
 check "${SECRETS}" "ranking-database-url"
 

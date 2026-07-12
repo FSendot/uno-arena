@@ -25,14 +25,23 @@ type streamRedis interface {
 	HGetAll(ctx context.Context, key string) *redis.MapStringStringCmd
 }
 
+// SessionInvalidationChecker is the durable Redis early-rejection surface.
+// Identity remains authoritative for command authorization.
+type SessionInvalidationChecker interface {
+	IsInvalidated(ctx context.Context, sessionID string) (bool, error)
+}
+
 // RedisLiveFeed consumes Room player feeds and Spectator View streams directly.
-// Hub remains the process-local control-state gate (invalidation/terminal) until
-// Kafka SessionInvalidated consumption lands — not a cross-replica claim.
+// Hub provides process-local wake closure; durable Redis invalidation is checked
+// on every player/control/authenticated-spectator admission and periodically while
+// SSE is open so a replica that misses Pub/Sub cannot retain a stale stream.
+// Anonymous spectator (empty sessionID) is unaffected.
 type RedisLiveFeed struct {
 	playerRDB       streamRedis
 	spectatorRDB    streamRedis
 	spectatorKS     SpectatorKeySpace
 	hub             *Hub
+	siStore         SessionInvalidationChecker
 	replayScanBound int
 }
 
@@ -54,6 +63,15 @@ func newRedisLiveFeed(playerRDB, spectatorRDB streamRedis, spectatorPrefix strin
 	}
 }
 
+// WithSessionInvalidationStore attaches the durable Redis invalidation checker.
+func (f *RedisLiveFeed) WithSessionInvalidationStore(store SessionInvalidationChecker) *RedisLiveFeed {
+	if f == nil {
+		return nil
+	}
+	f.siStore = store
+	return f
+}
+
 // SetReplayScanBound configures the physical Redis XRANGE scan cap (tests may lower it).
 func (f *RedisLiveFeed) SetReplayScanBound(n int) {
 	if n < 1 {
@@ -66,7 +84,7 @@ func (f *RedisLiveFeed) SetReplayScanBound(n int) {
 func (f *RedisLiveFeed) BeginSession(ctx context.Context, kind StreamKind, roomID, sessionID, playerID, lastEventID string) (LiveSession, error) {
 	switch kind {
 	case StreamControl:
-		return NewHubLiveFeed(f.hub).BeginSession(ctx, kind, roomID, sessionID, playerID, lastEventID)
+		return f.beginControl(ctx, roomID, sessionID, playerID, lastEventID)
 	case StreamPlayer:
 		return f.beginPlayer(ctx, roomID, sessionID, playerID, lastEventID)
 	case StreamSpectator:
@@ -76,9 +94,43 @@ func (f *RedisLiveFeed) BeginSession(ctx context.Context, kind StreamKind, roomI
 	}
 }
 
+func (f *RedisLiveFeed) denyIfSessionInvalidated(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	if f.hub.IsSessionInvalidated(sessionID) {
+		return fmt.Errorf("%w: session_invalidated", ErrStreamDenied)
+	}
+	if f.siStore == nil {
+		return nil
+	}
+	ok, err := f.siStore.IsInvalidated(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrLiveFeedUnavailable, err)
+	}
+	if ok {
+		return fmt.Errorf("%w: session_invalidated", ErrStreamDenied)
+	}
+	return nil
+}
+
+func (f *RedisLiveFeed) beginControl(ctx context.Context, roomID, sessionID, playerID, lastEventID string) (LiveSession, error) {
+	if err := f.denyIfSessionInvalidated(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	inner, err := NewHubLiveFeed(f.hub).BeginSession(ctx, StreamControl, roomID, sessionID, playerID, lastEventID)
+	if err != nil {
+		return nil, err
+	}
+	if f.siStore == nil || sessionID == "" {
+		return inner, nil
+	}
+	return newDurableControlSession(ctx, f, inner, sessionID), nil
+}
+
 func (f *RedisLiveFeed) beginPlayer(ctx context.Context, roomID, sessionID, playerID, lastEventID string) (LiveSession, error) {
-	if sessionID != "" && f.hub.IsSessionInvalidated(sessionID) {
-		return nil, fmt.Errorf("%w: session_invalidated", ErrStreamDenied)
+	if err := f.denyIfSessionInvalidated(ctx, sessionID); err != nil {
+		return nil, err
 	}
 	streamKey, err := PlayerFeedTargetStream(roomID)
 	if err != nil {
@@ -111,8 +163,9 @@ func (f *RedisLiveFeed) beginSpectator(ctx context.Context, roomID, sessionID, p
 	if f.hub.IsRoomTerminal(roomID) {
 		return nil, fmt.Errorf("%w: room_terminal", ErrStreamDenied)
 	}
-	if sessionID != "" && f.hub.IsSessionInvalidated(sessionID) {
-		return nil, fmt.Errorf("%w: session_invalidated", ErrStreamDenied)
+	// Authenticated spectator only; anonymous (empty sessionID) skips invalidation.
+	if err := f.denyIfSessionInvalidated(ctx, sessionID); err != nil {
+		return nil, err
 	}
 	gen, closed, err := f.loadSpectatorMeta(ctx, roomID)
 	if err != nil {
@@ -193,13 +246,14 @@ func (f *RedisLiveFeed) readAfterOpaqueID(
 	if !exists {
 		return false, nil, "", nil
 	}
+	markerValues := normalizeStreamValues(marker.Values)
 	if requirePlayerAudience {
-		if fieldString(marker.Values, "playerId") != sess.playerID ||
-			fieldString(marker.Values, "sessionId") != sess.sessionID {
+		if fieldString(markerValues, "playerId") != sess.playerID ||
+			fieldString(markerValues, "sessionId") != sess.sessionID {
 			return false, nil, "", nil
 		}
 	}
-	sess.seedFromMarker(marker.Values)
+	sess.seedFromMarker(markerValues)
 
 	bound := f.replayScanBound
 	if bound < 1 {
@@ -224,9 +278,10 @@ func (f *RedisLiveFeed) readAfterOpaqueID(
 	}
 	for _, m := range msgs {
 		cursor = m.ID
-		ev := streamMsgToEvent(m)
+		values := normalizeStreamValues(m.Values)
+		ev := streamValuesToEvent(m.ID, values)
 		if filter != nil {
-			keep, stop := filter(ev, m.Values)
+			keep, stop := filter(ev, values)
 			if stop {
 				if keep {
 					replay = append(replay, ev)
@@ -272,27 +327,187 @@ func isOpaqueRedisStreamID(id string) bool {
 }
 
 func streamMsgToEvent(m redis.XMessage) StreamEvent {
-	evName := fieldString(m.Values, "event")
-	data := fieldString(m.Values, "data")
+	return streamValuesToEvent(m.ID, normalizeStreamValues(m.Values))
+}
+
+func streamValuesToEvent(redisID string, values map[string]interface{}) StreamEvent {
+	evName := fieldString(values, "event")
+	data := fieldString(values, "data")
 	if data == "" {
 		data = "{}"
 	}
 	schema := 1
-	if sv := fieldString(m.Values, "schemaVersion"); sv != "" {
+	if sv := fieldString(values, "schemaVersion"); sv != "" {
 		if n, err := strconv.Atoi(sv); err == nil && n > 0 {
 			schema = n
 		}
 	}
-	closed := fieldString(m.Values, "closed") == "1"
+	closed := fieldString(values, "closed") == "1"
 	if closed && evName != "stream_closed" {
 		evName = "stream_closed"
 	}
 	// Physical Redis stream ID is the opaque SSE resume marker (Debezium sink owns IDs).
 	return StreamEvent{
-		ID:            m.ID,
+		ID:            redisID,
 		Event:         evName,
 		Data:          json.RawMessage(data),
 		SchemaVersion: schema,
+	}
+}
+
+// normalizeStreamValues expands Debezium Redis sink extended-format entries
+// ({key, value} plus UPPERCASE headers) into the flat field map used by filters/SSE.
+// Flat test-form entries (event/data/playerId/…) pass through unchanged.
+func normalizeStreamValues(values map[string]interface{}) map[string]interface{} {
+	if len(values) == 0 {
+		return map[string]interface{}{}
+	}
+	rawValue, hasExtended := values["value"]
+	if !hasExtended {
+		return values
+	}
+
+	out := make(map[string]interface{}, len(values)+8)
+	for k, v := range values {
+		if k == "key" || k == "value" {
+			continue
+		}
+		out[k] = v
+		// Extended format stores Kafka headers as UPPERCASE stream fields (e.g. ID).
+		if strings.EqualFold(k, "id") {
+			if fieldString(out, "eventId") == "" {
+				out["eventId"] = fmt.Sprint(v)
+			}
+		}
+	}
+
+	raw := strings.TrimSpace(fmt.Sprint(rawValue))
+	if raw == "" || raw == "<nil>" {
+		return out
+	}
+	envelope, ok := parseOutboxEnvelopeJSON(raw)
+	if !ok {
+		// Malformed extended value — fail closed (filters reject missing fields).
+		return out
+	}
+	liftOutboxEnvelope(out, envelope)
+	return out
+}
+
+func parseOutboxEnvelopeJSON(raw string) (map[string]interface{}, bool) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var top map[string]interface{}
+	if err := dec.Decode(&top); err != nil || top == nil {
+		return nil, false
+	}
+	// Connect JSON with schemas: { "schema": …, "payload": <envelope|row> }.
+	if p, ok := top["payload"]; ok {
+		if pm, ok := p.(map[string]interface{}); ok {
+			if looksLikeOutboxEnvelope(pm) {
+				return pm, true
+			}
+			// Raw CDC before/after envelope — unexpected after Outbox router.
+			if _, hasAfter := pm["after"]; hasAfter {
+				if _, hasOp := pm["op"]; hasOp {
+					return nil, false
+				}
+			}
+			if looksLikeOutboxEnvelope(top) {
+				return top, true
+			}
+			return pm, true
+		}
+	}
+	if looksLikeOutboxEnvelope(top) {
+		return top, true
+	}
+	return top, true
+}
+
+func looksLikeOutboxEnvelope(m map[string]interface{}) bool {
+	if m == nil {
+		return false
+	}
+	_, hasPayload := m["payload"]
+	_, hasData := m["data"]
+	_, hasEvent := m["event"]
+	_, hasEventID := m["eventId"]
+	_, hasSeq := m["sequence"]
+	_, hasSchema := m["schemaVersion"]
+	_, hasPlayer := m["playerId"]
+	return hasPayload || hasData || hasEvent || hasEventID || hasSeq || hasSchema || hasPlayer
+}
+
+func liftOutboxEnvelope(out, envelope map[string]interface{}) {
+	if envelope == nil {
+		return
+	}
+	copyScalarField(out, envelope, "eventId")
+	copyScalarField(out, envelope, "event")
+	copyScalarField(out, envelope, "schemaVersion")
+	copyScalarField(out, envelope, "sequence")
+	copyScalarField(out, envelope, "playerId")
+	copyScalarField(out, envelope, "sessionId")
+	copyScalarField(out, envelope, "closed")
+
+	if data := coerceJSONPayload(envelope["data"]); data != "" {
+		out["data"] = data
+	} else if data := coerceJSONPayload(envelope["payload"]); data != "" {
+		out["data"] = data
+	}
+}
+
+func copyScalarField(dst, src map[string]interface{}, key string) {
+	v, ok := src[key]
+	if !ok || v == nil {
+		return
+	}
+	switch t := v.(type) {
+	case string:
+		dst[key] = t
+	case json.Number:
+		dst[key] = t.String()
+	case float64:
+		if key == "schemaVersion" || key == "sequence" {
+			dst[key] = strconv.FormatInt(int64(t), 10)
+		} else {
+			dst[key] = fmt.Sprint(t)
+		}
+	case bool:
+		if t {
+			dst[key] = "true"
+		} else {
+			dst[key] = "false"
+		}
+	default:
+		dst[key] = fmt.Sprint(t)
+	}
+}
+
+func coerceJSONPayload(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case json.RawMessage:
+		return string(t)
+	case map[string]interface{}, []interface{}:
+		b, err := json.Marshal(t)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	case json.Number:
+		return t.String()
+	default:
+		b, err := json.Marshal(t)
+		if err != nil {
+			return fmt.Sprint(t)
+		}
+		return string(b)
 	}
 }
 
@@ -304,6 +519,8 @@ func fieldString(vals map[string]interface{}, key string) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	case json.Number:
+		return t.String()
 	default:
 		return fmt.Sprint(t)
 	}
@@ -442,11 +659,7 @@ func (s *redisLiveSession) loop(ctx context.Context) {
 		default:
 		}
 		if s.kind == StreamPlayer || s.kind == StreamControl {
-			if s.sessionID != "" && s.feed.hub.IsSessionInvalidated(s.sessionID) {
-				s.emitControl("session_invalidated", map[string]string{
-					"sessionId": s.sessionID,
-					"reason":    "session_invalidated",
-				})
+			if closed, failClosed := s.checkSessionInvalidation(ctx); closed || failClosed {
 				return
 			}
 		}
@@ -458,11 +671,7 @@ func (s *redisLiveSession) loop(ctx context.Context) {
 				})
 				return
 			}
-			if s.sessionID != "" && s.feed.hub.IsSessionInvalidated(s.sessionID) {
-				s.emitControl("session_invalidated", map[string]string{
-					"sessionId": s.sessionID,
-					"reason":    "session_invalidated",
-				})
+			if closed, failClosed := s.checkSessionInvalidation(ctx); closed || failClosed {
 				return
 			}
 		}
@@ -481,13 +690,14 @@ func (s *redisLiveSession) loop(ctx context.Context) {
 		for _, st := range streams {
 			for _, m := range st.Messages {
 				after = m.ID
-				ev := streamMsgToEvent(m)
+				values := normalizeStreamValues(m.Values)
+				ev := streamValuesToEvent(m.ID, values)
 				var keep, stop bool
 				switch s.kind {
 				case StreamPlayer:
-					keep, stop = s.filterPlayer(ev, m.Values)
+					keep, stop = s.filterPlayer(ev, values)
 				case StreamSpectator:
-					keep, stop = s.filterSpectator(ev, m.Values)
+					keep, stop = s.filterSpectator(ev, values)
 				default:
 					keep = true
 				}
@@ -525,4 +735,123 @@ func (s *redisLiveSession) emitControl(event string, data map[string]string) {
 		Data:          payload,
 		SchemaVersion: 1,
 	})
+}
+
+// checkSessionInvalidation returns (closedWithEvent, failClosedWithoutEvent).
+// Redis checker errors fail closed so a replica missing Pub/Sub cannot retain stale SSE.
+func (s *redisLiveSession) checkSessionInvalidation(ctx context.Context) (closed, failClosed bool) {
+	if s.sessionID == "" {
+		return false, false
+	}
+	if s.feed.hub.IsSessionInvalidated(s.sessionID) {
+		s.emitControl("session_invalidated", map[string]string{
+			"sessionId": s.sessionID,
+			"reason":    "session_invalidated",
+		})
+		return true, false
+	}
+	if s.feed.siStore == nil {
+		return false, false
+	}
+	ok, err := s.feed.siStore.IsInvalidated(ctx, s.sessionID)
+	if err != nil {
+		return false, true
+	}
+	if ok {
+		s.emitControl("session_invalidated", map[string]string{
+			"sessionId": s.sessionID,
+			"reason":    "session_invalidated",
+		})
+		return true, false
+	}
+	return false, false
+}
+
+// durableControlSession wraps Hub control SSE with periodic durable Redis rechecks.
+type durableControlSession struct {
+	inner     LiveSession
+	feed      *RedisLiveFeed
+	sessionID string
+	out       chan StreamEvent
+	cancelCh  chan struct{}
+}
+
+func newDurableControlSession(ctx context.Context, feed *RedisLiveFeed, inner LiveSession, sessionID string) *durableControlSession {
+	s := &durableControlSession{
+		inner:     inner,
+		feed:      feed,
+		sessionID: sessionID,
+		out:       make(chan StreamEvent, 16),
+		cancelCh:  make(chan struct{}),
+	}
+	go s.loop(ctx)
+	return s
+}
+
+func (s *durableControlSession) Events() <-chan StreamEvent { return s.out }
+func (s *durableControlSession) Replay() []StreamEvent      { return s.inner.Replay() }
+func (s *durableControlSession) Close() {
+	select {
+	case <-s.cancelCh:
+	default:
+		close(s.cancelCh)
+	}
+	s.inner.Close()
+}
+
+func (s *durableControlSession) loop(ctx context.Context) {
+	defer close(s.out)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	innerCh := s.inner.Events()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.cancelCh:
+			return
+		case <-ticker.C:
+			if s.feed.hub.IsSessionInvalidated(s.sessionID) {
+				s.emitInvalidated()
+				return
+			}
+			ok, err := s.feed.siStore.IsInvalidated(ctx, s.sessionID)
+			if err != nil {
+				return
+			}
+			if ok {
+				s.emitInvalidated()
+				return
+			}
+		case ev, ok := <-innerCh:
+			if !ok {
+				return
+			}
+			select {
+			case <-s.cancelCh:
+				return
+			case s.out <- ev:
+				if ev.Event == "session_invalidated" {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (s *durableControlSession) emitInvalidated() {
+	payload, _ := json.Marshal(map[string]string{
+		"sessionId": s.sessionID,
+		"reason":    "session_invalidated",
+	})
+	select {
+	case <-s.cancelCh:
+	case s.out <- StreamEvent{
+		ID:            "ctrl_session_invalidated",
+		Event:         "session_invalidated",
+		Data:          payload,
+		SchemaVersion: 1,
+	}:
+	default:
+	}
 }

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -210,7 +211,48 @@ func TestOutOfOrderSlotResultsThenComplete(t *testing.T) {
 	}
 }
 
-func TestFinalCompletesTournamentWithChampion(t *testing.T) {
+func TestFinalMatchDoesNotEmitPlayersAdvanced(t *testing.T) {
+	tr := mustCreate(t, "t-final-no-pa", 8)
+	for i := 0; i < 8; i++ {
+		mustRegister(t, tr, PlayerID("p"+itoa(i)))
+	}
+	mustCloseAndSeed(t, tr, 1)
+	mustProvision(t, tr, 1)
+	round, _ := tr.Round(1)
+	if !round.IsFinal {
+		t.Fatal("expected final")
+	}
+	base := time.Date(2026, 7, 10, 18, 0, 0, 0, time.UTC)
+	slot := round.Slots[0]
+	standings := rankedStandings(slot.SeededPlayers, base)
+	standings[0].MatchWins = 2
+
+	out := tr.RecordMatchResult(RecordMatchResultCommand{
+		CommandID:         "final-res",
+		EventID:           "final-evt",
+		RoomID:            slot.RoomID,
+		RoundNumber:       1,
+		SlotID:            slot.SlotID,
+		CompletionVersion: 1,
+		Standings:         standings,
+	})
+	if out.Kind != OutcomeAccepted {
+		t.Fatalf("record: %+v", out)
+	}
+	if hasFact(out.Facts, FactPlayersAdvanced) {
+		t.Fatal("final match must not emit PlayersAdvanced")
+	}
+	if !hasFact(out.Facts, FactTournamentMatchResultRecorded) {
+		t.Fatal("final must still record match result")
+	}
+	round, _ = tr.Round(1)
+	if len(round.Slots[0].Advancing) != len(standings) {
+		t.Fatalf("final slot must store full ranked order, got %d want %d",
+			len(round.Slots[0].Advancing), len(standings))
+	}
+}
+
+func TestFinalCompletesTournamentWithFinalStandings(t *testing.T) {
 	tr := mustCreate(t, "t-final", 8)
 	for i := 0; i < 8; i++ {
 		mustRegister(t, tr, PlayerID("p"+itoa(i)))
@@ -246,14 +288,204 @@ func TestFinalCompletesTournamentWithChampion(t *testing.T) {
 	if out.Kind != OutcomeAccepted || !hasFact(out.Facts, FactTournamentCompleted) {
 		t.Fatalf("complete tournament: %+v", out)
 	}
-	champ := factData(out.Facts, FactTournamentCompleted, "championId")
-	want, _ := ChampionFromStandings(standings)
-	if champ != string(want) || tr.Champion() != want {
-		t.Fatalf("champion=%s want %s", champ, want)
+	if factData(out.Facts, FactTournamentCompleted, "championId") != "" {
+		t.Fatal("TournamentCompleted must not carry championId")
+	}
+	ranked, err := RankStandings(standings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIDs := make([]PlayerID, len(ranked))
+	for i := range ranked {
+		wantIDs[i] = ranked[i].PlayerID
+	}
+	got := factData(out.Facts, FactTournamentCompleted, "finalStandings")
+	if got != joinPlayerIDs(wantIDs) {
+		t.Fatalf("finalStandings=%s want %s", got, joinPlayerIDs(wantIDs))
+	}
+	if tr.Champion() != wantIDs[0] {
+		t.Fatalf("champion derived from finalStandings[0]=%s want %s", tr.Champion(), wantIDs[0])
 	}
 	if tr.Phase() != PhaseCompleted {
 		t.Fatalf("phase=%s", tr.Phase())
 	}
+}
+
+func TestCompleteTournament_RejectsInvalidFinalStandingsAtomically(t *testing.T) {
+	cases := []struct {
+		name      string
+		mutate    func(slot *BracketSlot)
+		wantPhase TournamentPhase
+	}{
+		{
+			name: "empty",
+			mutate: func(slot *BracketSlot) {
+				slot.Advancing = nil
+			},
+		},
+		{
+			name: "duplicates",
+			mutate: func(slot *BracketSlot) {
+				slot.Advancing = []PlayerID{"p0", "p0", "p1"}
+			},
+		},
+		{
+			name: "more_than_ten",
+			mutate: func(slot *BracketSlot) {
+				ids := make([]PlayerID, 11)
+				for i := range ids {
+					ids[i] = PlayerID("x" + itoa(i))
+				}
+				slot.Advancing = ids
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := mustCreate(t, TournamentID("t-bad-"+tt.name), 4)
+			for i := 0; i < 4; i++ {
+				mustRegister(t, tr, PlayerID("p"+itoa(i)))
+			}
+			mustCloseAndSeed(t, tr, 1)
+			mustProvision(t, tr, 1)
+			round, _ := tr.Round(1)
+			base := time.Date(2026, 7, 10, 18, 30, 0, 0, time.UTC)
+			slot := round.Slots[0]
+			standings := rankedStandings(slot.SeededPlayers, base)
+			out := tr.RecordMatchResult(RecordMatchResultCommand{
+				CommandID: "fr", EventID: "fe", RoomID: slot.RoomID, RoundNumber: 1, SlotID: slot.SlotID,
+				CompletionVersion: 1, Standings: standings,
+			})
+			if out.Kind != OutcomeAccepted {
+				t.Fatalf("record: %+v", out)
+			}
+			out = tr.CompleteRound(CompleteRoundCommand{CommandID: "cr", RoundNumber: 1})
+			if out.Kind != OutcomeAccepted {
+				t.Fatalf("complete round: %+v", out)
+			}
+			round, _ = tr.Round(1)
+			tt.mutate(&round.Slots[0])
+			out = tr.CompleteTournament(CompleteTournamentCommand{CommandID: "ct"})
+			if out.Kind != OutcomeRejected {
+				t.Fatalf("want reject, got %+v", out)
+			}
+			if tr.Phase() == PhaseCompleted {
+				t.Fatal("invalid final order must not complete tournament")
+			}
+		})
+	}
+}
+
+func TestRecordMatchResult_NonFinalAdvancersCardinality(t *testing.T) {
+	base := time.Date(2026, 7, 10, 20, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name        string
+		standingsFn func(seeded []PlayerID) []PlayerMatchStanding
+		wantLen     int
+		wantReject  bool
+	}{
+		{
+			name: "three_eligible",
+			standingsFn: func(seeded []PlayerID) []PlayerMatchStanding {
+				return rankedStandings(seeded, base)
+			},
+			wantLen: 3,
+		},
+		{
+			name: "two_eligible_after_forfeits",
+			standingsFn: func(seeded []PlayerID) []PlayerMatchStanding {
+				s := rankedStandings(seeded, base)
+				for i := 2; i < len(s); i++ {
+					s[i].Forfeited = true
+				}
+				return s
+			},
+			wantLen: 2,
+		},
+		{
+			name: "one_eligible_after_forfeits",
+			standingsFn: func(seeded []PlayerID) []PlayerMatchStanding {
+				s := rankedStandings(seeded, base)
+				for i := 1; i < len(s); i++ {
+					s[i].Forfeited = true
+				}
+				return s
+			},
+			wantLen: 1,
+		},
+		{
+			name: "zero_eligible_rejected",
+			standingsFn: func(seeded []PlayerID) []PlayerMatchStanding {
+				s := rankedStandings(seeded, base)
+				for i := range s {
+					s[i].Forfeited = true
+				}
+				return s
+			},
+			wantReject: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := mustCreate(t, TournamentID("t-card-"+tt.name), 12)
+			for i := 0; i < 12; i++ {
+				mustRegister(t, tr, PlayerID("p"+itoa(i)))
+			}
+			mustCloseAndSeed(t, tr, 1)
+			mustProvision(t, tr, 1)
+			round, _ := tr.Round(1)
+			if round.IsFinal {
+				t.Fatal("expected non-final")
+			}
+			slot := round.Slots[0]
+			standings := tt.standingsFn(slot.SeededPlayers)
+			out := tr.RecordMatchResult(RecordMatchResultCommand{
+				CommandID: "res", EventID: "evt", RoomID: slot.RoomID, RoundNumber: 1, SlotID: slot.SlotID,
+				CompletionVersion: 1, Standings: standings,
+			})
+			if tt.wantReject {
+				if out.Kind != OutcomeRejected {
+					t.Fatalf("want reject, got %+v", out)
+				}
+				if hasFact(out.Facts, FactPlayersAdvanced) {
+					t.Fatal("zero eligible must not emit PlayersAdvanced")
+				}
+				return
+			}
+			if out.Kind != OutcomeAccepted || !hasFact(out.Facts, FactPlayersAdvanced) {
+				t.Fatalf("record: %+v", out)
+			}
+			got := splitCSVTest(factData(out.Facts, FactPlayersAdvanced, "advancingPlayerIds"))
+			if len(got) != tt.wantLen {
+				t.Fatalf("advancers=%v want len %d", got, tt.wantLen)
+			}
+			seen := map[string]struct{}{}
+			for _, id := range got {
+				if id == "" {
+					t.Fatal("empty advancer id")
+				}
+				if _, dup := seen[id]; dup {
+					t.Fatalf("duplicate advancer %s", id)
+				}
+				seen[id] = struct{}{}
+			}
+		})
+	}
+}
+
+func splitCSVTest(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func TestNextRoundWhenMoreThanTenRemain(t *testing.T) {

@@ -10,7 +10,7 @@ Clients use the BFF only.
 - This implementation uses the repo-owned simple CLI as the sole client/test interface; a graphical interface is deferred and must preserve the BFF-only REST/SSE boundary.
 - OpenAPI should define the BFF HTTP surface, including player/spectator snapshot routes (player hand/`discardTop` as camelCase `Card` DTOs), SessionBearer auth requirements, spectator invalid-token `401`, and SSE `409 snapshot_required`.
 - AsyncAPI should define the Kafka topic contracts (including `tournament.completed` and `ranking.leaderboard_snapshot_published`). The Kafka envelope is authoritative for production; the offline HTTP bridge is a documented destination-specific transform of the same event names and canonical domain fields, not an identical body. SSE framing belongs in OpenAPI, not AsyncAPI.
-- Production requires Kafka adapters for those topics; the current offline capability path does not claim Kafka is wired.
+- Production requires Kafka adapters for those topics. Durable consuming services implement them when `KAFKA_BROKERS` is configured; the offline capability path retains HTTP bridges and does not claim Kafka is wired. Kind live end-to-end CDC proofs remain explicit optional targets.
 
 ### Command Envelope
 
@@ -78,7 +78,7 @@ Ordered topic partition counts are immutable after creation. Production planning
 
 Production topics use replication factor 3 and `min.insync.replicas=2` across at least three rack/zone-aware brokers. All application, CDC, DLQ, replay, and administration producers use `acks=all` with idempotence and ordering-safe retries; unclean leader election is disabled. Connect config/offset/status topics, DLQs, and versioned replacements use the same durability floor. Local single-replica Kafka verifies behavior only and is rejected by production configuration validation.
 
-Production retention defaults are 6 hours for `room.spectator-safe.events`, 24 hours for `room.gameplay.metrics` and `identity.session.invalidated`, 7 days for other business/low-volume projection topics, and 30 days for consumer-owned DLQs. A superseded topology topic remains for at least 7 days after verified cutover and until replay/quarantine/rollback references clear. Kafka is not an audit store: expiry routes recovery to sanitized snapshots or a context-owned backfill, and consumers never advance across an unexplained gap. Local `kind` may shorten retention for disk limits without claiming those recovery windows.
+Production retention defaults are 6 hours for `room.spectator-safe.events`, 24 hours for `room.gameplay.metrics` and `identity.session.invalidated`, 7 days for other business/low-volume projection topics (including rebuild-request control topics), and 30 days for consumer-owned DLQs. A superseded topology topic remains for at least 7 days after verified cutover and until replay/quarantine/rollback references clear. Kafka is not an audit store: expiry routes recovery to context-owned sanitized snapshot/backfill APIs triggered by bounded rebuild-request topics (`spectator.projection.rebuild_requested`, `analytics.projection.rebuild_requested`), and consumers never advance across an unexplained gap. Local `kind` may shorten retention for disk limits without claiming those recovery windows.
 
 - Each context owns its own topics and consumers.
 - Business streams are separated from projection streams.
@@ -100,7 +100,9 @@ Examples:
 - `ranking.player_rating_updated`
 - `ranking.leaderboard_snapshot_published`
 - `spectator.room_projection.updated`
+- `spectator.projection.rebuild_requested`
 - `analytics.public_projection.updated`
+- `analytics.projection.rebuild_requested`
 
 ## Transactional Outbox CDC
 
@@ -122,6 +124,7 @@ Postgres-backed contexts publish Kafka integration events through Debezium rathe
 - A terminal processing failure is published to `<source-topic>.<consumer>.dlq` with the unchanged source envelope plus sanitized operational metadata. The consumer waits for the DLQ acknowledgment before committing the source offset.
 - DLQ publication is itself at least once; duplicate DLQ records are deduped by source topic/partition/offset and consumer group.
 - Ordered consumers persist aggregate quarantine state. Later records for the affected aggregate key are held or routed to quarantine until replay/rebuild restores the missing sequence; unrelated aggregate keys continue.
+- Spectator/Analytics post-retention rebuild uses Kafka rebuild-request topics plus context-owned internal snapshot/backfill APIs (ADR-0039; implemented, rebuilder Deployments disabled pending live recovery tests). Held post-gap records remain owned by the consumer quarantine/DLQ; after an atomic snapshot/generation rebuild they are replayed in sequence, and quarantine releases only after continuity is proven. Gaps are never silently skipped.
 - On success, consumers atomically commit their owned-state mutation, the channel's documented idempotency key, and any aggregate sequence/version checkpoint before committing the Kafka offset.
 - Exact duplicates are no-ops only when key/version and immutable payload identity agree. Sequence gaps, regressions, and conflicting duplicates quarantine the affected aggregate.
 - Dedupe rows remain for at least source-topic retention plus the maximum DLQ/replay window. Indefinite replay relies on compact aggregate checkpoints or domain uniqueness constraints rather than an unbounded event-ID table.
@@ -133,6 +136,7 @@ Postgres-backed contexts publish Kafka integration events through Debezium rathe
 | From | To | Pattern | Rationale | Failure semantics |
 | --- | --- | --- | --- | --- |
 | Client | Realtime Gateway / BFF | REST commands + SSE streams | Single external boundary; compact commands and realtime updates | REST retries use `commandId`; SSE resumes from last event id/sequence |
+| Realtime Gateway / BFF | Room Gameplay | `GET /v1/rooms` → `GET /internal/v1/rooms/public-list` | Canonical public room list / casual matchmaking read for CLI; BFF-only edge | Gateway↔Room credential; public summaries only; opaque Room HMAC cursor; default 50 / max 100; no player bearer |
 | Realtime Gateway / BFF | Redis rate-limit buckets | Per-IP and authenticated per-user throttling | Protect public edge before services receive abusive traffic | Fail closed for abusive bursts; fail open only for low-risk spectator/reporting reads if policy allows |
 | BFF | Identity | OIDC-backed authentication plus synchronous authoritative Postgres validation for mutations | Keep provider claims inside Identity and establish the authorization linearization point with a signed internal principal | Fail closed on provider, discovery/JWKS, Identity, or Postgres failure; cache may reject early but never authorize positively |
 | Identity | BFF | `identity.session.invalidated` control event | Close old SSE streams for single-active-session | Broadcast to gateway instances; stale streams are closed on receipt and old commands are rejected |
@@ -145,15 +149,19 @@ Postgres-backed contexts publish Kafka integration events through Debezium rathe
 | Room Gameplay | Game Integrity | Synchronous append/deck API | Log-before-broadcast requires durable append before publication | If append fails, command fails before broadcast; if local commit fails after append, recovery reconciles from KurrentDB |
 | Room Gameplay | Debezium Server → Redis Streams → BFF/player feed | Transactional realtime outbox + WAL CDC + snapshot query | Room commits ordered player-safe entries with room state; one Redis-sink pipeline for the Room context database delivers them without polling or a dual write | At-least-once feed delivery; dedupe by event/sequence; if history is trimmed, fetch the authoritative player snapshot; no raw Game Integrity access |
 | Room Gameplay | Spectator View | `room.spectator-safe.events` | Spectator projection is rebuilt from already safe room facts | Consumers dedupe by event id and sequence; unsafe events are dropped; new admission allowed in `waiting`/`locked`/`in_progress`; denied in `completed`/`cancelled`; existing streams close on `RoomCompleted`/`RoomCancelled` for the complete match/room |
+| Spectator live consumer / ops | Spectator projection-rebuilder | `spectator.projection.rebuild_requested` | Bounded post-retention/quarantine rebuild without outbox polling | Keyed by `roomId`; idempotent by `(recoveryJobId, roomId, failedCheckpoint)`; worker DLQ is `spectator.projection.rebuild_requested.spectator-view.dlq`; worker implemented, Deployment disabled pending live recovery tests |
+| Spectator projection-rebuilder | Room Gameplay | `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` | Authoritative sanitized recovery source after Kafka expiry | Credential `ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`; response is `SnapshotSanitized`-compatible public state + sequence + `resumeCheckpoint` only; Redis Lua CAS/fenced generation swap + atomic idempotency/quarantine release must not regress live apply |
 | Spectator View | BFF/spectator feed | Atomic Redis projection update + Redis Streams | Spectator View updates projection, dedupe/sequence state, and outgoing spectator entry in one Redis transaction or Lua script | Resume from spectator stream sequence; if history is trimmed, fetch the spectator snapshot; never fall back to player or Game Integrity data |
 | Room Gameplay | Analytics | `room.gameplay.metrics` | Gameplay-level metrics without private facts | Ad-hoc metrics are anonymized; public tournament metrics may be more granular |
 | Room Gameplay | Ranking | `room.game.completed` | Casual Elo source for completed non-abandoned ad-hoc games | Ranking filters by `roomType` and `isAbandoned`, and dedupes by `(playerId, gameId)` |
 | Room Gameplay | Tournament Orchestration | `room.match.completed` | Tournament advancement consumes authoritative match facts asynchronously | Tournament validates room-slot mapping and dedupes by `(roomId, completionVersion)` |
 | Tournament Orchestration | Room Gameplay | Internal room provisioning command | Tournament owns fanout; Room Gameplay owns room creation | Idempotent by `(tournamentId, roundNumber, slotId)`; retries/DLQ by provisioning batch |
 | Tournament Orchestration | Redis rate-limit/backpressure buckets | Per-tournament command limits and worker admission control | Avoid thundering-herd fanout overwhelming Room Gameplay or Kafka | Workers slow or quarantine batches; authoritative tournament state stays in Postgres |
-| Tournament Orchestration | Ranking | Tournament placement events | Tournament placement rating is not casual Elo | Ranking dedupes by `(playerId, tournamentId, placementEventId)` |
+| Tournament Orchestration | Ranking | `tournament.players.advanced`, `tournament.completed` | Advancement depth and ordered final standings feed a separate tournament-placement rating; Tournament publishes no delta | Ranking applies each fact atomically, uses the upstream `eventId` as `placementEventId`, and isolates terminal failures in the source-topic Ranking DLQ without tournament-wide quarantine |
 | Tournament Orchestration | Analytics | Public tournament events | Public participation/progression stats | Analytics lag does not block round advancement |
 | Ranking | Analytics | Public rating facts/snapshots | Public reporting without querying Ranking DB | Analytics dedupes by upstream event id |
+| Analytics live consumer / ops | Analytics projection-rebuilder | `analytics.projection.rebuild_requested` | Bounded post-retention/quarantine backfill without outbox polling | Keyed by `recoveryJobId`; idempotent by `(recoveryJobId, sourceTopic, pageCursor)`; paired checkpoint and/or occurredAt range required; worker DLQ is `analytics.projection.rebuild_requested.analytics.dlq`; worker implemented, Deployment disabled pending live recovery tests |
+| Analytics projection-rebuilder | Room / Tournament / Ranking | `POST /internal/v1/rooms/analytics-backfill`, `POST /internal/v1/tournaments/analytics-backfill`, `POST /internal/v1/rankings/analytics-backfill` | Context-owned safe backfill of the nine Analytics-consumed topics | Scoped Analytics credentials vs producer API secrets; producer-owned HMAC cursors; producer page default 100 / hard max 1000 (worker default 1000); read-only append-only outbox pages; durable ClickHouse generation/lease/clone + active/building dual-write; ClickHouse non-transactional check-then-act acknowledged |
 
 ## Fallback Modeling Rule
 
@@ -183,6 +191,7 @@ This keeps Kafka-heavy saga flows explicit without polluting the domain event ca
 | Room Gameplay -> Tournament Orchestration `MatchCompleted` | Kafka redelivery; Tournament dedupes by `(roomId, completionVersion)` | `TournamentResultQuarantined` for conflicting slot/result | Result recorded, duplicate ignored, or quarantined |
 | Room Gameplay -> Ranking `GameCompleted` | Kafka redelivery; Ranking dedupes by `(playerId, gameId)` | none unless a future rating correction policy is introduced | Rating applied, ignored by eligibility filter, or duplicate ignored |
 | Projection worker consumes unsafe/private event | Drop and flag event | `ProjectionEventQuarantined` when policy/schema violation must be reviewed | Event enters the consumer-owned DLQ; affected aggregate is quarantined, while unrelated aggregate keys continue |
+| Spectator/Analytics exceed Kafka retention or need contiguous rebuild | Emit rebuild-request; worker calls context-owned snapshot/backfill API; replay held quarantine records | `ProjectionEventQuarantined` remains until continuity proven | Quarantine releases only after snapshot/backfill + held-record continuity; never skip a gap; rebuild job failures enter worker-owned DLQ |
 | Any Kafka consumer exhausts retry budget | Publish to consumer-owned DLQ | Existing business fallback event only when the domain process itself changes | DLQ acknowledged before source offset commit; ordered aggregate quarantined, unrelated keys continue |
 | BFF receives `SessionInvalidated` | Broadcast to all gateway instances; close matching streams | none unless stream close fails repeatedly and becomes operational incident | Old streams closed or old commands rejected by session checks |
 
@@ -202,8 +211,10 @@ The successful Identity Postgres validation is the authorization linearization p
 
 - Game Integrity exposes an internal-only audit and replay API.
 - Room Gameplay exposes internal calls to the integrity service before broadcast.
+- Room Gameplay exposes internal spectator-recovery-snapshot and analytics-backfill APIs for Spectator/Analytics projection rebuilders (ADR-0039); Tournament and Ranking expose matching analytics-backfill APIs for their Analytics-consumed topics.
 - Tournament Orchestration consumes room completion facts asynchronously.
-- Analytics and Spectator View should consume published safe facts, not scrape internal databases.
+- Analytics and Spectator View consume published safe facts and, for post-retention recovery, call those context-owned APIs rather than scraping internal databases or polling outboxes.
+- Rebuild-request topics and internal recovery APIs are not BFF/OpenAPI surfaces.
 
 ## Contract Intent
 
@@ -269,6 +280,8 @@ The successful Identity Postgres validation is the authorization linearization p
 
 `tournament.players.advanced` is produced by Tournament Orchestration after it validates a room result and applies the advancement rule.
 
+For Ranking, `roundNumber` is the achieved advancement depth of every player in `advancingPlayerIds`. Ranking calculates the rating effect; the event never carries a delta.
+
 ```json
 {
   "eventId": "evt_...",
@@ -280,6 +293,20 @@ The successful Identity Postgres validation is the authorization linearization p
   "advancingPlayerIds": ["p1", "p2", "p3"],
   "rule": "match_wins_card_points_completion_time",
   "occurredAt": "2026-05-17T12:00:02Z"
+}
+```
+
+`tournament.completed` publishes complete final-room standings in placement order. Array position is the final placement (`1` for the first entry); Ranking again calculates the rating effect and uses the event `eventId` as each player's `placementEventId`.
+
+```json
+{
+  "eventId": "evt_final_...",
+  "eventType": "TournamentCompleted",
+  "schemaVersion": 1,
+  "tournamentId": "t_1",
+  "finalStandings": ["p1", "p2", "p3"],
+  "completionReason": "final_room_completed",
+  "occurredAt": "2026-05-17T12:30:00Z"
 }
 ```
 

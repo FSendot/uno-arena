@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Explicit, networked Tournament Postgres store integration against kind.
+# Explicit, networked Tournament Postgres integration against kind.
 # Creates an ephemeral DB named unoarena_tournament_test_<random>, port-forwards
 # postgres-tournament (local port 0), runs make test-tournament-integration as
-# tournament_runtime against ONLY that DB, then terminates backends + DROP DATABASE.
+# tournament_runtime against ONLY that DB (store + main-package service lanes),
+# then terminates backends + DROP DATABASE.
 # Never accepts caller-supplied database names. Never applies/resets/deploys.
 # Cleanup touches only this run's DB and this script's child port-forward.
 set -euo pipefail
@@ -173,7 +174,7 @@ done
 # Always point at this script's temp DB + port-forward — never reuse a caller URL.
 export TOURNAMENT_POSTGRES_URL="postgres://${RUNTIME_USER}:${RUNTIME_PASS}@127.0.0.1:${LOCAL_PORT}/${DB_NAME}?sslmode=disable"
 
-echo "running Tournament store integration against database ${DB_NAME} on 127.0.0.1:${LOCAL_PORT}"
+echo "running Tournament store + main-package service integration against database ${DB_NAME} on 127.0.0.1:${LOCAL_PORT}"
 cd "${REPO_ROOT}"
 make test-tournament-integration
 echo "ok kind-test-tournament-integration"

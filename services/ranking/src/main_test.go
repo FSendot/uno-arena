@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"unoarena/services/ranking/domain"
+	"unoarena/services/ranking/store"
 )
 
 const testInternalCredential = "test-internal-credential"
@@ -104,6 +105,7 @@ func TestAtomicGameCompletedAllParticipants(t *testing.T) {
 		Entries []struct {
 			PlayerID string `json:"playerId"`
 			Rating   int    `json:"rating"`
+			Rank     int    `json:"rank"`
 		} `json:"entries"`
 	}
 	_ = json.NewDecoder(w.Body).Decode(&board)
@@ -224,13 +226,71 @@ func TestConcurrentGameCompletedRace(t *testing.T) {
 	}
 }
 
+func TestTournamentPlacementRejectsCallerDelta(t *testing.T) {
+	srv := newTestServer(t)
+	mux := srv.routes()
+	for _, delta := range []any{100, 0, nil} {
+		b, _ := json.Marshal(map[string]any{
+			"commandId": "cmd_delta", "eventId": "evt_delta", "playerId": "p1",
+			"tournamentId": "t1", "placementEventId": "pe_delta",
+			"placement": 1, "reason": "tournament_final_standing",
+			"delta": delta,
+		})
+		req := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/tournament-placements", bytes.NewReader(b)))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("delta=%v: status=%d want 400 body=%s", delta, w.Code, w.Body.String())
+		}
+		resp := decodeJSON(t, w)
+		if resp["code"] != "bad_request" {
+			t.Fatalf("delta=%v: code=%v want bad_request body=%+v", delta, resp["code"], resp)
+		}
+	}
+}
+
+func TestTournamentPlacementPolicyOwnedWithoutDelta(t *testing.T) {
+	srv := newTestServer(t)
+	mux := srv.routes()
+
+	advBody, _ := json.Marshal(map[string]any{
+		"commandId": "cmd_adv", "eventId": "evt_adv", "playerId": "p1",
+		"tournamentId": "t1", "placementEventId": "pe_adv",
+		"roundNumber": 2, "reason": "tournament_advancement",
+	})
+	advReq := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/tournament-placements", bytes.NewReader(advBody)))
+	advW := httptest.NewRecorder()
+	mux.ServeHTTP(advW, advReq)
+	if advW.Code != http.StatusOK {
+		t.Fatalf("advancement: %d body=%s", advW.Code, advW.Body.String())
+	}
+	if kind := decodeJSON(t, advW)["kind"]; kind != "accepted" {
+		t.Fatalf("advancement kind=%v", kind)
+	}
+
+	finalBody, _ := json.Marshal(map[string]any{
+		"commandId": "cmd_final", "eventId": "evt_final", "playerId": "p1",
+		"tournamentId": "t1", "placementEventId": "pe_final",
+		"placement": 1, "reason": "tournament_final_standing",
+	})
+	finalReq := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/tournament-placements", bytes.NewReader(finalBody)))
+	finalW := httptest.NewRecorder()
+	mux.ServeHTTP(finalW, finalReq)
+	if finalW.Code != http.StatusOK {
+		t.Fatalf("final standing: %d body=%s", finalW.Code, finalW.Body.String())
+	}
+	if kind := decodeJSON(t, finalW)["kind"]; kind != "accepted" {
+		t.Fatalf("final standing kind=%v", kind)
+	}
+}
+
 func TestTournamentPlacementAndHistory(t *testing.T) {
 	srv := newTestServer(t)
 	mux := srv.routes()
 	b, _ := json.Marshal(map[string]any{
 		"commandId": "cmd_t1", "eventId": "evt_t1", "playerId": "p1",
 		"tournamentId": "t1", "placementEventId": "pe1",
-		"placement": 1, "delta": 25, "reason": "tournament_placement",
+		"placement": 1, "reason": "tournament_final_standing",
 	})
 	req := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/tournament-placements", bytes.NewReader(b)))
 	w := httptest.NewRecorder()
@@ -385,7 +445,7 @@ func TestTournamentPlacementPropagatesHeaderCorrelation(t *testing.T) {
 	b, _ := json.Marshal(map[string]any{
 		"commandId": "cmd_t", "eventId": "evt_t", "playerId": "p1",
 		"tournamentId": "t1", "placementEventId": "pe1",
-		"placement": 1, "delta": 10, "reason": "tournament_placement",
+		"placement": 1, "reason": "tournament_final_standing",
 	})
 	req := withCred(httptest.NewRequest(http.MethodPost, "/internal/v1/rankings/tournament-placements", bytes.NewReader(b)))
 	req.Header.Set("X-Correlation-Id", "header-place")
@@ -433,8 +493,12 @@ func (c captureApp) ApplyTournamentPlacement(ctx context.Context, req Tournament
 	return c.store().ApplyTournamentPlacement(ctx, req)
 }
 
-func (c captureApp) Leaderboard(ctx context.Context, boardType domain.RatingSourceType) ([]domain.LeaderboardEntry, error) {
-	return c.store().Leaderboard(ctx, boardType)
+func (c captureApp) ApplyTournamentPerformance(ctx context.Context, req TournamentPerformanceRequest) (TournamentPerformanceResult, error) {
+	return c.store().ApplyTournamentPerformance(ctx, req)
+}
+
+func (c captureApp) LeaderboardPage(ctx context.Context, boardType domain.RatingSourceType, cursor string, limit int) (store.LeaderboardPage, error) {
+	return c.store().LeaderboardPage(ctx, boardType, cursor, limit)
 }
 
 func (c captureApp) History(ctx context.Context, playerID domain.PlayerID) ([]domain.RatingHistoryEntry, bool, error) {
@@ -443,4 +507,12 @@ func (c captureApp) History(ctx context.Context, playerID domain.PlayerID) ([]do
 
 func (c captureApp) RebuildStatus(ctx context.Context) (RebuildStatus, error) {
 	return c.store().RebuildStatus(ctx)
+}
+
+func (c captureApp) RebuildLeaderboardProjection(ctx context.Context, boardType domain.RatingSourceType) error {
+	return c.store().RebuildLeaderboardProjection(ctx, boardType)
+}
+
+func (c captureApp) ApplyPlayerRatingUpdated(ctx context.Context, evt PlayerRatingUpdatedEvent) error {
+	return c.store().ApplyPlayerRatingUpdated(ctx, evt)
 }

@@ -51,9 +51,42 @@ check "${CHART}/values.kind.yaml" "REDIS_URL"
 check "${CHART}/values.kind.yaml" "6379/5"
 check "${CHART}/values.kind.yaml" "SPECTATOR_REDIS_STREAM_MAXLEN"
 check "${CHART}/values.kind.yaml" "uno-arena-local-credentials"
+check "${CHART}/values.kind.yaml" "KAFKA_BROKERS"
+check "${CHART}/values.kind.yaml" "kafka.uno-arena.svc.cluster.local:9092"
+check "${CHART}/values.kind.yaml" "KAFKA_CONSUMER_GROUP"
+check "${CHART}/values.kind.yaml" "KAFKA_SPECTATOR_SAFE_TOPIC"
+check "${CHART}/values.kind.yaml" "KAFKA_SPECTATOR_SAFE_DLQ_TOPIC"
+check "${CHART}/values.kind.yaml" "projectionRebuilder"
+# Kind keeps rebuilder disabled: structure-only lane, no live recovery proof.
+if ! grep -A2 '^projectionRebuilder:' "${CHART}/values.kind.yaml" | grep -q 'enabled: false'; then
+  echo "FAIL: values.kind.yaml must keep projectionRebuilder.enabled=false" >&2
+  fail=1
+fi
+check "${CHART}/values.kind.yaml" "ROOM_GAMEPLAY_URL"
+check "${CHART}/values.kind.yaml" "ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL"
+check "${CHART}/values.kind.yaml" "KAFKA_PROJECTION_REBUILD_TOPIC"
+check "${CHART}/values.yaml" "enabled: false"
 
 SECRETS="${MANIFESTS_DIR}/01-local-secrets.yaml"
 check "${SECRETS}" "spectator-view-internal-credential"
+check "${SECRETS}" "room-spectator-recovery-service-credential"
+
+# Kind render omits rebuilder; privilege checks use an explicit enable flip only.
+if command -v helm >/dev/null 2>&1; then
+  kind_out="$(helm template spectator-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
+  ! echo "${kind_out}" | grep -q 'spectator-projection-rebuilder' \
+    || { echo "FAIL: kind render must omit projection-rebuilder while disabled" >&2; fail=1; }
+  reb_out="$(helm template spectator-kind-rebuilder "${CHART}" -f "${CHART}/values.kind.yaml" --set projectionRebuilder.enabled=true)"
+  echo "${reb_out}" | grep -q 'WORKER_ROLE'
+  echo "${reb_out}" | grep -q 'spectator-projection-rebuilder'
+  echo "${reb_out}" | grep -q 'ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL'
+  ! echo "${reb_out}" | awk '/name: projection-rebuilder/,/^[[:space:]]*- name: /' | grep -q 'SPECTATOR_VIEW_INTERNAL_CREDENTIAL' \
+    || { echo "FAIL: rebuilder must not receive SPECTATOR_VIEW_INTERNAL_CREDENTIAL" >&2; fail=1; }
+  ! echo "${reb_out}" | awk '/name: projection-rebuilder/,/resources:/' | grep -q 'readinessProbe' \
+    || { echo "FAIL: rebuilder must not define readinessProbe" >&2; fail=1; }
+  ! echo "${reb_out}" | awk '/name: projection-rebuilder/,/resources:/' | grep -q 'containerPort' \
+    || { echo "FAIL: rebuilder must not expose HTTP ports" >&2; fail=1; }
+fi
 
 [[ "${fail}" -eq 0 ]] || exit 1
 echo "ok spectator-adapter-structure"

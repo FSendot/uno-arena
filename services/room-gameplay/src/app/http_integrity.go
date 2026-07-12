@@ -190,6 +190,7 @@ func (h *HTTPDealSource) ReserveDeal(ctx context.Context, roomID, gameID, operat
 	var out struct {
 		Kind            string                `json:"kind"`
 		ReservationID   string                `json:"reservationId"`
+		Remaining       *int                  `json:"remaining"`
 		Hands           map[string][]cardJSON `json:"hands"`
 		DiscardTop      cardJSON              `json:"discardTop"`
 		ActiveColor     string                `json:"activeColor"`
@@ -208,6 +209,12 @@ func (h *HTTPDealSource) ReserveDeal(ctx context.Context, roomID, gameID, operat
 	if status >= 400 {
 		return MaterialReservation{}, fmt.Errorf("reserve deal %d: %s %s", status, out.Code, out.Message)
 	}
+	if out.Remaining == nil {
+		return MaterialReservation{}, fmt.Errorf("reserve deal: missing remaining")
+	}
+	if *out.Remaining < 0 {
+		return MaterialReservation{}, fmt.Errorf("reserve deal: remaining must be >= 0")
+	}
 	hands := make(map[game.PlayerID][]game.Card, len(out.Hands))
 	for seat, cards := range out.Hands {
 		hands[game.PlayerID(seat)] = toGameCards(cards)
@@ -215,11 +222,12 @@ func (h *HTTPDealSource) ReserveDeal(ctx context.Context, roomID, gameID, operat
 	deal := game.DealMaterial{
 		Hands: hands, DiscardTop: toGameCard(out.DiscardTop), ActiveColor: game.Color(out.ActiveColor),
 		CurrentSeat: out.CurrentSeat, Direction: parseDirection(out.Direction), ApplyTopEffects: out.ApplyTopEffects,
+		DrawPileSize: *out.Remaining, HasDrawPileSize: true,
 	}
 	h.mu.Lock()
 	h.meta[out.ReservationID] = resMeta{RoomID: roomID, GameID: gameID}
 	h.mu.Unlock()
-	return MaterialReservation{ID: out.ReservationID, Deal: &deal}, nil
+	return MaterialReservation{ID: out.ReservationID, Deal: &deal, DrawPileSize: *out.Remaining}, nil
 }
 
 // ReserveDraw implements DealSource.
@@ -230,6 +238,7 @@ func (h *HTTPDealSource) ReserveDraw(ctx context.Context, roomID, gameID, operat
 	var out struct {
 		Kind          string     `json:"kind"`
 		ReservationID string     `json:"reservationId"`
+		Remaining     *int       `json:"remaining"`
 		Cards         []cardJSON `json:"cards"`
 		Code          string     `json:"code"`
 		Message       string     `json:"message"`
@@ -243,10 +252,16 @@ func (h *HTTPDealSource) ReserveDraw(ctx context.Context, roomID, gameID, operat
 	if status >= 400 {
 		return MaterialReservation{}, fmt.Errorf("reserve draw %d: %s %s", status, out.Code, out.Message)
 	}
+	if out.Remaining == nil {
+		return MaterialReservation{}, fmt.Errorf("reserve draw: missing remaining")
+	}
+	if *out.Remaining < 0 {
+		return MaterialReservation{}, fmt.Errorf("reserve draw: remaining must be >= 0")
+	}
 	h.mu.Lock()
 	h.meta[out.ReservationID] = resMeta{RoomID: roomID, GameID: gameID}
 	h.mu.Unlock()
-	return MaterialReservation{ID: out.ReservationID, Cards: toGameCards(out.Cards)}, nil
+	return MaterialReservation{ID: out.ReservationID, Cards: toGameCards(out.Cards), DrawPileSize: *out.Remaining}, nil
 }
 
 // Confirm implements DealSource via in-memory meta (convenience for live callers).

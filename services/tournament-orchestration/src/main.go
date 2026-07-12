@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"unoarena/services/tournament-orchestration/store"
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
 	"unoarena/shared/httpx"
@@ -27,24 +28,36 @@ const (
 
 // Server exposes Tournament Orchestration HTTP handlers (stdlib only).
 type Server struct {
-	svc                *Service
-	internalCredential string
-	mode               string
-	readyReason        string
-	durableReady       func(context.Context) error
+	svc                         *Service
+	internalCredential          string
+	analyticsBackfillCredential string
+	mode                        string
+	readyReason                 string
+	durableReady                func(context.Context) error
 }
 
 func NewServer(svc *Service, internalCredential string) *Server {
-	return &Server{svc: svc, internalCredential: internalCredential, mode: "capability"}
+	return NewServerWithScopedCreds(svc, internalCredential, "")
 }
 
-func serverFromRuntime(rt tournamentRuntime, cred string) *Server {
+// NewServerWithScopedCreds constructs a server with a dedicated Analytics backfill credential.
+func NewServerWithScopedCreds(svc *Service, internalCredential, analyticsBackfillCredential string) *Server {
 	return &Server{
-		svc:                rt.svc,
-		internalCredential: cred,
-		mode:               rt.mode,
-		readyReason:        rt.readyReason,
-		durableReady:       rt.durableReady,
+		svc:                         svc,
+		internalCredential:          internalCredential,
+		analyticsBackfillCredential: analyticsBackfillCredential,
+		mode:                        "capability",
+	}
+}
+
+func serverFromRuntime(rt tournamentRuntime, cred, analyticsBackfillCred string) *Server {
+	return &Server{
+		svc:                         rt.svc,
+		internalCredential:          cred,
+		analyticsBackfillCredential: analyticsBackfillCred,
+		mode:                        rt.mode,
+		readyReason:                 rt.readyReason,
+		durableReady:                rt.durableReady,
 	}
 }
 
@@ -57,8 +70,14 @@ func (s *Server) Routes() http.Handler {
 	// Gateway-configured command hop.
 	mux.HandleFunc("/internal/v1/commands", s.handleInternalCommands)
 
+	// Analytics recovery backfill (ADR-0039) — dedicated route before tournament catch-all.
+	mux.HandleFunc("/internal/v1/tournaments/analytics-backfill", s.handleAnalyticsBackfill)
+
 	// Documented internal worker/consumer routes.
 	mux.HandleFunc("/internal/v1/tournaments/", s.handleInternalTournaments)
+
+	// Operator repair: rebuild Redis bracket projection from Postgres (internal auth).
+	mux.HandleFunc("/internal/v1/brackets/rebuild", s.handleBracketRebuild)
 
 	// Documented BFF-aligned public/read and command surfaces.
 	mux.HandleFunc("/v1/tournaments", s.handleTournamentsRoot)
@@ -75,6 +94,56 @@ func (s *Server) authorizeInternal(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(s.internalCredential)) == 1
+}
+
+func (s *Server) authorizeAnalyticsBackfill(r *http.Request) bool {
+	// Scoped Analytics pair credential only — never fall back to Gateway/generic internal.
+	if s.analyticsBackfillCredential == "" {
+		return false
+	}
+	got := r.Header.Get(headerServiceCredential)
+	if got == "" || len(got) != len(s.analyticsBackfillCredential) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.analyticsBackfillCredential)) == 1
+}
+
+func (s *Server) handleAnalyticsBackfill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+		return
+	}
+	if !s.requireReady(w, r) {
+		return
+	}
+	if !s.authorizeAnalyticsBackfill(r) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid analytics service credential", "", "")
+		return
+	}
+	corr := correlation.FromHTTP(r.Header).WithDefaults()
+	if corr.CorrelationID != "" {
+		w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
+	}
+	var req AnalyticsBackfillRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "invalid json", corr.CorrelationID, "")
+		return
+	}
+	resp, err := s.svc.AnalyticsBackfill(r.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrAnalyticsBackfillBadRequest):
+			_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", err.Error(), corr.CorrelationID, "")
+		case errors.Is(err, ErrAnalyticsBackfillUnavailable):
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", "analytics backfill unavailable", corr.CorrelationID, "")
+		case errors.Is(err, ErrAnalyticsBackfillCorrupt):
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "corrupt_outbox", "stored envelope failed validation", corr.CorrelationID, "")
+		default:
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "analytics backfill failed", corr.CorrelationID, "")
+		}
+		return
+	}
+	_ = httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +215,38 @@ func (s *Server) handleInternalCommands(w http.ResponseWriter, r *http.Request) 
 	s.submitCommandHTTP(w, r, "")
 }
 
+func (s *Server) handleBracketRebuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", correlation.FromHTTP(r.Header).CorrelationID, "")
+		return
+	}
+	if !s.requireReady(w, r) {
+		return
+	}
+	if !s.authorizeInternal(r) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", correlation.FromHTTP(r.Header).CorrelationID, "")
+		return
+	}
+	corr := correlation.FromHTTP(r.Header).WithDefaults()
+	tournamentID := strings.TrimSpace(r.URL.Query().Get("tournamentId"))
+	if tournamentID == "" {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "tournamentId required", corr.CorrelationID, "")
+		return
+	}
+	if err := s.svc.RebuildBracketProjection(r.Context(), tournamentID); err != nil {
+		if errors.Is(err, store.ErrTournamentNotFound) {
+			_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "tournament not found", corr.CorrelationID, "")
+			return
+		}
+		_ = httpx.WriteError(w, http.StatusServiceUnavailable, "unavailable", "bracket rebuild unavailable", corr.CorrelationID, "")
+		return
+	}
+	_ = httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":       "rebuilt",
+		"tournamentId": tournamentID,
+	})
+}
+
 func (s *Server) handleTournamentsRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/v1/tournaments" {
 		_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "not found", correlation.FromHTTP(r.Header).CorrelationID, "")
@@ -187,6 +288,7 @@ func (s *Server) handleTournamentsRoot(w http.ResponseWriter, r *http.Request) {
 		"capacity":     payload["capacity"],
 		"retryBudget":  payload["retryBudget"],
 		"batchSize":    payload["batchSize"],
+		"visibility":   payload["visibility"],
 	})
 	req := CommandRequest{
 		CommandID:     cmdID,
@@ -209,19 +311,84 @@ func (s *Server) handleTournamentsScoped(w http.ResponseWriter, r *http.Request)
 	tournamentID := parts[0]
 	corr := correlation.FromHTTP(r.Header).WithDefaults()
 
-	if len(parts) == 2 && parts[1] == "bracket" && r.Method == http.MethodGet {
-		body, ok := s.svc.Bracket(tournamentID)
-		if !ok {
-			_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "tournament not found", corr.CorrelationID, "")
+	isBracket := len(parts) == 2 && parts[1] == "bracket" && r.Method == http.MethodGet
+	isStandings := len(parts) == 2 && parts[1] == "standings" && r.Method == http.MethodGet
+	isAssignment := len(parts) == 4 && parts[1] == "players" && parts[3] == "assignment" && r.Method == http.MethodGet
+	if isBracket || isStandings || isAssignment {
+		if !s.authorizeInternal(r) {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", corr.CorrelationID, "")
 			return
 		}
-		_ = httpx.WriteJSON(w, http.StatusOK, body)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "standings" && r.Method == http.MethodGet {
-		body, ok := s.svc.Standings(tournamentID)
-		if !ok {
-			_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "tournament not found", corr.CorrelationID, "")
+		principal := parseTrustedReadPrincipal(r.Header.Get("X-Player-Id"), r.Header.Get("X-Operator-Scope"))
+
+		if isAssignment {
+			playerID := parts[2]
+			body, err := s.svc.PlayerAssignment(tournamentID, playerID, principal)
+			if err != nil {
+				if status, code, msg, ok := mapTournamentReadErr(err); ok {
+					if errors.Is(err, store.ErrAssignmentNotFound) {
+						msg = "assignment not found"
+					}
+					_ = httpx.WriteError(w, status, code, msg, corr.CorrelationID, "")
+					return
+				}
+				_ = httpx.WriteError(w, http.StatusServiceUnavailable, "unavailable", "assignment read unavailable", corr.CorrelationID, "")
+				return
+			}
+			_ = httpx.WriteJSON(w, http.StatusOK, body)
+			return
+		}
+
+		if err := s.svc.AuthorizeBracketStandings(tournamentID, principal); err != nil {
+			if status, code, msg, ok := mapTournamentReadErr(err); ok {
+				_ = httpx.WriteError(w, status, code, msg, corr.CorrelationID, "")
+				return
+			}
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "unavailable", "tournament read unavailable", corr.CorrelationID, "")
+			return
+		}
+
+		if isBracket {
+			q := r.URL.Query()
+			var roundNumber *int
+			if raw := strings.TrimSpace(q.Get("roundNumber")); raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil || n < 1 {
+					_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "invalid roundNumber", corr.CorrelationID, "")
+					return
+				}
+				roundNumber = &n
+			}
+			limit := store.DefaultBracketPageLimit
+			if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil || n < 1 || n > store.MaxBracketPageLimit {
+					_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "invalid limit", corr.CorrelationID, "")
+					return
+				}
+				limit = n
+			}
+			cursor := strings.TrimSpace(q.Get("cursor"))
+			body, err := s.svc.Bracket(tournamentID, roundNumber, cursor, limit)
+			if err != nil {
+				if status, code, msg, ok := mapTournamentReadErr(err); ok {
+					_ = httpx.WriteError(w, status, code, msg, corr.CorrelationID, "")
+					return
+				}
+				_ = httpx.WriteError(w, http.StatusServiceUnavailable, "unavailable", "bracket read unavailable", corr.CorrelationID, "")
+				return
+			}
+			_ = httpx.WriteJSON(w, http.StatusOK, body)
+			return
+		}
+
+		body, err := s.svc.Standings(tournamentID)
+		if err != nil {
+			if status, code, msg, ok := mapTournamentReadErr(err); ok {
+				_ = httpx.WriteError(w, status, code, msg, corr.CorrelationID, "")
+				return
+			}
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "unavailable", "standings read unavailable", corr.CorrelationID, "")
 			return
 		}
 		_ = httpx.WriteJSON(w, http.StatusOK, body)
@@ -650,7 +817,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("tournament runtime: %v", err)
 	}
-	srv := serverFromRuntime(rt, cred)
+
+	if rt.workerRole == workerRoleTournamentProvisioning {
+		runProvisioningWorker(rt)
+		return
+	}
+	if rt.workerRole == workerRoleTournamentSeeding {
+		runSeedingWorker(rt)
+		return
+	}
+	if rt.workerRole == workerRoleTournamentCompletion {
+		runCompletionWorker(rt)
+		return
+	}
+
+	srv := serverFromRuntime(rt, cred, strings.TrimSpace(os.Getenv("TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL")))
 	if !rt.ready && rt.mode == "durable" {
 		// Keep serving /health + /ready=503 with fail-closed wiring.
 		srv.readyReason = rt.readyReason
@@ -659,6 +840,14 @@ func main() {
 		srv.readyReason = rt.readyReason
 	}
 	httpSrv := &http.Server{Addr: ":8080", Handler: srv.Routes()}
+
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.start(rootCtx)
+		log.Printf(`{"level":"info","service":"tournament-orchestration","event":"kafka_consumer_started","group":%q,"topic":%q}`,
+			rt.kafka.consumer.cfg.Group, rt.kafka.consumer.cfg.Topic)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -675,10 +864,123 @@ func main() {
 		}
 	case <-sigCh:
 	}
+	rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.stop()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
+	if rt.rdbClose != nil {
+		_ = rt.rdbClose()
+	}
 	if rt.pool != nil {
 		rt.pool.Close()
 	}
+}
+
+// runProvisioningWorker runs WORKER_ROLE=tournament-provisioning without the API HTTP server.
+// SIGTERM stops claiming and waits for in-flight ProcessProvisioningBatch work.
+func runProvisioningWorker(rt tournamentRuntime) {
+	if rt.store == nil || rt.svc == nil {
+		log.Fatal("provisioning worker requires durable store and service")
+	}
+	if rt.durableReady != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := rt.durableReady(ctx)
+		cancel()
+		if err != nil {
+			log.Fatalf("provisioning worker schema readiness: %v", err)
+		}
+	}
+	worker := NewProvisioningWorker(rt.store, func(ctx context.Context, work ProvisioningBatchWork) error {
+		_, err := rt.svc.ProcessProvisioningBatch(ctx, work)
+		return err
+	}, "")
+	worker.Start()
+	defer worker.Stop()
+	defer func() {
+		if rt.rdbClose != nil {
+			_ = rt.rdbClose()
+		}
+		if rt.pool != nil {
+			rt.pool.Close()
+		}
+	}()
+	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"provisioning_worker_startup","mode":%q}`, rt.mode)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"provisioning_worker_shutdown"}`)
+}
+
+// runSeedingWorker runs WORKER_ROLE=tournament-seeding without the API HTTP server.
+// Only DATABASE_URL is required (no Room URL / cursor secret).
+func runSeedingWorker(rt tournamentRuntime) {
+	if rt.store == nil {
+		log.Fatal("seeding worker requires durable store")
+	}
+	if rt.durableReady != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := rt.durableReady(ctx)
+		cancel()
+		if err != nil {
+			log.Fatalf("seeding worker schema readiness: %v", err)
+		}
+	}
+	worker := NewSeedingWorker(rt.store, "").WithFinalizeHook(func(tournamentID string, roundNumber int) {
+		if rt.svc != nil {
+			rt.svc.refreshBracketBestEffort(context.Background(), scopeRound(tournamentID, roundNumber))
+		}
+	})
+	worker.Start()
+	defer worker.Stop()
+	defer func() {
+		if rt.rdbClose != nil {
+			_ = rt.rdbClose()
+		}
+		if rt.pool != nil {
+			rt.pool.Close()
+		}
+	}()
+	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"seeding_worker_startup","mode":%q}`, rt.mode)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"seeding_worker_shutdown"}`)
+}
+
+// runCompletionWorker runs WORKER_ROLE=tournament-round-completion without the API HTTP server.
+// Only DATABASE_URL is required (same DB/credential boundaries as seeding; no Room/cursor).
+func runCompletionWorker(rt tournamentRuntime) {
+	if rt.store == nil || rt.svc == nil {
+		log.Fatal("completion worker requires durable store and service")
+	}
+	if rt.durableReady != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := rt.durableReady(ctx)
+		cancel()
+		if err != nil {
+			log.Fatalf("completion worker schema readiness: %v", err)
+		}
+	}
+	worker := NewCompletionWorker(rt.store, rt.svc)
+	worker.Start()
+	defer worker.Stop()
+	defer func() {
+		if rt.rdbClose != nil {
+			_ = rt.rdbClose()
+		}
+		if rt.pool != nil {
+			rt.pool.Close()
+		}
+	}()
+	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"completion_worker_startup","mode":%q}`, rt.mode)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"completion_worker_shutdown"}`)
 }

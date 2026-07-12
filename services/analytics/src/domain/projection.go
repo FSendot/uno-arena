@@ -1,20 +1,39 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"sort"
+	"strings"
 	"time"
 )
 
 // UpstreamEvent is a versioned inbound analytics event from a sanitized/public stream.
 // Source is required adapter-boundary provenance (trusted topic); never inferred from payload.
+//
+// IdempotencyKey is the adapter-supplied ADR-0029 contract key for this channel. It does not
+// replace EventID on the envelope. When unset (HTTP bridge / rebuild), EffectiveIdempotencyKey
+// falls back to EventID. PayloadFingerprint is the immutable identity of the mapped payload;
+// when unset, EnsureIngressIdentity derives a deterministic fingerprint from Payload.
 type UpstreamEvent struct {
-	EventID       EventID
-	EventType     EventType
-	Source        SourceTopic
-	SchemaVersion int
-	CorrelationID string
-	OccurredAt    time.Time
-	Payload       map[string]any
+	EventID            EventID
+	EventType          EventType
+	Source             SourceTopic
+	SchemaVersion      int
+	CorrelationID      string
+	OccurredAt         time.Time
+	Payload            map[string]any
+	IdempotencyKey     string
+	PayloadFingerprint string
+	// DurableIgnore marks an intentional no-projection ingest (e.g. ad-hoc MatchCompleted
+	// without tournamentId). ADR-0029 still requires a durable processed marker before commit.
+	DurableIgnore bool
+}
+
+type storedIngressOutcome struct {
+	Outcome     ApplyOutcome
+	Fingerprint string
 }
 
 // PublicAnalyticsProjection is the aggregate consistency boundary for derived,
@@ -28,7 +47,7 @@ type PublicAnalyticsProjection struct {
 
 	policy    AnalyticsFieldPolicy
 	anonymize AnonymizationPolicy
-	outcomes  map[EventID]ApplyOutcome
+	outcomes  map[string]storedIngressOutcome // key = EffectiveIdempotencyKey
 }
 
 // NewPublicAnalyticsProjection creates an empty rebuildable analytics projection.
@@ -40,7 +59,85 @@ func NewPublicAnalyticsProjection() *PublicAnalyticsProjection {
 		ratings:     nil,
 		policy:      AnalyticsFieldPolicy{},
 		anonymize:   AnonymizationPolicy{},
-		outcomes:    map[EventID]ApplyOutcome{},
+		outcomes:    map[string]storedIngressOutcome{},
+	}
+}
+
+// EffectiveIdempotencyKey returns the adapter key, falling back to eventId for HTTP/rebuild.
+func EffectiveIdempotencyKey(evt UpstreamEvent) string {
+	if k := strings.TrimSpace(evt.IdempotencyKey); k != "" {
+		return k
+	}
+	return string(evt.EventID)
+}
+
+// FingerprintPayload returns a deterministic sha256 hex of the allowlisted payload map.
+func FingerprintPayload(payload map[string]any) string {
+	canonical, err := canonicalJSON(payload)
+	if err != nil {
+		sum := sha256.Sum256([]byte("unfingerprintable"))
+		return hex.EncodeToString(sum[:])
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
+}
+
+// EnsureIngressIdentity fills IdempotencyKey / PayloadFingerprint when unset (HTTP bridge).
+func EnsureIngressIdentity(evt *UpstreamEvent) {
+	if evt == nil {
+		return
+	}
+	if strings.TrimSpace(evt.IdempotencyKey) == "" {
+		evt.IdempotencyKey = string(evt.EventID)
+	}
+	if strings.TrimSpace(evt.PayloadFingerprint) == "" {
+		evt.PayloadFingerprint = FingerprintPayload(evt.Payload)
+	}
+}
+
+func canonicalJSON(v any) ([]byte, error) {
+	switch x := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		buf := []byte{'{'}
+		for i, k := range keys {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			kb, err := json.Marshal(k)
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, kb...)
+			buf = append(buf, ':')
+			vb, err := canonicalJSON(x[k])
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, vb...)
+		}
+		buf = append(buf, '}')
+		return buf, nil
+	case []any:
+		buf := []byte{'['}
+		for i, child := range x {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			vb, err := canonicalJSON(child)
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, vb...)
+		}
+		buf = append(buf, ']')
+		return buf, nil
+	default:
+		return json.Marshal(x)
 	}
 }
 
@@ -66,30 +163,56 @@ func (p *PublicAnalyticsProjection) RebuildFrom(events []UpstreamEvent) []ApplyO
 	return outs
 }
 
-// Apply projects one upstream event with eventId idempotency and fail-closed policy.
-// Duplicate eventId returns the prior stable outcome without re-mutation.
-// Privacy/schema violations quarantine before state mutation and emit typed facts.
+// Apply projects one upstream event with contract-key idempotency and fail-closed policy.
+// Duplicate EffectiveIdempotencyKey with the same PayloadFingerprint returns the prior
+// stable outcome without re-mutation. Conflicting fingerprints quarantine without mutation.
+// DurableIgnore writes an ignored outcome marker with no projection rows.
 func (p *PublicAnalyticsProjection) Apply(evt UpstreamEvent) ApplyOutcome {
-	if prior, ok := p.outcomes[evt.EventID]; ok {
-		return duplicateOutcome(prior)
+	EnsureIngressIdentity(&evt)
+	key := EffectiveIdempotencyKey(evt)
+	fp := strings.TrimSpace(evt.PayloadFingerprint)
+
+	if prior, ok := p.outcomes[key]; ok {
+		if prior.Fingerprint == fp {
+			return duplicateOutcome(prior.Outcome)
+		}
+		return p.conflictQuarantine(evt, key, fp)
+	}
+
+	if evt.DurableIgnore {
+		out := ApplyOutcome{
+			Kind:    OutcomeIgnored,
+			EventID: evt.EventID,
+			Facts: []Fact{
+				newFact(FactProjectionEventIgnored, map[string]string{
+					"eventId":        string(evt.EventID),
+					"idempotencyKey": key,
+					"source":         string(evt.Source),
+					"authoritative":  "false",
+					"reason":         "durable_ignore",
+				}),
+			},
+		}
+		p.outcomes[key] = storedIngressOutcome{Outcome: out, Fingerprint: fp}
+		return copyOutcome(out)
 	}
 
 	if rej := p.policy.ValidateEnvelope(evt); rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	if rej := p.policy.ValidatePayload(evt.Payload); rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 
 	switch evt.EventType {
 	case EventGameplayMetric:
-		return p.projectGameplay(evt)
+		return p.projectGameplay(evt, key, fp)
 	case EventTournamentStatistic:
-		return p.projectTournament(evt)
+		return p.projectTournament(evt, key, fp)
 	case EventRatingStatistic, EventLeaderboardSnapshot:
-		return p.projectRating(evt)
+		return p.projectRating(evt, key, fp)
 	default:
-		return p.quarantine(evt, Rejection{
+		return p.quarantine(evt, key, fp, Rejection{
 			Code:    RejectUnknownEventType,
 			Message: "event type not allowed for analytics projection: " + string(evt.EventType),
 		})
@@ -114,16 +237,16 @@ func (p *PublicAnalyticsProjection) ProjectRatingStatistic(evt UpstreamEvent) Ap
 	return p.Apply(evt)
 }
 
-func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent) ApplyOutcome {
+func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent, key, fp string) ApplyOutcome {
 	pl := copyAnyMap(evt.Payload)
 
 	visRaw, rej := optionalString(pl, "visibility")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	vis := Visibility(visRaw)
 	if !vis.Valid() {
-		return p.quarantine(evt, Rejection{
+		return p.quarantine(evt, key, fp, Rejection{
 			Code:    RejectInvalidSchema,
 			Message: "visibility must be anonymized_adhoc, public, or public_tournament",
 		})
@@ -131,16 +254,16 @@ func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent) ApplyOutc
 
 	metricType, rej := optionalString(pl, "metricType")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	if metricType == "" {
 		metricType, rej = optionalString(pl, "metric_type")
 		if rej != nil {
-			return p.quarantine(evt, *rej)
+			return p.quarantine(evt, key, fp, *rej)
 		}
 	}
 	if metricType == "" {
-		return p.quarantine(evt, Rejection{
+		return p.quarantine(evt, key, fp, Rejection{
 			Code:    RejectInvalidSchema,
 			Message: "metricType is required",
 		})
@@ -148,49 +271,49 @@ func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent) ApplyOutc
 
 	roomID, rej := optionalString(pl, "roomId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	gameID, rej := optionalString(pl, "gameId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	tournamentID, rej := optionalString(pl, "tournamentId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	publicCardRank, rej := optionalString(pl, "publicCardRank")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	publicCardColor, rej := optionalString(pl, "publicCardColor")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	publicCard, rej := optionalString(pl, "publicCard")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	cardCountTotal, rej := optionalUint16(pl, "publicCardCountTotal")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	if cardCountTotal == 0 {
 		cardCountTotal, rej = optionalUint16(pl, "publicCardCount")
 		if rej != nil {
-			return p.quarantine(evt, *rej)
+			return p.quarantine(evt, key, fp, *rej)
 		}
 	}
 	roomSequence, rej := optionalUint64(pl, "roomSequence")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	playerID, rej := optionalString(pl, "playerId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	displayName, rej := optionalString(pl, "displayName")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 
 	if vis.RequiresAnonymization() {
@@ -198,7 +321,7 @@ func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent) ApplyOutc
 			pl = p.anonymize.AnonymizeGameplayPayload(pl)
 		}
 		if p.anonymize.ContainsIdentity(pl) {
-			return p.quarantine(evt, Rejection{
+			return p.quarantine(evt, key, fp, Rejection{
 				Code:    RejectAnonymization,
 				Message: "ad-hoc gameplay metric retained player identity after anonymization",
 			})
@@ -211,7 +334,7 @@ func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent) ApplyOutc
 	if hasPlayerFacts {
 		// Visibility is classification only; trusted source + tournament provenance required.
 		if !evt.Source.AllowsPublicPlayerFacts() || !vis.AllowsPublicPlayerFacts() || tournamentID == "" {
-			return p.quarantine(evt, Rejection{
+			return p.quarantine(evt, key, fp, Rejection{
 				Code:    RejectNonPublicSource,
 				Message: "public player facts require trusted gameplay source, public_tournament visibility, and tournamentId provenance",
 			})
@@ -255,20 +378,20 @@ func (p *PublicAnalyticsProjection) projectGameplay(evt UpstreamEvent) ApplyOutc
 			}),
 		},
 	}
-	p.outcomes[evt.EventID] = out
+	p.outcomes[key] = storedIngressOutcome{Outcome: out, Fingerprint: fp}
 	return copyOutcome(out)
 }
 
-func (p *PublicAnalyticsProjection) projectTournament(evt UpstreamEvent) ApplyOutcome {
+func (p *PublicAnalyticsProjection) projectTournament(evt UpstreamEvent, key, fp string) ApplyOutcome {
 	pl := copyAnyMap(evt.Payload)
 
 	tidRaw, rej := optionalString(pl, "tournamentId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	tid := TournamentID(tidRaw)
 	if !tid.Valid() {
-		return p.quarantine(evt, Rejection{
+		return p.quarantine(evt, key, fp, Rejection{
 			Code:    RejectInvalidIdentity,
 			Message: "tournamentId is required",
 		})
@@ -276,31 +399,31 @@ func (p *PublicAnalyticsProjection) projectTournament(evt UpstreamEvent) ApplyOu
 
 	roundNumber, rej := optionalInt32(pl, "roundNumber")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	slotID, rej := optionalString(pl, "slotId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	eventType, rej := optionalString(pl, "eventType")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	phase, rej := optionalString(pl, "phase")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	registeredCount, rej := optionalUint32(pl, "registeredCount")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	advancingCount, rej := optionalUint16(pl, "advancingPlayerCount")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	publicPayload, rej := extractPublicPayload(pl)
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 
 	stat := TournamentStatistic{
@@ -334,24 +457,24 @@ func (p *PublicAnalyticsProjection) projectTournament(evt UpstreamEvent) ApplyOu
 			}),
 		},
 	}
-	p.outcomes[evt.EventID] = out
+	p.outcomes[key] = storedIngressOutcome{Outcome: out, Fingerprint: fp}
 	return copyOutcome(out)
 }
 
-func (p *PublicAnalyticsProjection) projectRating(evt UpstreamEvent) ApplyOutcome {
+func (p *PublicAnalyticsProjection) projectRating(evt UpstreamEvent, key, fp string) ApplyOutcome {
 	pl := copyAnyMap(evt.Payload)
 
 	if raw, ok := pl["entries"]; ok {
-		return p.projectLeaderboardSnapshot(evt, pl, raw)
+		return p.projectLeaderboardSnapshot(evt, key, fp, pl, raw)
 	}
 
 	pidRaw, rej := optionalString(pl, "playerId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	pid := PlayerID(pidRaw)
 	if !pid.Valid() {
-		return p.quarantine(evt, Rejection{
+		return p.quarantine(evt, key, fp, Rejection{
 			Code:    RejectInvalidIdentity,
 			Message: "playerId is required for public rating statistics",
 		})
@@ -359,23 +482,23 @@ func (p *PublicAnalyticsProjection) projectRating(evt UpstreamEvent) ApplyOutcom
 
 	sourceType, rej := optionalString(pl, "sourceType")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	prev, rej := optionalInt32(pl, "previousRating")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	next, rej := optionalInt32(pl, "newRating")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	boardType, rej := optionalString(pl, "boardType")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	snapshotID, rej := optionalString(pl, "snapshotId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 
 	stat := PlayerPublicStatistic{
@@ -403,14 +526,14 @@ func (p *PublicAnalyticsProjection) projectRating(evt UpstreamEvent) ApplyOutcom
 			}),
 		},
 	}
-	p.outcomes[evt.EventID] = out
+	p.outcomes[key] = storedIngressOutcome{Outcome: out, Fingerprint: fp}
 	return copyOutcome(out)
 }
 
-func (p *PublicAnalyticsProjection) projectLeaderboardSnapshot(evt UpstreamEvent, pl map[string]any, raw any) ApplyOutcome {
+func (p *PublicAnalyticsProjection) projectLeaderboardSnapshot(evt UpstreamEvent, key, fp string, pl map[string]any, raw any) ApplyOutcome {
 	entries, ok := raw.([]any)
 	if !ok {
-		return p.quarantine(evt, Rejection{
+		return p.quarantine(evt, key, fp, Rejection{
 			Code:    RejectInvalidSchema,
 			Message: "entries must be an array of public rating rows",
 		})
@@ -418,16 +541,16 @@ func (p *PublicAnalyticsProjection) projectLeaderboardSnapshot(evt UpstreamEvent
 
 	boardType, rej := optionalString(pl, "boardType")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	snapshotIDRaw, rej := optionalString(pl, "snapshotId")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 	snapshotID := SnapshotID(snapshotIDRaw)
 	sourceType, rej := optionalString(pl, "sourceType")
 	if rej != nil {
-		return p.quarantine(evt, *rej)
+		return p.quarantine(evt, key, fp, *rej)
 	}
 
 	// Validate every entry into temp state; append atomically only if entire event is valid.
@@ -435,26 +558,43 @@ func (p *PublicAnalyticsProjection) projectLeaderboardSnapshot(evt UpstreamEvent
 	for i, item := range entries {
 		row, ok := item.(map[string]any)
 		if !ok {
-			return p.quarantine(evt, Rejection{
+			return p.quarantine(evt, key, fp, Rejection{
 				Code:    RejectInvalidSchema,
 				Message: "leaderboard entry must be an object at index " + itoa(i),
 			})
 		}
 		pidRaw, rej := optionalString(row, "playerId")
 		if rej != nil {
-			return p.quarantine(evt, *rej)
+			return p.quarantine(evt, key, fp, *rej)
 		}
 		pid := PlayerID(pidRaw)
 		if !pid.Valid() {
-			return p.quarantine(evt, Rejection{
+			return p.quarantine(evt, key, fp, Rejection{
 				Code:    RejectInvalidIdentity,
 				Message: "playerId is required on public rating rows",
 			})
 		}
 		rating, rej := optionalInt32(row, "rating")
 		if rej != nil {
-			return p.quarantine(evt, *rej)
+			return p.quarantine(evt, key, fp, *rej)
 		}
+		if _, hasRank := row["rank"]; !hasRank || row["rank"] == nil {
+			return p.quarantine(evt, key, fp, Rejection{
+				Code:    RejectInvalidSchema,
+				Message: "rank is required on leaderboard entries",
+			})
+		}
+		rank, rej := optionalInt32(row, "rank")
+		if rej != nil {
+			return p.quarantine(evt, key, fp, *rej)
+		}
+		if rank < 1 {
+			return p.quarantine(evt, key, fp, Rejection{
+				Code:    RejectInvalidSchema,
+				Message: "rank must be >= 1",
+			})
+		}
+		_ = rank
 		pending = append(pending, PlayerPublicStatistic{
 			EventID:       evt.EventID,
 			CorrelationID: evt.CorrelationID,
@@ -480,7 +620,7 @@ func (p *PublicAnalyticsProjection) projectLeaderboardSnapshot(evt UpstreamEvent
 			}),
 		},
 	}
-	p.outcomes[evt.EventID] = out
+	p.outcomes[key] = storedIngressOutcome{Outcome: out, Fingerprint: fp}
 	return copyOutcome(out)
 }
 
@@ -512,7 +652,7 @@ func (p *PublicAnalyticsProjection) SnapshotJSON() ([]byte, error) {
 	return json.Marshal(p.Snapshot())
 }
 
-func (p *PublicAnalyticsProjection) quarantine(evt UpstreamEvent, rej Rejection) ApplyOutcome {
+func (p *PublicAnalyticsProjection) quarantine(evt UpstreamEvent, key, fp string, rej Rejection) ApplyOutcome {
 	facts := []Fact{
 		newFact(FactProjectionEventQuarantined, map[string]string{
 			"eventId":       string(evt.EventID),
@@ -528,10 +668,35 @@ func (p *PublicAnalyticsProjection) quarantine(evt UpstreamEvent, rej Rejection)
 		Rejection: &rej,
 		Facts:     facts,
 	}
-	if evt.EventID.Valid() {
-		p.outcomes[evt.EventID] = out
+	if key != "" {
+		p.outcomes[key] = storedIngressOutcome{Outcome: out, Fingerprint: fp}
 	}
 	return copyOutcome(out)
+}
+
+// conflictQuarantine returns a conflict disposition without replacing a durable prior marker
+// in memory when fingerprints disagree. The prior first-wins outcome remains stored.
+func (p *PublicAnalyticsProjection) conflictQuarantine(evt UpstreamEvent, key, fp string) ApplyOutcome {
+	rej := Rejection{
+		Code:    RejectPayloadConflict,
+		Message: "idempotency key collides with a different immutable payload fingerprint",
+	}
+	_ = key
+	_ = fp
+	return ApplyOutcome{
+		Kind:      OutcomeQuarantined,
+		EventID:   evt.EventID,
+		Rejection: &rej,
+		Facts: []Fact{
+			newFact(FactProjectionEventQuarantined, map[string]string{
+				"eventId":       string(evt.EventID),
+				"eventType":     string(evt.EventType),
+				"code":          string(rej.Code),
+				"reason":        rej.Message,
+				"authoritative": "false",
+			}),
+		},
+	}
 }
 
 func duplicateOutcome(prior ApplyOutcome) ApplyOutcome {

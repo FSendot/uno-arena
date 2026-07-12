@@ -7,8 +7,10 @@ This runbook covers two local lanes:
    durable adapters (Identity Postgres/OIDC, Room Postgres/timer, GI Kurrent,
    Analytics ClickHouse HTTP) are separate explicit targets. CDC prerequisites
    (logical WAL, CDC roles/publications, kind-short retention + DLQ topic
-   scaffolding) are implemented; Debezium Connect/Server connector delivery and
-   Analytics Kafka ingestion and Spectator Kafka consumer remain pending.
+   scaffolding) plus Debezium Kafka Connect (four outbox routers) and Debezium
+   Server (Room realtime → Redis) manifests are in place; live outbox→topic /
+   outbox→Redis delivery proofs and Analytics/Spectator Kafka consumers remain
+   separate explicit checks (status scripts do not alone claim delivery).
 2. **Identity staging smoke** — existing GitLab runner + Helm deploy of Identity
    into `staging` (unchanged checkpoint path).
 
@@ -43,11 +45,30 @@ Authority: `docs/architecture/*`, ADR-0027/0028/0030/0031/0035, and
 - Bootstrap Jobs for Identity/Room/Tournament/Ranking Postgres, Analytics
   ClickHouse, and AsyncAPI-derived Kafka topics (plus Connect internal topics,
   kind-short `retention.ms` by ADR-0032 class, and consumer-owned DLQ topic
-  scaffolding; **no Connect/Debezium connectors yet**).
+  scaffolding).
+- Debezium Kafka Connect 3.6.0.Final (exact quay.io ARM64 digest staged by
+  node-native `crictl pull` via `make kind-load-debezium-connect`;
+  `imagePullPolicy: Never` — workload never pulls) with an
+  idempotent Job registering exactly four PostgreSQL Outbox Event Router connectors
+  (identity / room integration / tournament / ranking) using `snapshot.mode=no_data`.
+  `kind-apply` deletes the registration Job before recreate so config changes
+  re-run. Stage via `make kind-load-debezium-connect` before apply.
+  `make kind-test-debezium-connectors` checks Connect REST status only — it does
+  not prove end-to-end delivery.
+- Debezium Server for Room realtime → Redis (separate from Connect; Redis offsets
+  with a unique key, no schema-history store, official `debezium.format.*`
+  properties, `snapshot.mode=no_data`; same node-native digest stage / Never
+  pattern via `make kind-load-debezium-server`). `kind-apply` applies the Server
+  manifests, then namespace-scoped `rollout restart` of
+  `deployment/debezium-server-room-realtime` only (ConfigMap changes do not
+  restart a healthy pod by themselves), then waits for rollout.
+  Optional live probes (not claimed by validate):
+  `make kind-test-debezium-postgres-to-kafka-live` and
+  `make kind-test-debezium-postgres-to-redis-live`.
 - Postgres instances enable `wal_level=logical` with bounded local replication
   slots/senders; bootstrap creates least-privilege CDC roles/publications per
   outbox (Room: separate Kafka vs realtime CDC identities). **No logical slots
-  in bootstrap** — Debezium owns slot lifecycle when connectors land.
+  in bootstrap** — Debezium owns slot lifecycle.
 - Disposable `emptyDir` storage only — no PVC/backup claim. Redis AOF does
   **not** make Redis authoritative: pod replacement or `kind-reset` may lose
   emptyDir data and projections/timers must rebuild from Kafka/Postgres.
@@ -69,6 +90,8 @@ Create, apply, and reset are **never** implied by validate:
 ```bash
 make kind-create-cluster
 make kind-build-load-bootstrap
+make kind-load-debezium-connect
+make kind-load-debezium-server
 make kind-apply
 make kind-wait
 # ... local experiments ...
@@ -91,9 +114,9 @@ dedicated DDL credentials and Postgres advisory locks (ADR-0027).
 
 ### Out of scope for this slice
 
-- Debezium Kafka connectors and Redis sink delivery (CDC prerequisites are in
-  place; shared Connect/Debezium Server images and manifests remain pending
-  local image availability / network-pull approval).
+- End-to-end live Postgres→Kafka / Postgres→Redis delivery proofs (Connect/Server
+  status checks are not delivery claims); Analytics Kafka ingestion and Spectator
+  Kafka consumers.
 - Istio, PVC/HA/backup.
 
 ### Explicit Room / Identity durable adapter targets (after kind-wait)
@@ -248,3 +271,5 @@ Client Checkpoint CLI artifact from `client-checkpoint/bin/unoarena`.
 | Kafka broker logs STARTED but Service has no ready endpoints / probe timeouts | Readiness used heavy `kafka-topics.sh` exec probes that hang while plaintext 9092 is already listening. | Kind manifests use `tcpSocket:9092` readiness/liveness; topic drift stays in `bootstrap-kafka-topics`. Re-apply `30-kafka` or full kind apply. |
 | KurrentDB FTL unknown options `ServicePortHttpGrpc` / `Port2113Tcp*` after successful startup | Service-link env vars (`KURRENTDB_*`) collide with Kurrent configuration. | Pod must set `enableServiceLinks: false` under `spec.template.spec`. Re-apply `40-kurrentdb`. |
 | `bootstrap-clickhouse-analytics` fails with ClickHouse Code 62 `Multi-statements are not allowed` | Full migration SQL was POSTed as one HTTP body after the default sentinel. | Bootstrap splits `001_init.sql` and POSTs one statement per request (no `multiquery=1`). After a partial apply, run `make kind-reset` then re-apply. |
+| `kind-load-debezium-*` fails with stale kind-import metadata / `docker.io/library/import-*` in `repoDigests` | Prior `kind load` poisoned the node; scoped `crictl rmi` does not clear import aliases, and kubelet follows the missing alias. | `make kind-reset`, recreate the cluster, then rerun the node-native loaders. Do not attempt containerd content surgery. |
+| Debezium Connect/Server pods fail create after a “successful” digest pull | Node still carries reconstructed `import-*` repoDigests from a poisoned kind node. | Same as above: reset/recreate, then `make kind-load-debezium-connect` / `make kind-load-debezium-server`. |

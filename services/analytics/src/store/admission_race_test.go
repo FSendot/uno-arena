@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -18,8 +19,9 @@ type blockingCH struct {
 
 	active string
 	gens   map[string]genRow
-	// processed[gen|eid] = outcome_json
+	// processed[gen|topic|ikey] = outcome_json\x00fp\x00event_id
 	processed map[string]string
+	conflicts map[string]string
 	gameplay  []gameplayRow
 
 	// blockExec, when set, is invoked under no store locks before mutating.
@@ -42,6 +44,7 @@ func newBlockingCH() *blockingCH {
 	return &blockingCH{
 		gens:      map[string]genRow{},
 		processed: map[string]string{},
+		conflicts: map[string]string{},
 	}
 }
 
@@ -72,8 +75,12 @@ func (c *blockingCH) Exec(ctx context.Context, query string, params map[string]s
 		c.active = params["id"]
 		return nil
 	case strings.Contains(q, "insert into processed_events"):
-		key := params["gen"] + "|" + params["eid"]
-		c.processed[key] = params["oj"]
+		key := params["gen"] + "|" + params["topic"] + "|" + params["ikey"]
+		c.processed[key] = params["oj"] + "\x00" + params["fp"] + "\x00" + params["eid"]
+		return nil
+	case strings.Contains(q, "insert into ingestion_conflicts"):
+		key := params["gen"] + "|" + params["topic"] + "|" + params["ikey"] + "|" + params["cfp"]
+		c.conflicts[key] = params["oj"]
 		return nil
 	case strings.Contains(q, "insert into gameplay_metrics"):
 		c.gameplay = append(c.gameplay, gameplayRow{
@@ -107,27 +114,53 @@ func (c *blockingCH) Query(ctx context.Context, query string, params ...map[stri
 			return nil, nil
 		}
 		return [][]string{{c.active}}, nil
+	case strings.Contains(q, "select generation_id from recovery_jobs") && strings.Contains(q, "status in"):
+		return nil, nil
+	case strings.Contains(q, "select generation_id from projection_generations") && strings.Contains(q, "status in"):
+		var ids []string
+		for id, g := range c.gens {
+			if g.status == genStatusInitializing || g.status == genStatusBuilding {
+				ids = append(ids, id)
+			}
+		}
+		sort.Strings(ids)
+		rows := make([][]string, 0, len(ids))
+		for _, id := range ids {
+			rows = append(rows, []string{id})
+		}
+		return rows, nil
 	case strings.Contains(q, "select status from projection_generations"):
 		g, ok := c.gens[p["id"]]
 		if !ok {
 			return nil, nil
 		}
 		return [][]string{{g.status}}, nil
-	case strings.Contains(q, "select outcome_json from processed_events"):
-		key := p["gen"] + "|" + p["eid"]
-		oj, ok := c.processed[key]
+	case strings.Contains(q, "select outcome_json from processed_events"),
+		strings.Contains(q, "select outcome_json, payload_fingerprint from processed_events"),
+		strings.Contains(q, "select outcome_json, payload_fingerprint, event_id from processed_events"):
+		key := p["gen"] + "|" + p["topic"] + "|" + p["ikey"]
+		raw, ok := c.processed[key]
 		if !ok {
 			return nil, nil
 		}
-		return [][]string{{oj}}, nil
+		parts := strings.SplitN(raw, "\x00", 3)
+		oj, fp, eid := parts[0], "", ""
+		if len(parts) > 1 {
+			fp = parts[1]
+		}
+		if len(parts) > 2 {
+			eid = parts[2]
+		}
+		return [][]string{{oj, fp, eid}}, nil
 	case strings.Contains(q, "select count() from processed_events"):
 		gen := p["gen"]
 		disp := p["d"]
 		n := 0
-		for k, oj := range c.processed {
+		for k, raw := range c.processed {
 			if !strings.HasPrefix(k, gen+"|") {
 				continue
 			}
+			oj, _, _ := strings.Cut(raw, "\x00")
 			if disp == dispositionApplied {
 				if strings.Contains(oj, `"kind":"accepted"`) {
 					n++
@@ -209,6 +242,7 @@ func TestApplyDuringRebuild_LandsInNewlyActiveGeneration(t *testing.T) {
 	ch := newBlockingCH()
 	ch.seedInitial()
 	s := &AnalyticsStore{client: ch}
+	s.AllowAdHocRebuild(true)
 
 	ctx := context.Background()
 	if _, err := s.Apply(ctx, raceGameplay("seed1")); err != nil {
@@ -309,6 +343,7 @@ func TestFailedRebuild_UnblocksApplyAndKeepsOldGeneration(t *testing.T) {
 	ch := newBlockingCH()
 	ch.seedInitial()
 	s := &AnalyticsStore{client: ch}
+	s.AllowAdHocRebuild(true)
 	ctx := context.Background()
 
 	if _, err := s.Apply(ctx, raceGameplay("keep1")); err != nil {

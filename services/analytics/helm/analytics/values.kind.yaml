@@ -1,5 +1,4 @@
-# Local kind overlay for Analytics durable ClickHouse HTTP store.
-# Kafka ingestion / Debezium remain PENDING.
+# Local kind overlay for Analytics durable ClickHouse + Kafka ingestion.
 kind: true
 
 replicaCount: 1
@@ -15,8 +14,12 @@ env:
   DEPLOYMENT_ENV: local
   CLICKHOUSE_URL: http://clickhouse.uno-arena.svc.cluster.local:8123
   CLICKHOUSE_DB: analytics
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: analytics
+  KAFKA_TOPICS: room.gameplay.metrics,room.match.completed,tournament.match.assigned,tournament.match.result_recorded,tournament.players.advanced,tournament.round.completed,tournament.completed,ranking.player_rating_updated,ranking.leaderboard_snapshot_published
+  KAFKA_MAX_ATTEMPTS: "5"
+  KAFKA_MAX_PARTITION_WORKERS: "8"
   # Durable mode: no ANALYTICS_CAPABILITY_MODE; ClickHouse credentials from secret.
-  # KAFKA_BROKERS intentionally omitted until Kafka ingestion slice.
 
 existingSecret: uno-arena-local-credentials
 secretEnv:
@@ -29,3 +32,16 @@ secretEnv:
 
 projectionRebuilder:
   enabled: false
+  env:
+    ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+    TOURNAMENT_ORCHESTRATION_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080
+    RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
+    KAFKA_PROJECTION_REBUILD_GROUP: analytics-projection-rebuilder
+    KAFKA_PROJECTION_REBUILD_TOPIC: analytics.projection.rebuild_requested
+    KAFKA_PROJECTION_REBUILD_DLQ_TOPIC: analytics.projection.rebuild_requested.analytics.dlq
+  secretEnv:
+    CLICKHOUSE_USER: analytics-runtime-user
+    CLICKHOUSE_PASSWORD: analytics-runtime-password
+    ANALYTICS_ROOM_CREDENTIAL: analytics-room-credential
+    ANALYTICS_TOURNAMENT_CREDENTIAL: analytics-tournament-credential
+    ANALYTICS_RANKING_CREDENTIAL: analytics-ranking-credential

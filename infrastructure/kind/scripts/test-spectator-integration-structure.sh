@@ -54,8 +54,11 @@ fi
 if ! grep -E 'trap[[:space:]]+cleanup[[:space:]]+EXIT' "${ADAPTER}" >/dev/null 2>&1; then
   die "adapter must trap cleanup EXIT"
 fi
-if ! grep -F 'PENDING' "${ADAPTER}" >/dev/null 2>&1; then
-  die "adapter must note Kafka PENDING"
+if ! grep -F 'does not exercise live Kafka delivery' "${ADAPTER}" >/dev/null 2>&1; then
+  die "adapter must note suite does not exercise live Kafka delivery"
+fi
+if ! grep -E 'Redis/Lua|quarantine' "${ADAPTER}" >/dev/null 2>&1; then
+  die "adapter must note Redis/Lua quarantine verification scope"
 fi
 
 if bash -c "SPECTATOR_REDIS_URL=redis://evil:6379/0; source '${ADAPTER}'" >/dev/null 2>&1; then

@@ -60,4 +60,24 @@ for j in "${jobs[@]}"; do
   kubectl -n "${KIND_NAMESPACE}" wait --for=condition=complete "job/${j}" --timeout="${JOB_TIMEOUT}"
 done
 
+# Debezium Kafka Connect after Kafka + Postgres bootstrap (connect-* topics + CDC pubs).
+# Requires image loaded via make kind-load-debezium-connect. Does not claim live CDC delivery.
+# Delete completed registration Job so config changes re-run idempotently (Jobs are immutable).
+kubectl -n "${KIND_NAMESPACE}" delete job/register-debezium-connectors --ignore-not-found=true
+kubectl apply -f "${MANIFESTS_DIR}/80-debezium"
+echo "waiting for deployment/debezium-connect (timeout=${DATASTORE_TIMEOUT})"
+kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/debezium-connect" --timeout="${DATASTORE_TIMEOUT}"
+echo "waiting for job/register-debezium-connectors (timeout=${JOB_TIMEOUT})"
+kubectl -n "${KIND_NAMESPACE}" wait --for=condition=complete "job/register-debezium-connectors" --timeout="${JOB_TIMEOUT}"
+
+# Debezium Server (Room realtime → Redis) after Redis + Room Postgres bootstrap.
+# Requires image loaded via make kind-load-debezium-server. Does not claim live CDC delivery.
+# ConfigMap apply does not bump the Deployment pod template; restart so Server reloads
+# mounted startup config (namespace-scoped; does not restart unrelated Deployments).
+kubectl apply -f "${MANIFESTS_DIR}/80-debezium-server"
+echo "restarting deployment/debezium-server-room-realtime (reload mounted ConfigMap)"
+kubectl -n "${KIND_NAMESPACE}" rollout restart "deployment/debezium-server-room-realtime"
+echo "waiting for deployment/debezium-server-room-realtime (timeout=${DATASTORE_TIMEOUT})"
+kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/debezium-server-room-realtime" --timeout="${DATASTORE_TIMEOUT}"
+
 echo "ok kind-apply namespace=${KIND_NAMESPACE}"

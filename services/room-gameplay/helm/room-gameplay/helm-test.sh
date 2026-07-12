@@ -22,6 +22,18 @@ echo "${kind_out}" | grep -q 'room-timer'
 echo "${kind_out}" | grep -q 'type: ClusterIP'
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
 
+echo "${kind_out}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
+echo "${kind_out}" | grep -q 'key: "analytics-room-credential"'
+echo "${kind_out}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
+echo "${kind_out}" | grep -q 'key: "room-analytics-backfill-cursor-secret"'
+echo "${kind_out}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
+echo "${kind_out}" | grep -q 'key: "room-public-list-cursor-secret"'
+# Timer worker must not receive Analytics backfill auth, public-list cursor, or cursor MAC secrets.
+timer_doc="$(echo "${kind_out}" | awk '/name: room-kind-timer-worker$/,/^---$/')"
+! echo "${timer_doc}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
+! echo "${timer_doc}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
+! echo "${timer_doc}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
+
 if "${HELM}" template room-staging "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.staging.yaml" >/dev/null 2>&1; then
   echo "staging without digest must fail" >&2
   exit 1
@@ -79,5 +91,19 @@ pin_tag_staging="$("${HELM}" template room-pin-staging "${CHART}" -f "${CHART}/v
   --set image.tag=latest)"
 echo "${pin_tag_staging}" | grep -q 'image: "registry.gitlab.com/group/uno-arena/room-gameplay@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'
 ! echo "${pin_tag_staging}" | grep -q 'image: "registry.gitlab.com/group/uno-arena/room-gameplay:latest"'
+
+pin_staging_full="$("${HELM}" template room-pin-staging-full "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.staging.yaml" \
+  --set image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --set image.tag=)"
+echo "${pin_staging_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
+echo "${pin_staging_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
+echo "${pin_staging_full}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
+
+pin_prod_full="$("${HELM}" template room-pin-prod-full "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.production.yaml" \
+  --set image.digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --set image.tag=)"
+echo "${pin_prod_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
+echo "${pin_prod_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
+echo "${pin_prod_full}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
 
 echo "ok room-gameplay-helm"

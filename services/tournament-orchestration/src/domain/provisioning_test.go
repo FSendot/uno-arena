@@ -5,6 +5,47 @@ import (
 	"testing"
 )
 
+func TestCompleteBatch_PublicBracketVisibleOnlyOnRoundTransition(t *testing.T) {
+	tr := mustCreate(t, "t-vis", 25)
+	for i := 1; i <= 25; i++ {
+		mustRegister(t, tr, PlayerID("p"+strconv.Itoa(i)))
+	}
+	mustCloseAndSeed(t, tr, 1)
+	mustProvision(t, tr, 1)
+	r, _ := tr.Round(1)
+	if len(r.Batches) < 2 {
+		t.Fatalf("need multi-batch round, got %d", len(r.Batches))
+	}
+
+	out := tr.CompleteTournamentProvisioningBatch(CompleteTournamentProvisioningBatchCommand{
+		CommandID: "vis-b0", RoundNumber: 1, BatchID: r.Batches[0].BatchID,
+	})
+	if out.Kind != OutcomeAccepted || !hasFact(out.Facts, FactTournamentProvisioningBatchCompleted) {
+		t.Fatalf("non-last complete: %+v", out)
+	}
+	if factData(out.Facts, FactTournamentProvisioningBatchCompleted, FactDataPublicBracketVisible) == "true" {
+		t.Fatal("non-last batch completion must not mark publicBracketVisible")
+	}
+	r, _ = tr.Round(1)
+	if r.Status != RoundProvisioning {
+		t.Fatalf("round status=%s want provisioning after non-last complete", r.Status)
+	}
+
+	out = tr.CompleteTournamentProvisioningBatch(CompleteTournamentProvisioningBatchCommand{
+		CommandID: "vis-b1", RoundNumber: 1, BatchID: r.Batches[1].BatchID,
+	})
+	if out.Kind != OutcomeAccepted || !hasFact(out.Facts, FactTournamentProvisioningBatchCompleted) {
+		t.Fatalf("last complete: %+v", out)
+	}
+	if factData(out.Facts, FactTournamentProvisioningBatchCompleted, FactDataPublicBracketVisible) != "true" {
+		t.Fatal("last batch completion must mark publicBracketVisible")
+	}
+	r, _ = tr.Round(1)
+	if r.Status != RoundInProgress {
+		t.Fatalf("round status=%s want in_progress", r.Status)
+	}
+}
+
 func TestProvisioningBatches_Deterministic(t *testing.T) {
 	tr := mustCreate(t, "t-prov", 25)
 	for i := 1; i <= 25; i++ {
@@ -42,22 +83,49 @@ func TestProvisioningBatches_Deterministic(t *testing.T) {
 	out := tr.CompleteTournamentProvisioningBatch(CompleteTournamentProvisioningBatchCommand{
 		CommandID: "complete-b0", RoundNumber: 1, BatchID: r.Batches[0].BatchID,
 	})
-	if out.Kind != OutcomeAccepted {
+	if out.Kind != OutcomeAccepted || !hasFact(out.Facts, FactTournamentProvisioningBatchCompleted) {
 		t.Fatalf("complete batch0: %+v", out)
 	}
 	out = tr.CompleteTournamentProvisioningBatch(CompleteTournamentProvisioningBatchCommand{
 		CommandID: "complete-b1", RoundNumber: 1, BatchID: r.Batches[1].BatchID,
 	})
-	if out.Kind != OutcomeAccepted {
+	if out.Kind != OutcomeAccepted || !hasFact(out.Facts, FactTournamentProvisioningBatchCompleted) {
 		t.Fatalf("complete batch1: %+v", out)
 	}
 	r, _ = tr.Round(1)
 	if r.Status != RoundInProgress {
 		t.Fatalf("round status=%s want in_progress", r.Status)
 	}
+	// Duplicate complete of an already-completed batch is factless (version-stable).
+	out = tr.CompleteTournamentProvisioningBatch(CompleteTournamentProvisioningBatchCommand{
+		CommandID: "complete-b0-again", RoundNumber: 1, BatchID: r.Batches[0].BatchID,
+	})
+	if out.Kind != OutcomeAccepted || len(out.Facts) != 0 {
+		t.Fatalf("duplicate complete must be factless: %+v", out)
+	}
 	out = tr.ProvisionRoundMatches(ProvisionRoundMatchesCommand{CommandID: "prov-again", RoundNumber: 1})
 	if out.Kind != OutcomeAccepted || len(out.Facts) != 0 {
 		t.Fatalf("reprovision: %+v", out)
+	}
+}
+
+func TestProvisionRoundMatches_RejectsPendingRound(t *testing.T) {
+	tr := mustCreate(t, "t-pending-prov", 10)
+	for i := 1; i <= 3; i++ {
+		mustRegister(t, tr, PlayerID("p"+strconv.Itoa(i)))
+	}
+	if out := tr.CloseRegistration(CloseRegistrationCommand{CommandID: "close-1"}); out.Kind != OutcomeAccepted {
+		t.Fatalf("close: %+v", out)
+	}
+	// Simulate durable partial seed: pending round with no slots provisioned yet.
+	tr.rounds[1] = &Round{
+		Number: 1,
+		Status: RoundPending,
+		Slots:  nil,
+	}
+	out := tr.ProvisionRoundMatches(ProvisionRoundMatchesCommand{CommandID: "prov-pending", RoundNumber: 1})
+	if out.Kind != OutcomeRejected || out.Rejection.Code != RejectRoundNotReady {
+		t.Fatalf("pending round must reject provision: %+v", out)
 	}
 }
 
@@ -82,6 +150,12 @@ func TestProvisioningRetry_ThenQuarantineOnBudget(t *testing.T) {
 	})
 	if out.Kind != OutcomeAccepted || len(out.Facts) != 0 {
 		t.Fatalf("retry idempotent: %+v", out)
+	}
+	out = tr.RetryTournamentProvisioningBatch(RetryTournamentProvisioningBatchCommand{
+		CommandID: "retry-skip", RoundNumber: 1, BatchID: batchID, RetryAttempt: 3,
+	})
+	if out.Kind != OutcomeRejected || out.Rejection.Code != RejectInvalidCommand {
+		t.Fatalf("skip attempt must reject: %+v", out)
 	}
 	out = tr.RetryTournamentProvisioningBatch(RetryTournamentProvisioningBatchCommand{
 		CommandID: "retry-2", RoundNumber: 1, BatchID: batchID, RetryAttempt: 2,

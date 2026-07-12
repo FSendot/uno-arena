@@ -22,6 +22,7 @@ type RestoreGameInput struct {
 	Placement     []PlayerID
 	CardPoints    map[PlayerID]int
 	Outcomes      map[CommandID]CommandOutcome
+	DrawPileSize  int
 }
 
 // RestoreGame rebuilds a Game from durable storage without applying commands.
@@ -37,6 +38,9 @@ func RestoreGame(in RestoreGameInput) *Game {
 	outcomes := cloneOutcomes(in.Outcomes)
 	if outcomes == nil {
 		outcomes = map[CommandID]CommandOutcome{}
+	}
+	if in.DrawPileSize < 0 {
+		in.DrawPileSize = 0
 	}
 	g := &Game{
 		id:            in.ID,
@@ -56,6 +60,7 @@ func RestoreGame(in RestoreGameInput) *Game {
 		placement:     append([]PlayerID(nil), in.Placement...),
 		cardPoints:    pts,
 		outcomes:      outcomes,
+		drawPileSize:  in.DrawPileSize,
 	}
 	if in.Uno != nil {
 		uw := *in.Uno

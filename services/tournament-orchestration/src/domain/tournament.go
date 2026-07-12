@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -15,6 +14,7 @@ type Tournament struct {
 	capacity    int
 	retryBudget int
 	batchSize   int
+	visibility  TournamentVisibility
 
 	// registrations maps playerId -> registered. Sparse; never pre-allocates capacity slots.
 	registrations map[PlayerID]struct{}
@@ -58,8 +58,21 @@ func CreateTournament(cmd CreateTournamentCommand) (*Tournament, CommandOutcome)
 		retry = DefaultRetryBudget
 	}
 	batch := cmd.BatchSize
+	if batch > MaxProvisioningBatchSize || batch < 0 {
+		return nil, rejectedOutcome(cmd.CommandID, Rejection{
+			Code:    RejectInvalidCommand,
+			Message: "batchSize out of range",
+		})
+	}
 	if batch <= 0 {
 		batch = DefaultBatchSize
+	}
+	vis, err := NormalizeTournamentVisibility(string(cmd.Visibility))
+	if err != nil {
+		return nil, rejectedOutcome(cmd.CommandID, Rejection{
+			Code:    RejectInvalidCommand,
+			Message: "visibility must be public or private",
+		})
 	}
 	t := &Tournament{
 		id:              cmd.TournamentID,
@@ -67,6 +80,7 @@ func CreateTournament(cmd CreateTournamentCommand) (*Tournament, CommandOutcome)
 		capacity:        cmd.Capacity,
 		retryBudget:     retry,
 		batchSize:       batch,
+		visibility:      vis,
 		registrations:   map[PlayerID]struct{}{},
 		rounds:          map[int]*Round{},
 		outcomes:        map[CommandID]CommandOutcome{},
@@ -75,24 +89,21 @@ func CreateTournament(cmd CreateTournamentCommand) (*Tournament, CommandOutcome)
 		roomOwners:      map[RoomID]string{},
 	}
 	out := acceptedOutcome(cmd.CommandID, []Fact{
-		newFact(FactTournamentCreated, map[string]string{
-			"tournamentId": string(cmd.TournamentID),
-			"capacity":     strconv.Itoa(cmd.Capacity),
-			"phase":        string(PhaseRegistration),
-		}),
+		TournamentCreatedFact(cmd.TournamentID, cmd.Capacity, vis),
 	})
 	t.outcomes[cmd.CommandID] = out
 	return t, out
 }
 
-func (t *Tournament) ID() TournamentID       { return t.id }
-func (t *Tournament) Phase() TournamentPhase { return t.phase }
-func (t *Tournament) Capacity() int          { return t.capacity }
-func (t *Tournament) RegisteredCount() int   { return len(t.registrations) }
-func (t *Tournament) Champion() PlayerID     { return t.champion }
-func (t *Tournament) CurrentRound() int      { return t.currentRound }
-func (t *Tournament) RetryBudget() int       { return t.retryBudget }
-func (t *Tournament) BatchSize() int         { return t.batchSize }
+func (t *Tournament) ID() TournamentID                    { return t.id }
+func (t *Tournament) Phase() TournamentPhase              { return t.phase }
+func (t *Tournament) Capacity() int                       { return t.capacity }
+func (t *Tournament) RegisteredCount() int                { return len(t.registrations) }
+func (t *Tournament) Champion() PlayerID                  { return t.champion }
+func (t *Tournament) CurrentRound() int                   { return t.currentRound }
+func (t *Tournament) RetryBudget() int                    { return t.retryBudget }
+func (t *Tournament) BatchSize() int                      { return t.batchSize }
+func (t *Tournament) Visibility() TournamentVisibility    { return t.visibility }
 
 func (t *Tournament) Round(n int) (*Round, bool) {
 	r, ok := t.rounds[n]
@@ -222,9 +233,8 @@ func (t *Tournament) SeedRound(cmd SeedRoundCommand) CommandOutcome {
 	if len(players) == 0 {
 		return t.reject(cmd.CommandID, RejectInvalidCommand, "no players to seed")
 	}
-	sort.Slice(players, func(i, j int) bool {
-		return string(players[i]) < string(players[j])
-	})
+	// Source order is player_id ASC (not registered_at / registrationOrder).
+	players = SortPlayerIDsAsc(players)
 
 	isFinal := len(players) <= FinalPlayerThreshold
 	var slots []BracketSlot
@@ -300,7 +310,8 @@ func (t *Tournament) ProvisionRoundMatches(cmd ProvisionRoundMatchesCommand) Com
 			return t.store(acceptedOutcome(cmd.CommandID, nil))
 		}
 	}
-	if round.Status != RoundSeeded && round.Status != RoundPending {
+	// Pending (partial durable seed) must never provision; require RoundSeeded.
+	if round.Status != RoundSeeded {
 		return t.reject(cmd.CommandID, RejectRoundNotReady, "round not ready to provision")
 	}
 
@@ -357,6 +368,7 @@ func (t *Tournament) CompleteTournamentProvisioningBatch(cmd CompleteTournamentP
 		return t.reject(cmd.CommandID, RejectQuarantined, "batch is quarantined")
 	}
 	if batch.Status == BatchCompleted {
+		// Semantic no-op: already complete — factless so projection version stays stable.
 		return t.store(acceptedOutcome(cmd.CommandID, nil))
 	}
 	batch.Status = BatchCompleted
@@ -371,7 +383,19 @@ func (t *Tournament) CompleteTournamentProvisioningBatch(cmd CompleteTournamentP
 	if allDone {
 		round.Status = RoundInProgress
 	}
-	return t.store(acceptedOutcome(cmd.CommandID, nil))
+	data := map[string]string{
+		"tournamentId": string(t.id),
+		"roundNumber":  strconv.Itoa(cmd.RoundNumber),
+		"batchId":      string(cmd.BatchID),
+	}
+	// Public summary exposes round status (not batch statuses). Only the completion
+	// that transitions the round marks BracketPage-visible projection bumps.
+	if allDone {
+		data[FactDataPublicBracketVisible] = "true"
+	}
+	return t.store(acceptedOutcome(cmd.CommandID, []Fact{
+		newFact(FactTournamentProvisioningBatchCompleted, data),
+	}))
 }
 
 func batchContaining(batches []ProvisioningBatch, slotIndex int) BatchID {
@@ -450,132 +474,9 @@ func (t *Tournament) RecordMatchResult(cmd RecordMatchResultCommand) CommandOutc
 	if out, ok := t.recall(cmd.CommandID); ok {
 		return out
 	}
-	if !cmd.CommandID.Valid() || !cmd.RoomID.Valid() || !cmd.SlotID.Valid() || cmd.RoundNumber < 1 {
-		return t.reject(cmd.CommandID, RejectInvalidIdentity, "record result requires identities")
-	}
-	if t.phase.IsTerminal() {
-		return t.reject(cmd.CommandID, RejectAlreadyTerminal, "tournament is terminal")
-	}
-	if cmd.EventID.Valid() {
-		if prior, seen := t.processedEvents[cmd.EventID]; seen {
-			dup := duplicateOutcome(prior)
-			dup.CommandID = cmd.CommandID
-			return t.store(dup)
-		}
-	}
-
-	ranked, err := RankStandings(cmd.Standings)
-	if err != nil {
-		return t.reject(cmd.CommandID, RejectInvalidCommand, err.Error())
-	}
-	fp := fingerprintFromRanked(ranked)
-	key := resultKey(cmd.RoomID, cmd.CompletionVersion)
-	if prev, ok := t.resultKeys[key]; ok {
-		if prev.Disposition == DispositionQuarantined {
-			out := acceptedOutcome(cmd.CommandID, nil)
-			return t.rememberEvent(cmd.EventID, out)
-		}
-		if prev.Fingerprint == fp {
-			src := prev.SourceEventID
-			if cmd.EventID.Valid() {
-				src = string(cmd.EventID)
-			}
-			t.resultKeys[key] = resultRecord{Disposition: DispositionDuplicateIgnored, Fingerprint: fp, SourceEventID: src}
-			out := acceptedOutcome(cmd.CommandID, nil)
-			return t.rememberEvent(cmd.EventID, out)
-		}
-		return t.quarantineResult(cmd, fp, "conflicting result for same room and completionVersion")
-	}
-
-	round, ok := t.rounds[cmd.RoundNumber]
-	if !ok {
-		return t.reject(cmd.CommandID, RejectRoundNotFound, "round not found")
-	}
-	slot, ok := round.findSlot(cmd.SlotID)
-	if !ok {
-		return t.reject(cmd.CommandID, RejectSlotNotFound, "slot not found")
-	}
-
-	if !slot.RoomID.Valid() || slot.RoomID != cmd.RoomID {
-		return t.quarantineResult(cmd, fp, "room does not match assigned slot")
-	}
-
-	if slot.HasResult {
-		if slot.CompletionVersion == cmd.CompletionVersion && slot.ResultFingerprint == fp {
-			t.resultKeys[key] = resultRecord{
-				Disposition: DispositionDuplicateIgnored, Fingerprint: fp, SourceEventID: string(cmd.EventID),
-			}
-			out := acceptedOutcome(cmd.CommandID, nil)
-			return t.rememberEvent(cmd.EventID, out)
-		}
-		return t.quarantineResult(cmd, fp, "conflicting completion for slot with existing result")
-	}
-
-	// Abandoned matches cannot advance the normal bracket; quarantine for operator handling.
-	if cmd.IsAbandoned {
-		return t.quarantineResult(cmd, fp, "abandoned match cannot advance bracket")
-	}
-
-	var advancing []PlayerID
-	var status SlotStatus
-	var advanceRule string
-	if round.IsFinal {
-		advancing = make([]PlayerID, len(ranked))
-		for i := range ranked {
-			advancing[i] = ranked[i].PlayerID
-		}
-		status = SlotResultRecorded
-		advanceRule = "final_ranked_result"
-	} else {
-		advancing, err = TopThree(cmd.Standings)
-		if err != nil {
-			return t.reject(cmd.CommandID, RejectInvalidCommand, err.Error())
-		}
-		status = SlotAdvanced
-		advanceRule = "match_wins_card_points_completion_time"
-	}
-
-	standings := make([]PlayerMatchStanding, len(cmd.Standings))
-	copy(standings, cmd.Standings)
-
-	slot.Standings = standings
-	slot.CompletionVersion = cmd.CompletionVersion
-	slot.ResultFingerprint = fp
-	slot.HasResult = true
-	slot.Advancing = advancing
-	slot.Status = status
-	if round.IsFinal {
-		if champ, ok := ChampionFromStandings(standings); ok {
-			t.champion = champ
-		}
-	}
-
-	facts := []Fact{
-		newFact(FactTournamentMatchResultRecorded, map[string]string{
-			"tournamentId":      string(t.id),
-			"roundNumber":       strconv.Itoa(cmd.RoundNumber),
-			"slotId":            string(cmd.SlotID),
-			"roomId":            string(cmd.RoomID),
-			"completionVersion": strconv.FormatUint(uint64(cmd.CompletionVersion), 10),
-		}),
-	}
-	advanceData := map[string]string{
-		"tournamentId":       string(t.id),
-		"roundNumber":        strconv.Itoa(cmd.RoundNumber),
-		"sourceSlotId":       string(cmd.SlotID),
-		"advancingPlayerIds": joinPlayerIDs(advancing),
-		"rule":               advanceRule,
-	}
-	if round.IsFinal {
-		advanceData["isFinal"] = "true"
-	}
-	facts = append(facts, newFact(FactPlayersAdvanced, advanceData))
-
-	t.resultKeys[key] = resultRecord{
-		Disposition: DispositionRecorded, Fingerprint: fp, SourceEventID: string(cmd.EventID),
-	}
-	out := acceptedOutcome(cmd.CommandID, facts)
-	return t.rememberEvent(cmd.EventID, out)
+	ctx := t.BuildRoundMatchContext(cmd)
+	d := DecideRecordMatchResult(ctx, cmd)
+	return t.applyRoundMatchDecision(cmd, d)
 }
 
 func fingerprintFromRanked(ranked []PlayerMatchStanding) string {
@@ -593,41 +494,6 @@ func standingsFingerprint(standings []PlayerMatchStanding) (string, error) {
 		return "", err
 	}
 	return fingerprintFromRanked(ranked), nil
-}
-
-func (t *Tournament) quarantineResult(cmd RecordMatchResultCommand, fp, reason string) CommandOutcome {
-	key := resultKey(cmd.RoomID, cmd.CompletionVersion)
-	if fp == "" {
-		if computed, err := standingsFingerprint(cmd.Standings); err == nil {
-			fp = computed
-		}
-	}
-	t.resultKeys[key] = resultRecord{
-		Disposition: DispositionQuarantined, Fingerprint: fp, SourceEventID: string(cmd.EventID),
-	}
-	if round, ok := t.rounds[cmd.RoundNumber]; ok {
-		if slot, ok := round.findSlot(cmd.SlotID); ok {
-			// Do not overwrite an already-accepted advancement decision.
-			if !slot.HasResult {
-				slot.Status = SlotQuarantined
-				slot.QuarantineReason = reason
-				round.Status = RoundBlocked
-			} else {
-				slot.QuarantineReason = reason
-			}
-		}
-	}
-	out := acceptedOutcome(cmd.CommandID, []Fact{
-		newFact(FactTournamentResultQuarantined, map[string]string{
-			"tournamentId":      string(t.id),
-			"roundNumber":       strconv.Itoa(cmd.RoundNumber),
-			"slotId":            string(cmd.SlotID),
-			"roomId":            string(cmd.RoomID),
-			"completionVersion": strconv.FormatUint(uint64(cmd.CompletionVersion), 10),
-			"reason":            reason,
-		}),
-	})
-	return t.rememberEvent(cmd.EventID, out)
 }
 
 func resultKey(roomID RoomID, ver CompletionVersion) string {
@@ -680,7 +546,9 @@ func (t *Tournament) CompleteRound(cmd CompleteRoundCommand) CommandOutcome {
 	}))
 }
 
-// CompleteTournament completes when the final room has an authoritative ranked result and champion.
+// CompleteTournament completes when the final room has authoritative ordered standings.
+// Publishes FactTournamentCompleted with finalStandings (no championId); champion for
+// HTTP/read models is derived from finalStandings[0] on the aggregate.
 func (t *Tournament) CompleteTournament(cmd CompleteTournamentCommand) CommandOutcome {
 	if out, ok := t.recall(cmd.CommandID); ok {
 		return out
@@ -701,15 +569,20 @@ func (t *Tournament) CompleteTournament(cmd CompleteTournamentCommand) CommandOu
 	if !round.Completed {
 		return t.reject(cmd.CommandID, RejectRoundIncomplete, "final round not completed")
 	}
-	if !t.champion.Valid() {
-		return t.reject(cmd.CommandID, RejectRoundIncomplete, "champion not determined")
+	if len(round.Slots) == 0 {
+		return t.reject(cmd.CommandID, RejectRoundIncomplete, "final standings not determined")
 	}
+	finalStandings := append([]PlayerID(nil), round.Slots[0].Advancing...)
+	if err := ValidateFinalStandings(finalStandings); err != nil {
+		return t.reject(cmd.CommandID, RejectRoundIncomplete, err.Error())
+	}
+	t.champion = finalStandings[0]
 	t.phase = PhaseCompleted
 	return t.store(acceptedOutcome(cmd.CommandID, []Fact{
 		newFact(FactTournamentCompleted, map[string]string{
-			"tournamentId": string(t.id),
-			"championId":   string(t.champion),
-			"phase":        string(PhaseCompleted),
+			"tournamentId":   string(t.id),
+			"finalStandings": joinPlayerIDs(finalStandings),
+			"phase":          string(PhaseCompleted),
 		}),
 	}))
 }
@@ -740,6 +613,8 @@ func (t *Tournament) CancelTournament(cmd CancelTournamentCommand) CommandOutcom
 // RetryTournamentProvisioningBatch records retry saga state.
 // Idempotent by (tournamentId, roundNumber, batchId, retryAttempt).
 // Exhausting retry budget quarantines the batch.
+// Strict sequencing: explicit retryAttempt may be current+1; status=retried +
+// explicit == current is an exact no-op; lower/skip reject; zero keeps auto-next.
 func (t *Tournament) RetryTournamentProvisioningBatch(cmd RetryTournamentProvisioningBatchCommand) CommandOutcome {
 	if out, ok := t.recall(cmd.CommandID); ok {
 		return out
@@ -766,20 +641,27 @@ func (t *Tournament) RetryTournamentProvisioningBatch(cmd RetryTournamentProvisi
 	}
 	nextAttempt := batch.RetryAttempt + 1
 	if cmd.RetryAttempt > 0 {
+		if cmd.RetryAttempt != nextAttempt {
+			return t.reject(cmd.CommandID, RejectInvalidCommand, "retryAttempt must be current+1")
+		}
 		nextAttempt = cmd.RetryAttempt
 	}
 	if nextAttempt > t.retryBudget {
 		batch.Status = BatchQuarantined
-		batch.QuarantineReason = "retry budget exhausted"
-		round.Status = RoundBlocked
+		batch.QuarantineReason = "retry_budget_exhausted"
+		data := map[string]string{
+			"tournamentId": string(t.id),
+			"roundNumber":  strconv.Itoa(cmd.RoundNumber),
+			"batchId":      string(cmd.BatchID),
+			"reason":       "retry_budget_exhausted",
+			"retryAttempt": strconv.Itoa(nextAttempt),
+		}
+		if round.Status != RoundBlocked {
+			round.Status = RoundBlocked
+			data[FactDataPublicBracketVisible] = "true"
+		}
 		return t.store(acceptedOutcome(cmd.CommandID, []Fact{
-			newFact(FactTournamentProvisioningBatchQuarantined, map[string]string{
-				"tournamentId": string(t.id),
-				"roundNumber":  strconv.Itoa(cmd.RoundNumber),
-				"batchId":      string(cmd.BatchID),
-				"reason":       "retry budget exhausted",
-				"retryAttempt": strconv.Itoa(nextAttempt),
-			}),
+			newFact(FactTournamentProvisioningBatchQuarantined, data),
 		}))
 	}
 	batch.RetryAttempt = nextAttempt
@@ -796,6 +678,7 @@ func (t *Tournament) RetryTournamentProvisioningBatch(cmd RetryTournamentProvisi
 
 // QuarantineTournamentProvisioningBatch marks a batch for operator review.
 // Idempotent by (tournamentId, roundNumber, batchId).
+// Reasons are stable sanitized codes — never raw operator/error text.
 func (t *Tournament) QuarantineTournamentProvisioningBatch(cmd QuarantineTournamentProvisioningBatchCommand) CommandOutcome {
 	if out, ok := t.recall(cmd.CommandID); ok {
 		return out
@@ -814,56 +697,56 @@ func (t *Tournament) QuarantineTournamentProvisioningBatch(cmd QuarantineTournam
 	if batch.Status == BatchQuarantined {
 		return t.store(acceptedOutcome(cmd.CommandID, nil))
 	}
-	reason := cmd.Reason
+	reason := SanitizeProvisioningReason(cmd.Reason)
 	if reason == "" {
-		reason = "operator quarantine"
+		reason = "quarantined"
 	}
 	batch.Status = BatchQuarantined
 	batch.QuarantineReason = reason
-	round.Status = RoundBlocked
+	data := map[string]string{
+		"tournamentId": string(t.id),
+		"roundNumber":  strconv.Itoa(cmd.RoundNumber),
+		"batchId":      string(cmd.BatchID),
+		"reason":       reason,
+	}
+	if round.Status != RoundBlocked {
+		round.Status = RoundBlocked
+		data[FactDataPublicBracketVisible] = "true"
+	}
 	return t.store(acceptedOutcome(cmd.CommandID, []Fact{
-		newFact(FactTournamentProvisioningBatchQuarantined, map[string]string{
-			"tournamentId": string(t.id),
-			"roundNumber":  strconv.Itoa(cmd.RoundNumber),
-			"batchId":      string(cmd.BatchID),
-			"reason":       reason,
-		}),
+		newFact(FactTournamentProvisioningBatchQuarantined, data),
 	}))
 }
 
 // QuarantineTournamentResult records an explicit result quarantine.
-// Idempotent by (roomId, completionVersion).
+// Idempotent by (roomId, completionVersion). Memory/capability path; durable uses DecideQuarantineTournamentResult.
 func (t *Tournament) QuarantineTournamentResult(cmd QuarantineTournamentResultCommand) CommandOutcome {
 	if out, ok := t.recall(cmd.CommandID); ok {
 		return out
 	}
-	if !cmd.CommandID.Valid() || !cmd.RoomID.Valid() {
-		return t.reject(cmd.CommandID, RejectInvalidIdentity, "quarantine result requires identities")
+	ctx := QuarantineTournamentResultContext{
+		TournamentID:      t.id,
+		Exists:            true,
+		RoomID:            cmd.RoomID,
+		CompletionVersion: cmd.CompletionVersion,
 	}
 	key := resultKey(cmd.RoomID, cmd.CompletionVersion)
 	fp := ""
-	if prev, ok := t.resultKeys[key]; ok {
-		if prev.Disposition == DispositionQuarantined {
-			return t.store(acceptedOutcome(cmd.CommandID, nil))
-		}
-		fp = prev.Fingerprint
-	}
-	reason := cmd.Reason
-	if reason == "" {
-		reason = "explicit quarantine"
-	}
 	prevSrc := ""
 	if prev, ok := t.resultKeys[key]; ok {
+		ctx.PriorDisposition = prev.Disposition
+		fp = prev.Fingerprint
 		prevSrc = prev.SourceEventID
 	}
+	if rn, slotID, ok := t.AssignmentByRoomID(cmd.RoomID); ok {
+		ctx.AssignmentResolved = true
+		ctx.RoundNumber = rn
+		ctx.SlotID = slotID
+	}
+	d := DecideQuarantineTournamentResult(ctx, cmd)
+	if d.Outcome.Rejected() || d.Kind == QuarantineResultAlreadyDone {
+		return t.store(d.Outcome)
+	}
 	t.resultKeys[key] = resultRecord{Disposition: DispositionQuarantined, Fingerprint: fp, SourceEventID: prevSrc}
-	out := acceptedOutcome(cmd.CommandID, []Fact{
-		newFact(FactTournamentResultQuarantined, map[string]string{
-			"tournamentId":      string(t.id),
-			"roomId":            string(cmd.RoomID),
-			"completionVersion": strconv.FormatUint(uint64(cmd.CompletionVersion), 10),
-			"reason":            reason,
-		}),
-	})
-	return t.store(out)
+	return t.store(d.Outcome)
 }

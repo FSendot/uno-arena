@@ -163,7 +163,7 @@ check(failures, "split-real-analytics-migration-each-single-statement") do
   sql = File.read(ANALYTICS_MIGRATION)
   stmts = ClickhouseSqlSplit.split(sql)
   raise "expected >= 7 statements (CREATE DATABASE/TABLEs + INSERT), got #{stmts.size}" unless stmts.size >= 7
-  raise "expected exactly 9 statements for current 001_init.sql, got #{stmts.size}" unless stmts.size == 9
+  raise "expected exactly 14 statements for current 001_init.sql, got #{stmts.size}" unless stmts.size == 14
   # Leading file header comments may attach to the first statement; body must still be CREATE DATABASE.
   raise "first must be CREATE DATABASE" unless stmts.first.match?(/\bCREATE\s+DATABASE\b/i)
   raise "last must be INSERT schema_migrations" unless stmts.last.match?(/\bINSERT\s+INTO\s+analytics\.schema_migrations\b/i)
@@ -172,7 +172,7 @@ check(failures, "split-real-analytics-migration-each-single-statement") do
   end
   # Round-trip fingerprint: joined essential content still contains all CREATE TABLE names.
   joined = stmts.join("\n")
-  %w[schema_migrations projection_generations active_generation gameplay_metrics tournament_statistics rating_statistics processed_events].each do |t|
+  %w[schema_migrations projection_generations active_generation gameplay_metrics tournament_statistics rating_statistics processed_events ingestion_conflicts recovery_jobs recovery_leases recovery_page_checkpoints recovery_request_idempotency].each do |t|
     raise "missing table #{t} after split" unless joined.include?("analytics.#{t}")
   end
 end
@@ -183,7 +183,7 @@ check(failures, "cli-writes-one-file-per-statement") do
     ok = system(RbConfig.ruby, BIN, ANALYTICS_MIGRATION, dir)
     raise "CLI exited non-zero" unless ok
     files = Dir.children(dir).sort
-    raise "files=#{files.inspect}" unless files.size == 9
+    raise "files=#{files.inspect}" unless files.size == 14
     files.each_with_index do |name, i|
       body = File.read(File.join(dir, name))
       assert_single_statement!(body, label: "cli-file[#{i}]")

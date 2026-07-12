@@ -40,16 +40,20 @@ This glossary defines the ubiquitous language used across the rest of the submis
 ## Tournament Terms
 
 - **Bracket Slot**: a participant position in a round, later filled by a registered player or an advancing winner.
-- **Advancement Rule**: rule that determines the top 3 advancing players from a non-final match by match wins, then by lowest cumulative card points, then by earliest final-game completion time.
+- **Bracket Page**: a bounded public slice of bracket slots accompanied by compact tournament and round summary metadata. It contains 100 slots by default and never more than 1,000; continuation uses an opaque Tournament-owned live keyset cursor over stable round/slot identity.
+- **Advancement Rule**: rule that determines up to 3 unique advancing players from a non-final match by match wins, then by lowest cumulative card points, then by earliest final-game completion time. An authoritative undersized/forfeit result may advance only 1 or 2 players; an empty advancement is invalid.
 - **Forfeit**: loss assigned after the fixed 60-second reconnection window expires. In a casual room it ends the player's participation and the game may continue; in a tournament room it counts as a match loss and eliminates the player.
 - **Round Result**: the authoritative set of completed match outcomes used to decide round completion and next-round seeding.
 
 ## Ranking Terms
 
 - **Elo Rating**: a player's casual-game skill rating, updated only from completed non-abandoned ad-hoc games.
-- **Tournament Placement Rating**: separate tournament score derived from tournament advancement depth and final placement, never from casual Elo updates.
+- **Tournament Placement Rating**: lifetime, monotonically non-decreasing achievement score accumulated from tournament advancement depth and final placement; it never behaves like or mutates casual Elo.
+- **Tournament Performance Fact**: authoritative Tournament Orchestration fact consumed by Ranking; it carries either an achieved advancement depth or an ordered final placement, never a producer-calculated rating delta.
 - **Rating Delta**: the calculated Elo increase or decrease produced by one completed casual game using final placement order from first through last.
 - **Player Performance Snapshot**: immutable summary of a player's standing after a rating update.
+- **Leaderboard Page**: a bounded ordered slice of a complete leaderboard. It contains 100 entries by default and never more than 500; continuation uses an opaque Ranking-owned live keyset cursor, with page-local rather than frozen multi-page consistency.
+- **Leaderboard Snapshot**: a bounded published top-100 public view of one leaderboard at a point in time. A dirty board publishes at most once every 15 seconds; it is not the complete leaderboard, which remains available through Leaderboard Pages.
 
 ## Explicit Distinctions
 
@@ -63,4 +67,4 @@ Because of this distinction:
 - `GameCompleted` means one Uno game ended and may update casual Elo if the game is ad-hoc and non-abandoned.
 - `MatchCompleted` means the best-of-three series ended and the room can transition toward completion or report tournament advancement facts.
 - `TournamentRoundCompleted` means every match assigned to that round has a final result.
-- `TournamentCompleted` means the final round produced the champion.
+- `TournamentCompleted` means the final round produced complete ordered standings; the first standing is the champion.

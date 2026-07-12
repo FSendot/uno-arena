@@ -8,9 +8,9 @@ import (
 
 func TestParseResumeStreamID(t *testing.T) {
 	cases := []struct {
-		in      string
-		want    string
-		wantOK  bool
+		in     string
+		want   string
+		wantOK bool
 	}{
 		{"seq_1", "1-0", true},
 		{"seq_42", "42-0", true},

@@ -10,3 +10,12 @@ func TestTopicCasualIngest_MatchesAsyncAPI(t *testing.T) {
 		t.Fatal("rejected drifted spelling room.gameplay.completed")
 	}
 }
+
+func TestTopicTournamentIngest_MatchesAsyncAPI(t *testing.T) {
+	if topicTournamentIngest != "tournament.players.advanced" {
+		t.Fatalf("topicTournamentIngest=%q want tournament.players.advanced (AsyncAPI)", topicTournamentIngest)
+	}
+	if topicTournamentIngest == "tournament.placement" {
+		t.Fatal("rejected drifted spelling tournament.placement")
+	}
+}

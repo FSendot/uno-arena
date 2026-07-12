@@ -182,6 +182,8 @@ class GatewayState:
         self.requests: list[dict[str, Any]] = []
         self.lock = threading.Lock()
         self.fail_next_stream = False
+        self.registered_usernames: set[str] = set()
+        self.room_sequences: dict[str, int] = {}
 
     def record(
         self,
@@ -201,6 +203,22 @@ class GatewayState:
                     "query": query,
                 }
             )
+
+    def next_room_sequence(self, room_id: str) -> int:
+        with self.lock:
+            seq = self.room_sequences.get(room_id, 0)
+            return seq
+
+    def bump_room_sequence(self, room_id: str, expected: int) -> int:
+        with self.lock:
+            current = self.room_sequences.get(room_id, 0)
+            if expected != current:
+                # Still accept for offline CLI shape tests; advance from expected+1.
+                nxt = expected + 1
+            else:
+                nxt = current + 1
+            self.room_sequences[room_id] = nxt
+            return nxt
 
 
 STATE = GatewayState()
@@ -264,16 +282,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/v1/auth/register":
             data = json.loads(body or b"{}")
-            self._json(200, {"status": "ok", "username": data.get("username", "")})
+            username = data.get("username", "")
+            with STATE.lock:
+                if username in STATE.registered_usernames:
+                    self._json(
+                        400,
+                        {"code": "bad_request", "message": "username taken"},
+                    )
+                    return
+                STATE.registered_usernames.add(str(username))
+            self._json(200, {"status": "ok", "username": username})
             return
         if path == "/v1/auth/login":
             data = json.loads(body or b"{}")
+            username = data.get("username", "anon")
             self._json(
                 200,
                 {
-                    "sessionId": "sess-1",
-                    "playerId": "player-1",
-                    "token": f"tok-{data.get('username', 'anon')}",
+                    "sessionId": f"sess-{username}",
+                    "playerId": f"player-{username}",
+                    "token": f"tok-{username}",
                 },
             )
             return
@@ -282,6 +310,13 @@ class Handler(BaseHTTPRequestHandler):
             if self._command_envelope_guard(data):
                 return
             cmd_type = data.get("type", "")
+            payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            result_payload: dict[str, Any] = {}
+            if cmd_type == "CreateRoom":
+                room_id = payload.get("roomId") if isinstance(payload.get("roomId"), str) else "room-1"
+                result_payload = {"roomId": room_id}
+                with STATE.lock:
+                    STATE.room_sequences.setdefault(room_id, 0)
             self._json(
                 200,
                 {
@@ -290,7 +325,7 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "accepted",
                     "schemaVersion": data.get("schemaVersion", 1),
                     "sequenceNumber": 1,
-                    "payload": {"roomId": "room-1"} if cmd_type == "CreateRoom" else {},
+                    "payload": result_payload,
                 },
             )
             return
@@ -299,6 +334,9 @@ class Handler(BaseHTTPRequestHandler):
             if self._command_envelope_guard(data):
                 return
             cmd_type = data.get("type", "")
+            room_id = unquote(path[len("/v1/rooms/") : -len("/commands")])
+            expected = int(data.get("expectedSequenceNumber", 0))
+            seq = STATE.bump_room_sequence(room_id, expected)
             self._json(
                 200,
                 {
@@ -306,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
                     "type": cmd_type,
                     "status": "accepted",
                     "schemaVersion": data.get("schemaVersion", 1),
-                    "sequenceNumber": int(data.get("expectedSequenceNumber", 0)) + 1,
+                    "sequenceNumber": seq,
                 },
             )
             return
@@ -335,12 +373,116 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"code": "unauthorized", "message": "missing bearer token"})
                 return
             token = auth[len("Bearer ") :].strip()
+            username = token.replace("tok-", "", 1) if token.startswith("tok-") else "unknown"
             self._json(
                 200,
                 {
-                    "playerId": "player-1",
-                    "sessionId": "sess-1",
-                    "username": token.replace("tok-", "", 1) if token.startswith("tok-") else "unknown",
+                    "playerId": f"player-{username}",
+                    "sessionId": f"sess-{username}",
+                    "username": username,
+                },
+            )
+            return
+
+        if path == "/v1/rooms":
+            status = (query.get("status") or ["waiting"])[0]
+            limit_raw = (query.get("limit") or ["50"])[0]
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                self._json(400, {"code": "bad_request", "message": "invalid limit"})
+                return
+            if status not in ("waiting", "locked", "in_progress"):
+                self._json(400, {"code": "bad_request", "message": "invalid status"})
+                return
+            if limit < 1 or limit > 100:
+                self._json(400, {"code": "bad_request", "message": "invalid limit"})
+                return
+            self._json(
+                200,
+                {
+                    "rooms": [
+                        {
+                            "roomId": "room-public-1",
+                            "status": status,
+                            "visibility": "public",
+                            "seatsOccupied": 1,
+                            "maxSeats": 10,
+                        }
+                    ],
+                    "nextCursor": None,
+                },
+            )
+            return
+
+        if path.startswith("/v1/rooms/") and path.endswith("/snapshot"):
+            room_id = unquote(path[len("/v1/rooms/") : -len("/snapshot")])
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Bearer "):
+                self._json(401, {"code": "unauthorized", "message": "missing bearer token"})
+                return
+            seq = STATE.next_room_sequence(room_id)
+            self._json(
+                200,
+                {
+                    "roomId": room_id,
+                    "status": "waiting",
+                    "sequenceNumber": seq,
+                    "visibility": "public",
+                    "hostId": "player-alice",
+                    "roomType": "ad_hoc",
+                    "playerId": "player-alice",
+                    "roster": [{"seatIndex": 0, "playerId": "player-alice"}],
+                },
+            )
+            return
+
+        if path.startswith("/v1/spectator/rooms/") and path.endswith("/snapshot"):
+            room_id = unquote(path[len("/v1/spectator/rooms/") : -len("/snapshot")])
+            seq = STATE.next_room_sequence(room_id)
+            self._json(
+                200,
+                {
+                    "roomId": room_id,
+                    "status": "waiting",
+                    "visibility": "public",
+                    "sequence": seq,
+                    "seats": [],
+                    "discard": {"discardTop": None, "activeColor": None},
+                    "direction": 1,
+                    "currentPlayerId": "",
+                    "penaltyAmount": 0,
+                    "penaltyTarget": "",
+                    "gameScore": {},
+                    "matchWinner": "",
+                    "gameCompleted": False,
+                    "matchCompleted": False,
+                    "streamClosed": False,
+                },
+            )
+            return
+
+        if path.startswith("/v1/tournaments/") and path.endswith("/standings"):
+            tour_id = unquote(path[len("/v1/tournaments/") : -len("/standings")])
+            self._json(
+                200,
+                {
+                    "tournamentId": tour_id,
+                    "entries": [{"playerId": "player-alice", "points": 3}],
+                    "nextCursor": None,
+                },
+            )
+            return
+
+        if path.startswith("/v1/tournaments/") and path.endswith("/bracket"):
+            tour_id = unquote(path[len("/v1/tournaments/") : -len("/bracket")])
+            self._json(
+                200,
+                {
+                    "tournamentId": tour_id,
+                    "round": 1,
+                    "slots": [{"slotId": "s1", "roomId": "room-t1"}],
+                    "nextCursor": None,
                 },
             )
             return

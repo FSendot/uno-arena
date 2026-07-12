@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -24,7 +25,10 @@ type TournamentUnitOfWork struct {
 	done       bool
 }
 
-// BeginExisting locks tournaments FOR UPDATE then hydrates under the same transaction.
+// BeginExisting takes the exclusive rewrite barrier, locks tournaments FOR UPDATE,
+// then hydrates under the same transaction.
+//
+// Lock order: exclusive rewrite barrier → tournaments FOR UPDATE → hydrate (reads).
 func (s *TournamentStore) BeginExisting(ctx context.Context, id domain.TournamentID) (*TournamentUnitOfWork, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("nil store")
@@ -37,6 +41,10 @@ func (s *TournamentStore) BeginExisting(ctx context.Context, id domain.Tournamen
 		return nil, wrapUnavailable(err)
 	}
 	uow := &TournamentUnitOfWork{store: s, ctx: ctx, tx: tx, tid: string(id)}
+	if err := acquireRewriteBarrierExclusive(ctx, tx, string(id)); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, wrapUnavailable(err)
+	}
 	var locked string
 	err = tx.QueryRow(ctx, `
 		SELECT tournament_id FROM tournaments WHERE tournament_id = $1 FOR UPDATE
@@ -59,7 +67,10 @@ func (s *TournamentStore) BeginExisting(ctx context.Context, id domain.Tournamen
 	return uow, nil
 }
 
-// BeginCreate takes a transaction-scoped advisory lock before checking/inserting.
+// BeginCreate takes the exclusive rewrite barrier (same namespace as differential/legacy)
+// before checking/inserting so create cannot race a differential MatchCompleted commit.
+//
+// Lock order: exclusive rewrite barrier → tournaments FOR UPDATE (or absent) → hydrate.
 func (s *TournamentStore) BeginCreate(ctx context.Context, id domain.TournamentID) (*TournamentUnitOfWork, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("nil store")
@@ -72,7 +83,7 @@ func (s *TournamentStore) BeginCreate(ctx context.Context, id domain.TournamentI
 		return nil, wrapUnavailable(err)
 	}
 	uow := &TournamentUnitOfWork{store: s, ctx: ctx, tx: tx, tid: string(id), createPath: true}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, string(id)); err != nil {
+	if err := acquireRewriteBarrierExclusive(ctx, tx, string(id)); err != nil {
 		_ = tx.Rollback(ctx)
 		return nil, wrapUnavailable(err)
 	}
@@ -151,6 +162,11 @@ func (u *TournamentUnitOfWork) Commit(req CommitRequest) error {
 	if req.Tournament != nil {
 		if err := persistTournamentTx(u.ctx, u.tx, req.Tournament, req.MatchResultSource); err != nil {
 			return wrapUnavailable(err)
+		}
+		if req.ProjectionChanged {
+			if err := bumpProjectionVersionTx(u.ctx, u.tx, string(req.Tournament.ID()), time.Now().UTC()); err != nil {
+				return wrapUnavailable(err)
+			}
 		}
 	}
 	if err := insertCommandOutcome(u.ctx, u.tx, req); err != nil {

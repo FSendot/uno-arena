@@ -36,8 +36,20 @@ info:
     | `room.match.completed` / `MatchCompleted` | Tournament `POST .../match-results` | Forwards canonical match fields including `tournamentId`, `completionVersion`, `players`; requires `tournamentId`. |
     | `room.spectator-safe.events` | Spectator ingest | Flattens to `{schemaVersion,eventId,stream,roomId,sequence,event,data}`; Kafka `sequenceNumber` → HTTP `sequence`; Kafka `eventType` → HTTP `event`; nested `payload`/`data` unwrapped into `data`. Uno window canonical field is `openingSequence` (`openingRoomSequence` accepted as ingest alias). |
 
-    Kafka remains unwired until production adapters exist; the HTTP bridge is an
-    offline capability transform only.
+    Durable Kafka adapters for these topics are implemented in the consuming services
+    when `KAFKA_BROKERS` is configured. The HTTP bridge remains an offline capability
+    transform only. Kind live end-to-end CDC proofs remain explicit optional targets
+    and are not asserted by this contract alone.
+
+    **Post-retention recovery control plane (ADR-0039):** after Kafka retention expiry or
+    aggregate quarantine that requires rebuild, consumers emit bounded rebuild-request
+    messages on `spectator.projection.rebuild_requested` and
+    `analytics.projection.rebuild_requested`. Projection-rebuilder workers consume those
+    topics and call context-owned internal snapshot/backfill HTTP APIs; they never poll
+    outboxes and never embed unbounded event arrays in Kafka. Worker-owned DLQs follow
+    `<request-topic>.<consumer>.dlq`. Context-owned snapshot/backfill APIs and rebuilder
+    workers are implemented; Deployments remain disabled in default/staging/production/`kind`
+    until real end-to-end worker live recovery tests pass.
 x-partitionPlanning:
   immutableAfterCreation: true
   highVolumeInitialPartitions: 256
@@ -64,6 +76,10 @@ x-retentionPlanning:
   supersededTopicDaysAfterVerifiedCutover: 7
   kafkaIsPermanentAuditStore: false
   localKindMayUseShorterRetention: true
+  postRetentionRecovery: context-owned-snapshot-and-backfill-apis
+  rebuildRequestTopics:
+    - spectator.projection.rebuild_requested
+    - analytics.projection.rebuild_requested
 defaultContentType: application/json
 channels:
   identity.session.invalidated:
@@ -186,7 +202,7 @@ channels:
         x-partitionKey: tournamentId
 
   tournament.players.advanced:
-    description: Advancement decisions owned by Tournament Orchestration.
+    description: Advancement decisions owned by Tournament Orchestration. For Ranking, roundNumber is the achieved advancement depth of each advancing player; no rating delta is published.
     publish:
       operationId: publishPlayersAdvanced
       message:
@@ -220,7 +236,7 @@ channels:
         x-partitionKey: tournamentId
 
   tournament.completed:
-    description: Tournament completion facts (champion / final placement).
+    description: Tournament completion facts with complete ordered final standings. Ranking derives final placement from array order and owns the rating delta.
     publish:
       operationId: publishTournamentCompleted
       message:
@@ -303,6 +319,49 @@ channels:
           description: Partition key = projectionKey
         x-idempotencyKey: eventId
         x-partitionKey: projectionKey
+
+  spectator.projection.rebuild_requested:
+    description: |
+      Bounded Spectator projection rebuild request after retention expiry, quarantine, or
+      explicit operator recovery. Partitioned by roomId. Workers call Room's internal
+      spectator-recovery-snapshot API; payloads never embed event arrays.
+    publish:
+      operationId: publishSpectatorProjectionRebuildRequested
+      message:
+        $ref: "#/components/messages/SpectatorProjectionRebuildRequested"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: spectator.projection.rebuild_requested
+        partitions: 32
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: "(recoveryJobId, roomId, failedCheckpoint)"
+        x-partitionKey: roomId
+
+  analytics.projection.rebuild_requested:
+    description: |
+      Bounded Analytics projection rebuild/backfill request after retention expiry,
+      quarantine, or explicit operator recovery. Partitioned by recoveryJobId. Workers
+      call the owning producer's internal analytics-backfill API with opaque cursor and
+      hard page max 1000; payloads never embed event arrays. Requests require at least one
+      paired bounded range (`fromCheckpoint`+`toCheckpoint` and/or `fromOccurredAt`+`toOccurredAt`);
+      unpaired halves are invalid. Idempotency key is `(recoveryJobId, sourceTopic, pageCursor)`.
+    publish:
+      operationId: publishAnalyticsProjectionRebuildRequested
+      message:
+        $ref: "#/components/messages/AnalyticsProjectionRebuildRequested"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: analytics.projection.rebuild_requested
+        partitions: 32
+        key:
+          type: string
+          description: Partition key = recoveryJobId
+        x-idempotencyKey: "(recoveryJobId, sourceTopic, pageCursor)"
+        x-partitionKey: recoveryJobId
 
 components:
   messages:
@@ -500,6 +559,10 @@ components:
                 type: string
               advancingPlayerIds:
                 type: array
+                minItems: 1
+                maxItems: 3
+                uniqueItems: true
+                description: Normally the top three; one or two are valid for an authoritative undersized or forfeit outcome.
                 items:
                   type: string
               rule:
@@ -524,12 +587,18 @@ components:
         allOf:
           - $ref: "#/components/schemas/EventMetadata"
           - type: object
-            required: [tournamentId]
+            required: [tournamentId, finalStandings]
             properties:
               tournamentId:
                 type: string
-              championId:
-                type: string
+              finalStandings:
+                type: array
+                minItems: 1
+                maxItems: 10
+                uniqueItems: true
+                description: Every final-room player ordered from first place to last place; the first entry is the champion.
+                items:
+                  type: string
               completionReason:
                 type: string
 
@@ -539,7 +608,7 @@ components:
         allOf:
           - $ref: "#/components/schemas/EventMetadata"
           - type: object
-            required: [playerId, previousRating, newRating]
+            required: [playerId, previousRating, newRating, projectionVersion]
             properties:
               playerId:
                 type: string
@@ -553,6 +622,10 @@ components:
                 type: integer
               newRating:
                 type: integer
+              projectionVersion:
+                type: integer
+                minimum: 1
+                description: Board dirty/projection version fencing score-changing rating facts for Redis leaderboard apply and Analytics backfill validation
 
     LeaderboardSnapshotPublished:
       name: LeaderboardSnapshotPublished
@@ -572,6 +645,8 @@ components:
                 format: date-time
               entries:
                 type: array
+                maxItems: 100
+                description: Ordered public top-100 view, coalesced at most once per dirty board every 15 seconds; the complete leaderboard is exposed only through paginated reads.
                 items:
                   type: object
                   required: [playerId, rating, rank]
@@ -609,6 +684,92 @@ components:
                 type: string
               projectionVersion:
                 type: integer
+
+    SpectatorProjectionRebuildRequested:
+      name: SpectatorProjectionRebuildRequested
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required:
+              - recoveryJobId
+              - roomId
+              - failedCheckpoint
+              - expectedSourceTopic
+            properties:
+              eventType:
+                type: string
+                enum: [SpectatorProjectionRebuildRequested]
+              recoveryJobId:
+                type: string
+                description: Stable identity for the recovery job; reused across retries
+              roomId:
+                type: string
+              failedCheckpoint:
+                type: integer
+                minimum: 1
+                description: Failed or quarantined room sequence/checkpoint that blocked continuity
+              expectedSourceTopic:
+                type: string
+                enum: [room.spectator-safe.events]
+              attempt:
+                type: integer
+                minimum: 1
+                description: Bounded worker retry attempt counter; not an event array
+
+    AnalyticsProjectionRebuildRequested:
+      name: AnalyticsProjectionRebuildRequested
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required:
+              - recoveryJobId
+              - sourceContext
+              - expectedSourceTopic
+            properties:
+              eventType:
+                type: string
+                enum: [AnalyticsProjectionRebuildRequested]
+              recoveryJobId:
+                type: string
+                description: Stable identity for the recovery job; reused across pages and retries
+              sourceContext:
+                type: string
+                enum: [room, tournament, ranking]
+              expectedSourceTopic:
+                type: string
+                enum:
+                  - room.gameplay.metrics
+                  - room.match.completed
+                  - tournament.match.assigned
+                  - tournament.match.result_recorded
+                  - tournament.players.advanced
+                  - tournament.round.completed
+                  - tournament.completed
+                  - ranking.player_rating_updated
+                  - ranking.leaderboard_snapshot_published
+              fromCheckpoint:
+                type: string
+                description: Inclusive opaque or numeric checkpoint lower bound; must be paired with toCheckpoint
+              toCheckpoint:
+                type: string
+                description: Inclusive opaque or numeric checkpoint upper bound; must be paired with fromCheckpoint
+              fromOccurredAt:
+                type: string
+                format: date-time
+                description: Inclusive occurredAt lower bound; must be paired with toOccurredAt
+              toOccurredAt:
+                type: string
+                format: date-time
+                description: Inclusive occurredAt upper bound; must be paired with fromOccurredAt
+              pageCursor:
+                type: string
+                description: Opaque producer-owned keyset cursor; empty/absent for the first page; part of idempotency key (recoveryJobId, sourceTopic, pageCursor)
+              attempt:
+                type: integer
+                minimum: 1
+                description: Bounded worker retry attempt counter; not an event array
 
   schemas:
     EventMetadata:

@@ -1,10 +1,24 @@
 replicaCount: 2
 
 env:
+  DEPLOYMENT_ENV: production
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/4
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: ranking
+  KAFKA_GAME_COMPLETED_TOPIC: room.game.completed
+  KAFKA_GAME_COMPLETED_DLQ_TOPIC: room.game.completed.ranking.dlq
+  KAFKA_PLAYERS_ADVANCED_TOPIC: tournament.players.advanced
+  KAFKA_PLAYERS_ADVANCED_DLQ_TOPIC: tournament.players.advanced.ranking.dlq
+  KAFKA_TOURNAMENT_COMPLETED_TOPIC: tournament.completed
+  KAFKA_TOURNAMENT_COMPLETED_DLQ_TOPIC: tournament.completed.ranking.dlq
+  KAFKA_PLAYER_RATING_UPDATED_TOPIC: ranking.player_rating_updated
+  KAFKA_PLAYER_RATING_UPDATED_DLQ_TOPIC: ranking.player_rating_updated.ranking.dlq
 
 existingSecret: ranking-secrets
+
+leaderboardSnapshotterWorker:
+  enabled: false
+  replicaCount: 1
 
 resources:
   requests:

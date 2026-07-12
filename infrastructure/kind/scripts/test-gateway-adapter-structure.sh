@@ -29,7 +29,10 @@ done
 check "${DEPLOY}" "helm upgrade --install"
 check "${DEPLOY}" "values.kind.yaml"
 check "${DEPLOY}" "assert_kind_context"
-check "${DEPLOY}" "PENDING"
+check "${DEPLOY}" "SessionInvalidated"
+! grep -qiE 'debezium.*PENDING|PENDING.*[Dd]ebezium|Kafka/Debezium remain PENDING' "${DEPLOY}" \
+  || { echo "FAIL: deploy must not claim Debezium/Kafka PENDING" >&2; fail=1; }
+# Room realtime Debezium Server → Redis player-feed pipeline is implemented.
 ! grep -qE 'type:\s*(NodePort|LoadBalancer)' "${DEPLOY}" || { echo "FAIL: deploy must not set public Service type" >&2; fail=1; }
 
 check "${PF}" 'LOCAL_PORT_SPEC="0:'
@@ -40,7 +43,16 @@ check "${PF}" "GATEWAY_BASE_URL"
 
 check "${LIVE}" "GATEWAY_BASE_URL"
 check "${LIVE}" "port-forward-gateway"
-check "${LIVE}" "PENDING"
+! grep -qiE 'debezium.*PENDING|PENDING.*[Dd]ebezium|Kafka/Debezium remain PENDING' "${LIVE}" \
+  || { echo "FAIL: adapter live must not claim Debezium/Kafka PENDING" >&2; fail=1; }
+
+SI_LIVE="${SCRIPT_DIR}/test-gateway-si-redis-admission-live.sh"
+SI_ALIAS="${SCRIPT_DIR}/test-gateway-session-invalidation-live.sh"
+[[ -f "${SI_LIVE}" ]] || { echo "FAIL: missing ${SI_LIVE}" >&2; fail=1; }
+[[ -f "${SI_ALIAS}" ]] || { echo "FAIL: missing ${SI_ALIAS}" >&2; fail=1; }
+check "${SI_LIVE}" "cross-Hub admission only"
+check "${SI_LIVE}" "not Kafka"
+check "${SI_LIVE}" "Redis DB6 durable SI"
 
 CHART="${REPO_ROOT}/services/gateway/helm/gateway"
 [[ -f "${CHART}/values.kind.yaml" ]] || { echo "FAIL: missing values.kind.yaml" >&2; fail=1; }
@@ -64,7 +76,22 @@ check "${CHART}/values.kind.yaml" "tournament-internal-credential"
 check "${CHART}/values.kind.yaml" "spectator-view-internal-credential"
 ! grep -qE '^[[:space:]]*GATEWAY_CAPABILITY_MODE:' "${CHART}/values.kind.yaml" || { echo "FAIL: kind must not set capability mode" >&2; fail=1; }
 ! grep -qE '^[[:space:]]*GATEWAY_ALLOW_FAKES:' "${CHART}/values.kind.yaml" || { echo "FAIL: kind must not set allow fakes" >&2; fail=1; }
-! grep -qE '^[[:space:]]*KAFKA_BROKERS:' "${CHART}/values.kind.yaml" || { echo "FAIL: kind must omit KAFKA_BROKERS (PENDING)" >&2; fail=1; }
+check "${CHART}/values.kind.yaml" "KAFKA_BROKERS"
+check "${CHART}/values.kind.yaml" "kafka.uno-arena.svc.cluster.local:9092"
+check "${CHART}/values.kind.yaml" "KAFKA_CONSUMER_GROUP"
+check "${CHART}/values.kind.yaml" "gateway"
+check "${CHART}/values.kind.yaml" "KAFKA_SESSION_INVALIDATED_TOPIC"
+check "${CHART}/values.kind.yaml" "identity.session.invalidated"
+check "${CHART}/values.kind.yaml" "KAFKA_SESSION_INVALIDATED_DLQ_TOPIC"
+check "${CHART}/values.kind.yaml" "identity.session.invalidated.gateway.dlq"
+check "${CHART}/values.kind.yaml" "GATEWAY_SESSION_INVALIDATION_TTL"
+check "${CHART}/values.kind.yaml" 'GATEWAY_SESSION_INVALIDATION_TTL: "7h"'
+check "${CHART}/values.kind.yaml" "ADR-0029"
+check "${CHART}/values.kind.yaml" "6h"
+! grep -qiE 'debezium.*PENDING|PENDING.*[Dd]ebezium' "${CHART}/values.kind.yaml" \
+  || { echo "FAIL: values.kind must not claim Debezium PENDING" >&2; fail=1; }
+! grep -qiE 'debezium.*PENDING|PENDING.*[Dd]ebezium' "${CHART}/values.yaml" \
+  || { echo "FAIL: values.yaml must not claim Debezium PENDING" >&2; fail=1; }
 
 SECRETS="${MANIFESTS_DIR}/01-local-secrets.yaml"
 check "${SECRETS}" "identity-internal-credential"

@@ -18,6 +18,9 @@ var eventTypesBySource = map[SourceTopic]map[EventType]struct{}{
 	SourceRoomGameplayMetrics: {
 		EventGameplayMetric: {},
 	},
+	SourceRoomMatchCompleted: {
+		EventTournamentStatistic: {},
+	},
 	SourceTournamentMatchAssigned: {
 		EventTournamentStatistic: {},
 	},
@@ -28,6 +31,9 @@ var eventTypesBySource = map[SourceTopic]map[EventType]struct{}{
 		EventTournamentStatistic: {},
 	},
 	SourceTournamentRoundCompleted: {
+		EventTournamentStatistic: {},
+	},
+	SourceTournamentCompleted: {
 		EventTournamentStatistic: {},
 	},
 	SourceRankingPlayerRatingUpdated: {

@@ -17,6 +17,8 @@ type MemoryTournamentRepository struct {
 	byID     map[domain.TournamentID]*domain.Tournament
 	outcomes map[string]envelope.Result
 	outbox   []OutboxEvent
+	projVer  map[domain.TournamentID]int64
+	projAt   map[domain.TournamentID]time.Time
 
 	// Fault injection (tests).
 	CommitErr       error
@@ -28,6 +30,8 @@ func NewMemoryTournamentRepository() *MemoryTournamentRepository {
 		byID:     make(map[domain.TournamentID]*domain.Tournament),
 		outcomes: make(map[string]envelope.Result),
 		outbox:   make([]OutboxEvent, 0),
+		projVer:  make(map[domain.TournamentID]int64),
+		projAt:   make(map[domain.TournamentID]time.Time),
 	}
 }
 
@@ -108,6 +112,12 @@ func (u *memoryUoW) unlock() {
 	u.repo.mu.Unlock()
 }
 
+func (r *MemoryTournamentRepository) ProjectionCheckpoint(id domain.TournamentID) (int64, time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.projVer[id], r.projAt[id]
+}
+
 func (r *MemoryTournamentRepository) Get(id domain.TournamentID) (*domain.Tournament, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -144,6 +154,12 @@ func (r *MemoryTournamentRepository) applyCommitLocked(req CommitRequest) error 
 	if req.Tournament != nil {
 		// Store a deep clone so post-commit caller mutations cannot alias live state.
 		r.byID[req.Tournament.ID()] = req.Tournament.Clone()
+		// Only accepted bracket-visible changes bump the public projection checkpoint.
+		if req.ProjectionChanged {
+			id := req.Tournament.ID()
+			r.projVer[id]++
+			r.projAt[id] = time.Now().UTC()
+		}
 	}
 	r.outcomes[req.CommandID] = req.Outcome
 	if len(req.Events) > 0 {
@@ -273,6 +289,9 @@ type FakeRoomProvisioner struct {
 	FailOnCall int
 	callN      int
 
+	// ReturnMismatchedRoomID forces ErrRoomIDMismatch (quarantine path).
+	ReturnMismatchedRoomID bool
+
 	// HoldDuringCall blocks inside Provision while the callback runs (concurrency tests).
 	HoldDuringCall func()
 	// OnCall is invoked under the provisioner lock after recording (optional).
@@ -283,7 +302,7 @@ func NewFakeRoomProvisioner() *FakeRoomProvisioner {
 	return &FakeRoomProvisioner{Calls: make([]RoomProvisionRequest, 0)}
 }
 
-func (f *FakeRoomProvisioner) Provision(_ context.Context, req RoomProvisionRequest) error {
+func (f *FakeRoomProvisioner) Provision(_ context.Context, req RoomProvisionRequest) (RoomProvisionResult, error) {
 	f.mu.Lock()
 	f.callN++
 	n := f.callN
@@ -292,6 +311,7 @@ func (f *FakeRoomProvisioner) Provision(_ context.Context, req RoomProvisionRequ
 	onCall := f.OnCall
 	failOn := f.FailOnCall
 	staticErr := f.Err
+	mismatch := f.ReturnMismatchedRoomID
 	f.mu.Unlock()
 
 	if onCall != nil {
@@ -301,12 +321,17 @@ func (f *FakeRoomProvisioner) Provision(_ context.Context, req RoomProvisionRequ
 		hold()
 	}
 	if staticErr != nil {
-		return staticErr
+		return RoomProvisionResult{}, staticErr
 	}
 	if failOn > 0 && n == failOn {
-		return fmt.Errorf("injected room provision failure")
+		return RoomProvisionResult{}, fmt.Errorf("injected room provision failure")
 	}
-	return nil
+	roomID := string(req.RoomID)
+	if mismatch {
+		roomID = roomID + "-mismatch"
+		return RoomProvisionResult{}, fmt.Errorf("%w: requested %s", ErrRoomIDMismatch, req.RoomID)
+	}
+	return RoomProvisionResult{RoomID: roomID}, nil
 }
 
 func (f *FakeRoomProvisioner) CallCount() int {
@@ -325,7 +350,9 @@ func (f *FakeRoomProvisioner) ResetCalls() {
 // NoopRoomProvisioner ignores provision calls.
 type NoopRoomProvisioner struct{}
 
-func (NoopRoomProvisioner) Provision(context.Context, RoomProvisionRequest) error { return nil }
+func (NoopRoomProvisioner) Provision(_ context.Context, req RoomProvisionRequest) (RoomProvisionResult, error) {
+	return RoomProvisionResult{RoomID: string(req.RoomID)}, nil
+}
 
 // FakePublisher records publish attempts and supports fault injection.
 type FakePublisher struct {

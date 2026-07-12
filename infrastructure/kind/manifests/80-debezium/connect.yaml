@@ -1,0 +1,276 @@
+# Debezium Kafka Connect 3.6.0.Final — Phase 1 durable Kafka CDC (ADR-0016).
+# Workload pins the exact quay.io ARM64 digest; imagePullPolicy Never so kubelet
+# never registry-pulls — make kind-load-debezium-connect (node-native crictl pull)
+# is mandatory before pods can start. kind load is not used for this image.
+# Connect internal topics (connect-configs/offsets/status) are created by
+# bootstrap-kafka-topics (compact RF1); do not recreate differently.
+# Debezium Server (Redis realtime) is out of scope for this slice.
+apiVersion: v1
+kind: Service
+metadata:
+  name: debezium-connect
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: debezium-connect
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/debezium-role: kafka-connect
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: debezium-connect
+  ports:
+    - name: rest
+      port: 8083
+      targetPort: 8083
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: debezium-connect-templates
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: debezium-connect
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/debezium-role: kafka-connect
+data:
+  # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
+  # Multiarch index (non-ARM notes): quay.io/debezium/connect@sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
+  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+  IMAGE_VERSION: 3.6.0.Final
+  ARM64_DIGEST: sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+  MULTIARCH_INDEX_DIGEST: sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
+  # Shared Outbox Event Router field contract (column names match migrations).
+  OUTBOX_ROUTER_NOTES: |
+    route.by.field=topic
+    route.topic.replacement=${routedByValue}
+    table.field.event.id=event_id
+    table.field.event.key=partition_key
+    table.field.event.payload=payload
+    table.fields.additional.placement=event_type:header:type
+    table.expand.json.payload=true (schema-disabled canonical payload objects)
+    timestamp=occurred_at only when the outbox table has that column (room integration)
+  connector-identity-outbox.json: |
+    {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "tasks.max": "1",
+      "plugin.name": "pgoutput",
+      "publication.autocreate.mode": "disabled",
+      "publication.name": "identity_cdc_outbox",
+      "slot.name": "identity_outbox_slot",
+      "topic.prefix": "identity",
+      "database.hostname": "postgres-identity.uno-arena.svc.cluster.local",
+      "database.port": "5432",
+      "database.dbname": "identity",
+      "database.user": "${CDC_USER}",
+      "database.password": "${CDC_PASSWORD}",
+      "table.include.list": "public.outbox_events",
+      "snapshot.mode": "no_data",
+      "tombstones.on.delete": "false",
+      "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "value.converter.schemas.enable": "false",
+      "key.converter.schemas.enable": "false",
+      "transforms": "outbox",
+      "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+      "transforms.outbox.table.field.event.id": "event_id",
+      "transforms.outbox.table.field.event.key": "partition_key",
+      "transforms.outbox.table.field.event.payload": "payload",
+      "transforms.outbox.table.expand.json.payload": "true",
+      "transforms.outbox.route.by.field": "topic",
+      "transforms.outbox.route.topic.replacement": "${routedByValue}",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.op.invalid.behavior": "warn"
+    }
+  connector-room-integration-outbox.json: |
+    {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "tasks.max": "1",
+      "plugin.name": "pgoutput",
+      "publication.autocreate.mode": "disabled",
+      "publication.name": "room_cdc_integration_outbox",
+      "slot.name": "room_integration_outbox_slot",
+      "topic.prefix": "room-integration",
+      "database.hostname": "postgres-room-gameplay.uno-arena.svc.cluster.local",
+      "database.port": "5432",
+      "database.dbname": "room_gameplay",
+      "database.user": "${CDC_USER}",
+      "database.password": "${CDC_PASSWORD}",
+      "table.include.list": "public.integration_outbox_events",
+      "snapshot.mode": "no_data",
+      "tombstones.on.delete": "false",
+      "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "value.converter.schemas.enable": "false",
+      "key.converter.schemas.enable": "false",
+      "transforms": "outbox",
+      "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+      "transforms.outbox.table.field.event.id": "event_id",
+      "transforms.outbox.table.field.event.key": "partition_key",
+      "transforms.outbox.table.field.event.payload": "payload",
+      "transforms.outbox.table.field.event.timestamp": "occurred_at",
+      "transforms.outbox.table.expand.json.payload": "true",
+      "transforms.outbox.route.by.field": "topic",
+      "transforms.outbox.route.topic.replacement": "${routedByValue}",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.op.invalid.behavior": "warn"
+    }
+  connector-tournament-outbox.json: |
+    {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "tasks.max": "1",
+      "plugin.name": "pgoutput",
+      "publication.autocreate.mode": "disabled",
+      "publication.name": "tournament_cdc_outbox",
+      "slot.name": "tournament_outbox_slot",
+      "topic.prefix": "tournament",
+      "database.hostname": "postgres-tournament.uno-arena.svc.cluster.local",
+      "database.port": "5432",
+      "database.dbname": "tournament",
+      "database.user": "${CDC_USER}",
+      "database.password": "${CDC_PASSWORD}",
+      "table.include.list": "public.outbox_events",
+      "snapshot.mode": "no_data",
+      "tombstones.on.delete": "false",
+      "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "value.converter.schemas.enable": "false",
+      "key.converter.schemas.enable": "false",
+      "transforms": "outbox",
+      "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+      "transforms.outbox.table.field.event.id": "event_id",
+      "transforms.outbox.table.field.event.key": "partition_key",
+      "transforms.outbox.table.field.event.payload": "payload",
+      "transforms.outbox.table.expand.json.payload": "true",
+      "transforms.outbox.route.by.field": "topic",
+      "transforms.outbox.route.topic.replacement": "${routedByValue}",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.op.invalid.behavior": "warn"
+    }
+  connector-ranking-outbox.json: |
+    {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "tasks.max": "1",
+      "plugin.name": "pgoutput",
+      "publication.autocreate.mode": "disabled",
+      "publication.name": "ranking_cdc_outbox",
+      "slot.name": "ranking_outbox_slot",
+      "topic.prefix": "ranking",
+      "database.hostname": "postgres-ranking.uno-arena.svc.cluster.local",
+      "database.port": "5432",
+      "database.dbname": "ranking",
+      "database.user": "${CDC_USER}",
+      "database.password": "${CDC_PASSWORD}",
+      "table.include.list": "public.outbox_events",
+      "snapshot.mode": "no_data",
+      "tombstones.on.delete": "false",
+      "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "value.converter.schemas.enable": "false",
+      "key.converter.schemas.enable": "false",
+      "transforms": "outbox",
+      "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+      "transforms.outbox.table.field.event.id": "event_id",
+      "transforms.outbox.table.field.event.key": "partition_key",
+      "transforms.outbox.table.field.event.payload": "payload",
+      "transforms.outbox.table.expand.json.payload": "true",
+      "transforms.outbox.route.by.field": "topic",
+      "transforms.outbox.route.topic.replacement": "${routedByValue}",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.op.invalid.behavior": "warn"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debezium-connect
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: debezium-connect
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/debezium-role: kafka-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: debezium-connect
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: debezium-connect
+        app.kubernetes.io/part-of: uno-arena
+        uno-arena.local/non-production: "true"
+        uno-arena.local/debezium-role: kafka-connect
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: connect
+          # Exact quay ARM64 digest; Never = node must already hold it (node-native loader).
+          image: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8083
+              name: rest
+          env:
+            - name: BOOTSTRAP_SERVERS
+              value: kafka.uno-arena.svc.cluster.local:9092
+            - name: GROUP_ID
+              value: uno-arena-debezium-connect
+            - name: CONFIG_STORAGE_TOPIC
+              value: connect-configs
+            - name: OFFSET_STORAGE_TOPIC
+              value: connect-offsets
+            - name: STATUS_STORAGE_TOPIC
+              value: connect-status
+            # Match kind bootstrap RF1 compacted internals; do not auto-create differently.
+            - name: CONFIG_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            - name: OFFSET_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            - name: STATUS_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            # Worker-level converters omitted: each connector sets key/value converters.
+            # Image default is -Xmx2G; keep heap under the 1536Mi limit with native/metaspace/
+            # plugin-scan headroom (OOMKilled exit 137 during connector plugin scan otherwise).
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms256M -Xmx768M"
+            - name: REST_HOST_NAME
+              value: "0.0.0.0"
+            - name: ADVERTISED_HOST_NAME
+              value: debezium-connect.uno-arena.svc.cluster.local
+          volumeMounts:
+            - name: templates
+              mountPath: /kafka/uno-arena-templates
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - curl -sf http://127.0.0.1:8083/ | grep -q version
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - curl -sf http://127.0.0.1:8083/ | grep -q version
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1536Mi
+      volumes:
+        - name: templates
+          configMap:
+            name: debezium-connect-templates

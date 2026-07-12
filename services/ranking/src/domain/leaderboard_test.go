@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestOrderLeaderboard_Deterministic(t *testing.T) {
 	entries := []LeaderboardEntry{
@@ -73,5 +76,30 @@ func TestPublishLeaderboardSnapshot_Repeatable(t *testing.T) {
 	b := PublishLeaderboardSnapshot(cmd)
 	if a.Facts[0].Data["rank_1"] != b.Facts[0].Data["rank_1"] {
 		t.Fatal("not stable")
+	}
+}
+
+func TestPublishLeaderboardSnapshot_CapsAt100(t *testing.T) {
+	entries := make([]LeaderboardEntry, 0, 120)
+	for i := 0; i < 120; i++ {
+		entries = append(entries, LeaderboardEntry{
+			PlayerID: PlayerID("p" + strconv.Itoa(i)),
+			Rating:   2000 - i,
+		})
+	}
+	out := PublishLeaderboardSnapshot(PublishLeaderboardSnapshotCommand{
+		CommandID: "snap-cap", SnapshotID: "s-cap", BoardType: SourceCasualElo, Entries: entries,
+	})
+	if !out.Accepted() {
+		t.Fatalf("%#v", out)
+	}
+	if out.Facts[0].Data["playerCount"] != "100" {
+		t.Fatalf("playerCount=%s", out.Facts[0].Data["playerCount"])
+	}
+	if _, ok := out.Facts[0].Data["rank_101"]; ok {
+		t.Fatal("must not include rank_101")
+	}
+	if out.Facts[0].Data["rank_100"] == "" {
+		t.Fatal("missing rank_100")
 	}
 }

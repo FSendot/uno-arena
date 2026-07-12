@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"unoarena/services/ranking/domain"
+	"unoarena/services/ranking/store"
 )
 
 // internalCredentialHeader authenticates service-to-service callers of internal routes.
@@ -21,33 +23,43 @@ const internalCredentialHeader = "X-Service-Credential"
 
 // Server wires HTTP handlers to the Ranking application seam.
 type Server struct {
-	app                RatingApplication
-	mode               string
-	readyReason        string
-	durableReady       func(context.Context) error
-	internalCredential string
+	app                         RatingApplication
+	mode                        string
+	readyReason                 string
+	durableReady                func(context.Context) error
+	internalCredential          string
+	analyticsBackfillCredential string
+	analyticsBackfill           AnalyticsBackfillReader
 }
 
 // NewServer constructs a Ranking HTTP server with an application adapter.
 func NewServer(app RatingApplication, internalCredential string) *Server {
+	return NewServerWithScopedCreds(app, internalCredential, "")
+}
+
+// NewServerWithScopedCreds constructs a server with a dedicated Analytics backfill credential.
+func NewServerWithScopedCreds(app RatingApplication, internalCredential, analyticsBackfillCredential string) *Server {
 	mode := "capability"
 	if app == nil {
 		mode = "misconfigured"
 	}
 	return &Server{
-		app:                app,
-		mode:               mode,
-		internalCredential: internalCredential,
+		app:                         app,
+		mode:                        mode,
+		internalCredential:          internalCredential,
+		analyticsBackfillCredential: analyticsBackfillCredential,
 	}
 }
 
 func newServerFromRuntime(rt rankingRuntime) *Server {
 	return &Server{
-		app:                rt.app,
-		mode:               rt.mode,
-		readyReason:        rt.readyReason,
-		durableReady:       rt.durableReady,
-		internalCredential: rt.credential,
+		app:                         rt.app,
+		mode:                        rt.mode,
+		readyReason:                 rt.readyReason,
+		durableReady:                rt.durableReady,
+		internalCredential:          rt.credential,
+		analyticsBackfillCredential: rt.analyticsBackfillCredential,
+		analyticsBackfill:           rt.analyticsBackfill,
 	}
 }
 
@@ -60,6 +72,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/internal/v1/rankings/games-results", s.gamesResultsHandler)
 	mux.HandleFunc("/internal/v1/rankings/tournament-placements", s.tournamentPlacementsHandler)
 	mux.HandleFunc("/internal/v1/rankings/rebuild-status", s.rebuildStatusHandler)
+	mux.HandleFunc("/internal/v1/rankings/leaderboards/rebuild", s.rebuildLeaderboardHandler)
+	mux.HandleFunc("/internal/v1/rankings/analytics-backfill", s.analyticsBackfillHandler)
 	return mux
 }
 
@@ -75,6 +89,53 @@ func (s *Server) authorizeInternal(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(s.internalCredential)) == 1
+}
+
+func (s *Server) authorizeAnalyticsBackfill(r *http.Request) bool {
+	// Scoped Analytics pair credential only — never fall back to Gateway/generic internal.
+	if s.analyticsBackfillCredential == "" {
+		return false
+	}
+	got := r.Header.Get(internalCredentialHeader)
+	if got == "" || len(got) != len(s.analyticsBackfillCredential) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.analyticsBackfillCredential)) == 1
+}
+
+func (s *Server) analyticsBackfillHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	if !s.requireReady(w, r) {
+		return
+	}
+	if !s.authorizeAnalyticsBackfill(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid analytics service credential")
+		return
+	}
+	var req AnalyticsBackfillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json")
+		return
+	}
+	resp, err := AnalyticsBackfill(r.Context(), s.analyticsBackfill, req)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrAnalyticsBackfillBadRequest):
+			writeError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		case errors.Is(err, ErrAnalyticsBackfillUnavailable):
+			writeError(w, r, http.StatusServiceUnavailable, "not_ready", "analytics backfill unavailable")
+		case errors.Is(err, ErrAnalyticsBackfillCorrupt):
+			writeError(w, r, http.StatusInternalServerError, "corrupt_outbox", "stored envelope failed validation")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "internal_error", "analytics backfill failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+	logRequest(r, "/internal/v1/rankings/analytics-backfill")
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -155,13 +216,18 @@ func (s *Server) leaderboardsHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if s.app == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "not_ready", "store unwired")
+	// Fail closed when durable deps are missing (do not serve capability memory under durable mode).
+	if !s.requireReady(w, r) {
 		return
 	}
-	boardType := domain.SourceCasualElo
-	switch r.URL.Query().Get("boardType") {
-	case "", string(domain.SourceCasualElo):
+	boardTypeRaw := strings.TrimSpace(r.URL.Query().Get("boardType"))
+	if boardTypeRaw == "" {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "boardType is required")
+		return
+	}
+	var boardType domain.RatingSourceType
+	switch boardTypeRaw {
+	case string(domain.SourceCasualElo):
 		boardType = domain.SourceCasualElo
 	case string(domain.SourceTournamentPlacement):
 		boardType = domain.SourceTournamentPlacement
@@ -169,12 +235,26 @@ func (s *Server) leaderboardsHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "boardType must be casual_elo or tournament_placement")
 		return
 	}
-	entries, err := s.app.Leaderboard(r.Context(), boardType)
+	limit := store.DefaultLeaderboardPageLimit
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > store.MaxLeaderboardPageLimit {
+			writeError(w, r, http.StatusBadRequest, "bad_request", "limit must be between 1 and 500")
+			return
+		}
+		limit = n
+	}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	page, err := s.app.LeaderboardPage(r.Context(), boardType, cursor, limit)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidLeaderboardCursor) {
+			writeError(w, r, http.StatusBadRequest, "bad_request", "invalid cursor")
+			return
+		}
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "ranking unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": leaderboardEntriesJSON(entries)})
+	writeJSON(w, http.StatusOK, leaderboardPageJSON(page))
 	logRequest(r, "/v1/rankings/leaderboards")
 }
 
@@ -307,6 +387,16 @@ func (s *Server) tournamentPlacementsHandler(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
 		return
 	}
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json body")
+		return
+	}
+	// ADR-0037: Ranking alone owns tournament award deltas; reject obsolete caller supply.
+	if _, hasDelta := raw["delta"]; hasDelta {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "delta must not be supplied")
+		return
+	}
 	var body struct {
 		CommandID        string `json:"commandId"`
 		EventID          string `json:"eventId"`
@@ -314,13 +404,26 @@ func (s *Server) tournamentPlacementsHandler(w http.ResponseWriter, r *http.Requ
 		TournamentID     string `json:"tournamentId"`
 		PlacementEventID string `json:"placementEventId"`
 		Placement        int    `json:"placement"`
-		Delta            int    `json:"delta"`
+		RoundNumber      int    `json:"roundNumber"`
 		Reason           string `json:"reason"`
 		CorrelationID    string `json:"correlationId"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json body")
 		return
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid json body")
+		return
+	}
+	reason := domain.RatingHistoryReason(strings.TrimSpace(body.Reason))
+	if reason == "" {
+		if body.RoundNumber > 0 {
+			reason = domain.ReasonTournamentAdvancement
+		} else if body.Placement > 0 {
+			reason = domain.ReasonTournamentFinalStanding
+		}
 	}
 	cmd := domain.ApplyTournamentPlacementUpdateCommand{
 		CommandID:        domain.CommandID(body.CommandID),
@@ -329,8 +432,8 @@ func (s *Server) tournamentPlacementsHandler(w http.ResponseWriter, r *http.Requ
 		TournamentID:     domain.TournamentID(body.TournamentID),
 		PlacementEventID: domain.PlacementEventID(body.PlacementEventID),
 		Placement:        body.Placement,
-		Delta:            body.Delta,
-		Reason:           domain.RatingHistoryReason(body.Reason),
+		RoundNumber:      body.RoundNumber,
+		Reason:           reason,
 	}
 	corr := resolveInboundCorrelationID(body.CorrelationID, r.Header.Get("X-Correlation-Id"), body.EventID)
 	out, err := s.app.ApplyTournamentPlacement(r.Context(), TournamentPlacementRequest{
@@ -382,15 +485,59 @@ func (s *Server) rebuildStatusHandler(w http.ResponseWriter, r *http.Request) {
 	logRequest(r, r.URL.Path)
 }
 
-func leaderboardEntriesJSON(entries []domain.LeaderboardEntry) []map[string]any {
-	out := make([]map[string]any, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, map[string]any{
+func (s *Server) rebuildLeaderboardHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	if !s.requireReady(w, r) {
+		return
+	}
+	if !s.authorizeInternal(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
+		return
+	}
+	boardTypeRaw := strings.TrimSpace(r.URL.Query().Get("boardType"))
+	var boardType domain.RatingSourceType
+	switch boardTypeRaw {
+	case string(domain.SourceCasualElo):
+		boardType = domain.SourceCasualElo
+	case string(domain.SourceTournamentPlacement):
+		boardType = domain.SourceTournamentPlacement
+	default:
+		writeError(w, r, http.StatusBadRequest, "bad_request", "boardType must be casual_elo or tournament_placement")
+		return
+	}
+	if err := s.app.RebuildLeaderboardProjection(r.Context(), boardType); err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "leaderboard rebuild unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "rebuilt",
+		"boardType": string(boardType),
+	})
+	logRequest(r, r.URL.Path)
+}
+
+func leaderboardPageJSON(page store.LeaderboardPage) map[string]any {
+	entries := make([]map[string]any, 0, len(page.Entries))
+	for _, e := range page.Entries {
+		entries = append(entries, map[string]any{
 			"playerId": string(e.PlayerID),
 			"rating":   e.Rating,
+			"rank":     e.Rank,
 		})
 	}
-	return out
+	resp := map[string]any{
+		"boardType":         string(page.BoardType),
+		"projectionVersion": page.ProjectionVersion,
+		"generatedAt":       page.GeneratedAt.UTC().Format(time.RFC3339),
+		"entries":           entries,
+	}
+	if page.NextCursor != "" {
+		resp["nextCursor"] = page.NextCursor
+	}
+	return resp
 }
 
 func historyEntriesJSON(playerID domain.PlayerID, hist []domain.RatingHistoryEntry) []map[string]any {
@@ -499,10 +646,27 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if strings.TrimSpace(os.Getenv("WORKER_ROLE")) == workerRoleLeaderboardSnapshotter {
+		runLeaderboardSnapshotterWorker(rt)
+		return
+	}
+
 	if rt.pool != nil {
 		defer rt.pool.Close()
 	}
+	if rt.rdbClose != nil {
+		defer func() { _ = rt.rdbClose() }()
+	}
 	srv := newServerFromRuntime(rt)
+
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.start(rootCtx)
+		log.Printf(`{"level":"info","service":"ranking","event":"kafka_consumer_started","group":%q,"topics":%q}`,
+			rt.kafka.consumer.cfg.Group, strings.Join(rt.kafka.consumer.cfg.normalizedTopics(), ","))
+	}
 
 	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
 	errCh := make(chan error, 1)
@@ -521,6 +685,10 @@ func main() {
 	case <-sigCh:
 	}
 
+	rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.stop()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)

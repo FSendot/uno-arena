@@ -18,6 +18,7 @@ import (
 const (
 	dispositionApplied     = "applied"
 	dispositionQuarantined = "quarantined"
+	dispositionIgnored     = "ignored"
 	genStatusBuilding      = "building"
 	genStatusComplete      = "complete"
 	initialGenerationID    = "gen_initial"
@@ -34,21 +35,16 @@ type clickHouseSurface interface {
 // AnalyticsStore is the durable ClickHouse projection adapter (stdlib HTTP only).
 // ClickHouse is non-transactional: projection rows are written before processed_events.
 //
-// Process-local admission boundary (this mutex pair only):
-//   - mu (RW): Rebuild holds the exclusive lock for build + activation. Apply takes
-//     the shared lock, resolves the active completed generation, writes rows/outcome,
-//     then releases — so Apply cannot target a generation superseded mid-Apply.
-//   - initMu: initial-generation bootstrap only; never upgraded from mu (avoids deadlock).
-// Snapshot/ProjectionVersion observe the active pointer under the shared lock.
-//
-// STATUS: process-local only. A future Kafka consumer must pause partitions and
-// rebuild to a captured watermark for multi-replica production coordination.
-// Do not treat this RW lock as a distributed lock.
+// Live Apply dual-writes to the active completed generation and every durable
+// initializing/building recovery generation (ADR-0039). Process-local RWMutex is
+// an optimization for ad-hoc Rebuild tests only — never the multi-replica fence.
+// Snapshot/ProjectionVersion observe the active completed generation only.
 type AnalyticsStore struct {
-	client     clickHouseSurface
-	httpClient *Client // non-nil when constructed via NewAnalyticsStore
-	mu         sync.RWMutex
-	initMu     sync.Mutex
+	client       clickHouseSurface
+	httpClient   *Client // non-nil when constructed via NewAnalyticsStore
+	mu           sync.RWMutex
+	initMu       sync.Mutex
+	adHocRebuild bool // tests/capability only; production durable path stays fail-closed
 }
 
 // NewAnalyticsStore wraps a ClickHouse HTTP client.
@@ -71,26 +67,52 @@ func (s *AnalyticsStore) Ready(ctx context.Context) error {
 	return err
 }
 
-// Apply validates/sanitizes via domain policy, then durably writes sanitized rows.
-// Shared admission covers active-generation resolution through durable write so a
-// concurrent Rebuild cannot activate a successor until this Apply releases.
+// Apply validates/sanitizes via domain policy, then durably writes sanitized rows
+// to the active generation and every valid initializing/building recovery generation.
+// A building write failure fails the whole Apply so the Kafka source offset is not committed.
 func (s *AnalyticsStore) Apply(ctx context.Context, evt domain.UpstreamEvent) (domain.ApplyOutcome, error) {
 	// Bootstrap without mu — initMu only — so Apply never lock-upgrades RLock→Lock.
 	if _, err := s.ensureActiveGeneration(ctx); err != nil {
 		return domain.ApplyOutcome{}, err
 	}
+	// Shared lock is optional serialization vs ad-hoc Rebuild tests only.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	genID, err := s.activeCompletedGeneration(ctx)
+
+	gens, err := s.ListWriteGenerations(ctx)
 	if err != nil {
 		return domain.ApplyOutcome{}, err
+	}
+	if len(gens) == 0 {
+		return domain.ApplyOutcome{}, fmt.Errorf("no write generations")
+	}
+	var activeOut domain.ApplyOutcome
+	for i, genID := range gens {
+		out, err := s.applyToGeneration(ctx, genID, evt)
+		if err != nil {
+			return domain.ApplyOutcome{}, err
+		}
+		if i == 0 {
+			activeOut = out
+		}
+	}
+	return activeOut, nil
+}
+
+// ApplyToGeneration applies one event to a specific generation (recovery worker page apply).
+func (s *AnalyticsStore) ApplyToGeneration(ctx context.Context, genID string, evt domain.UpstreamEvent) (domain.ApplyOutcome, error) {
+	if strings.TrimSpace(genID) == "" {
+		return domain.ApplyOutcome{}, fmt.Errorf("generation id required")
 	}
 	return s.applyToGeneration(ctx, genID, evt)
 }
 
 // Rebuild builds a new generation invisibly, then activates it only after completion.
-// Exclusive admission covers the entire build + activation window.
+// Fail-closed outside explicit ad-hoc enablement (tests); production uses the coordinator.
 func (s *AnalyticsStore) Rebuild(ctx context.Context, events []domain.UpstreamEvent) ([]domain.ApplyOutcome, error) {
+	if !s.adHocRebuild {
+		return nil, ErrAdHocRebuildDisabled
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -179,10 +201,26 @@ func (s *AnalyticsStore) ProjectionVersion(ctx context.Context) (domain.Projecti
 }
 
 func (s *AnalyticsStore) applyToGeneration(ctx context.Context, genID string, evt domain.UpstreamEvent) (domain.ApplyOutcome, error) {
-	if prior, ok, err := s.loadOutcome(ctx, genID, string(evt.EventID)); err != nil {
+	// HTTP/rebuild bridges may omit adapter keys; Kafka always supplies them.
+	domain.EnsureIngressIdentity(&evt)
+	idem := domain.EffectiveIdempotencyKey(evt)
+	topic := string(evt.Source)
+	fp := strings.TrimSpace(evt.PayloadFingerprint)
+
+	// Lookup by ADR-0029 contract key (generation_id, topic, idempotency_key).
+	if prior, priorFP, priorEventID, ok, err := s.loadProcessed(ctx, genID, topic, idem); err != nil {
 		return domain.ApplyOutcome{}, err
 	} else if ok {
-		return duplicateFromStored(prior), nil
+		if priorFP == fp {
+			return duplicateFromStored(prior), nil
+		}
+		// First-wins: conflicting fingerprint quarantines without writing a second marker
+		// or mutating projection rows. Record the conflict durably before returning.
+		out := conflictWithoutWrite(evt)
+		if err := s.recordIngestionConflict(ctx, genID, evt, priorEventID, priorFP, out); err != nil {
+			return domain.ApplyOutcome{}, err
+		}
+		return out, nil
 	}
 
 	// Validate + sanitize through domain projection before any durable write.
@@ -196,6 +234,8 @@ func (s *AnalyticsStore) applyToGeneration(ctx context.Context, genID string, ev
 
 	switch out.Kind {
 	case domain.OutcomeAccepted:
+		// Projection rows first, processed marker last (ClickHouse crash-window).
+		// Redelivery replaces ReplacingMergeTree logical rows keyed by source_topic+idempotency_key.
 		snap := tmp.Snapshot()
 		if err := s.insertProjectionRows(ctx, genID, evt, snap); err != nil {
 			return domain.ApplyOutcome{}, err
@@ -208,6 +248,10 @@ func (s *AnalyticsStore) applyToGeneration(ctx context.Context, genID string, ev
 		if err := s.insertProcessed(ctx, genID, evt, dispositionQuarantined, outcomeJSON); err != nil {
 			return domain.ApplyOutcome{}, err
 		}
+	case domain.OutcomeIgnored:
+		if err := s.insertProcessed(ctx, genID, evt, dispositionIgnored, outcomeJSON); err != nil {
+			return domain.ApplyOutcome{}, err
+		}
 	default:
 		// Unexpected for first apply; still persist marker for stability if EventID valid.
 		if evt.EventID.Valid() {
@@ -217,19 +261,45 @@ func (s *AnalyticsStore) applyToGeneration(ctx context.Context, genID string, ev
 		}
 	}
 
-	// Concurrent same eventId: re-read FINAL so callers see one logical disposition.
-	if stored, ok, err := s.loadOutcome(ctx, genID, string(evt.EventID)); err != nil {
+	// Concurrent same contract key: re-read FINAL so callers see one logical disposition.
+	if stored, storedFP, storedEventID, ok, err := s.loadProcessed(ctx, genID, topic, idem); err != nil {
 		return domain.ApplyOutcome{}, err
 	} else if ok {
-		// If we just wrote accepted/quarantined, return our outcome (not duplicate).
-		// Concurrent loser sees duplicate via first loadOutcome at top — but both may
-		// have passed the initial miss. Prefer stored JSON for byte-stable disposition.
+		if storedFP != fp {
+			conflictOut := conflictWithoutWrite(evt)
+			if err := s.recordIngestionConflict(ctx, genID, evt, storedEventID, storedFP, conflictOut); err != nil {
+				return domain.ApplyOutcome{}, err
+			}
+			return conflictOut, nil
+		}
 		if stored.Kind == out.Kind {
 			return out, nil
 		}
 		return duplicateFromStored(stored), nil
 	}
 	return out, nil
+}
+
+func conflictWithoutWrite(evt domain.UpstreamEvent) domain.ApplyOutcome {
+	rej := domain.Rejection{
+		Code:    domain.RejectPayloadConflict,
+		Message: "idempotency key collides with a different immutable payload fingerprint",
+	}
+	return domain.ApplyOutcome{
+		Kind:      domain.OutcomeQuarantined,
+		EventID:   evt.EventID,
+		Rejection: &rej,
+		Facts: []domain.Fact{{
+			Name: domain.FactProjectionEventQuarantined,
+			Data: map[string]string{
+				"eventId":       string(evt.EventID),
+				"eventType":     string(evt.EventType),
+				"code":          string(rej.Code),
+				"reason":        rej.Message,
+				"authoritative": "false",
+			},
+		}},
+	}
 }
 
 func (s *AnalyticsStore) insertProjectionRows(ctx context.Context, genID string, evt domain.UpstreamEvent, snap domain.AnalyticsSnapshot) error {
@@ -239,24 +309,28 @@ func (s *AnalyticsStore) insertProjectionRows(ctx context.Context, genID string,
 	}
 	occurredStr := occurred.Format("2006-01-02 15:04:05.000")
 
+	idem := domain.EffectiveIdempotencyKey(evt)
+	sourceTopic := string(evt.Source)
 	for _, m := range snap.GameplayMetrics {
 		if string(m.EventID) != string(evt.EventID) {
 			continue
 		}
 		q := `INSERT INTO gameplay_metrics (
-			generation_id, event_id, schema_version, correlation_id,
+			generation_id, source_topic, event_id, idempotency_key, schema_version, correlation_id,
 			room_id, game_id, tournament_id, visibility, metric_type,
 			public_card_rank, public_card_color, public_card_count_total, room_sequence,
 			public_player_id, display_name, occurred_at
 		) VALUES (
-			{gen:String}, {eid:String}, {sv:UInt16}, {cid:String},
+			{gen:String}, {topic:String}, {eid:String}, {ikey:String}, {sv:UInt16}, {cid:String},
 			{room:String}, {game:String}, {tid:String}, {vis:String}, {mt:String},
 			{rank:String}, {color:String}, {pct:UInt16}, {seq:UInt64},
 			{pid:String}, {dn:String}, {oa:String}
 		)`
 		params := map[string]string{
 			"gen":   genID,
+			"topic": sourceTopic,
 			"eid":   string(m.EventID),
+			"ikey":  idem,
 			"sv":    fmt.Sprintf("%d", evt.SchemaVersion),
 			"cid":   m.CorrelationID,
 			"room":  string(m.RoomID),
@@ -286,17 +360,19 @@ func (s *AnalyticsStore) insertProjectionRows(ctx context.Context, genID string,
 			return err
 		}
 		q := `INSERT INTO tournament_statistics (
-			generation_id, event_id, schema_version, correlation_id,
+			generation_id, source_topic, event_id, idempotency_key, schema_version, correlation_id,
 			tournament_id, round_number, slot_id, event_type, phase,
 			registered_count, advancing_player_count, public_payload_json, occurred_at
 		) VALUES (
-			{gen:String}, {eid:String}, {sv:UInt16}, {cid:String},
+			{gen:String}, {topic:String}, {eid:String}, {ikey:String}, {sv:UInt16}, {cid:String},
 			{tid:String}, {rn:Int32}, {slot:String}, {et:String}, {phase:String},
 			{rc:UInt32}, {ac:UInt16}, {pp:String}, {oa:String}
 		)`
 		params := map[string]string{
 			"gen":   genID,
+			"topic": sourceTopic,
 			"eid":   string(t.EventID),
+			"ikey":  idem,
 			"sv":    fmt.Sprintf("%d", evt.SchemaVersion),
 			"cid":   t.CorrelationID,
 			"tid":   string(t.TournamentID),
@@ -319,24 +395,26 @@ func (s *AnalyticsStore) insertProjectionRows(ctx context.Context, genID string,
 			continue
 		}
 		q := `INSERT INTO rating_statistics (
-			generation_id, event_id, schema_version, correlation_id,
+			generation_id, source_topic, event_id, idempotency_key, schema_version, correlation_id,
 			player_id, source_type, previous_rating, new_rating, board_type, snapshot_id, occurred_at
 		) VALUES (
-			{gen:String}, {eid:String}, {sv:UInt16}, {cid:String},
+			{gen:String}, {topic:String}, {eid:String}, {ikey:String}, {sv:UInt16}, {cid:String},
 			{pid:String}, {st:String}, {prev:Int32}, {next:Int32}, {bt:String}, {sid:String}, {oa:String}
 		)`
 		params := map[string]string{
-			"gen":  genID,
-			"eid":  string(r.EventID),
-			"sv":   fmt.Sprintf("%d", evt.SchemaVersion),
-			"cid":  r.CorrelationID,
-			"pid":  string(r.PlayerID),
-			"st":   r.SourceType,
-			"prev": fmt.Sprintf("%d", r.PreviousRating),
-			"next": fmt.Sprintf("%d", r.NewRating),
-			"bt":   r.BoardType,
-			"sid":  string(r.SnapshotID),
-			"oa":   occurredStr,
+			"gen":   genID,
+			"topic": sourceTopic,
+			"eid":   string(r.EventID),
+			"ikey":  idem,
+			"sv":    fmt.Sprintf("%d", evt.SchemaVersion),
+			"cid":   r.CorrelationID,
+			"pid":   string(r.PlayerID),
+			"st":    r.SourceType,
+			"prev":  fmt.Sprintf("%d", r.PreviousRating),
+			"next":  fmt.Sprintf("%d", r.NewRating),
+			"bt":    r.BoardType,
+			"sid":   string(r.SnapshotID),
+			"oa":    occurredStr,
 		}
 		if err := s.client.Exec(ctx, q, params); err != nil {
 			return fmt.Errorf("insert rating_statistics: %w", err)
@@ -347,37 +425,74 @@ func (s *AnalyticsStore) insertProjectionRows(ctx context.Context, genID string,
 
 func (s *AnalyticsStore) insertProcessed(ctx context.Context, genID string, evt domain.UpstreamEvent, disposition, outcomeJSON string) error {
 	q := `INSERT INTO processed_events (
-		generation_id, event_id, topic, disposition, outcome_json
+		generation_id, topic, idempotency_key, event_id, payload_fingerprint, disposition, outcome_json
 	) VALUES (
-		{gen:String}, {eid:String}, {topic:String}, {disp:String}, {oj:String}
+		{gen:String}, {topic:String}, {ikey:String}, {eid:String}, {fp:String}, {disp:String}, {oj:String}
 	)`
 	return s.client.Exec(ctx, q, map[string]string{
 		"gen":   genID,
-		"eid":   string(evt.EventID),
 		"topic": string(evt.Source),
+		"ikey":  domain.EffectiveIdempotencyKey(evt),
+		"eid":   string(evt.EventID),
+		"fp":    strings.TrimSpace(evt.PayloadFingerprint),
 		"disp":  disposition,
 		"oj":    outcomeJSON,
 	})
 }
 
-func (s *AnalyticsStore) loadOutcome(ctx context.Context, genID, eventID string) (domain.ApplyOutcome, bool, error) {
+func (s *AnalyticsStore) recordIngestionConflict(ctx context.Context, genID string, evt domain.UpstreamEvent, originalEventID, firstMarkerFP string, out domain.ApplyOutcome) error {
+	outcomeJSON, err := marshalDurableOutcome(out)
+	if err != nil {
+		return err
+	}
+	q := `INSERT INTO ingestion_conflicts (
+		generation_id, topic, idempotency_key, conflicting_fingerprint,
+		original_event_id, seen_event_id, first_marker_fingerprint, outcome_json
+	) VALUES (
+		{gen:String}, {topic:String}, {ikey:String}, {cfp:String},
+		{oid:String}, {sid:String}, {ffp:String}, {oj:String}
+	)`
+	if err := s.client.Exec(ctx, q, map[string]string{
+		"gen":   genID,
+		"topic": string(evt.Source),
+		"ikey":  domain.EffectiveIdempotencyKey(evt),
+		"cfp":   strings.TrimSpace(evt.PayloadFingerprint),
+		"oid":   originalEventID,
+		"sid":   string(evt.EventID),
+		"ffp":   firstMarkerFP,
+		"oj":    outcomeJSON,
+	}); err != nil {
+		return fmt.Errorf("insert ingestion_conflicts: %w", err)
+	}
+	return nil
+}
+
+func (s *AnalyticsStore) loadProcessed(ctx context.Context, genID, topic, idempotencyKey string) (domain.ApplyOutcome, string, string, bool, error) {
 	rows, err := s.client.Query(ctx,
-		`SELECT outcome_json FROM processed_events FINAL
-		 WHERE generation_id = {gen:String} AND event_id = {eid:String}
+		`SELECT outcome_json, payload_fingerprint, event_id FROM processed_events FINAL
+		 WHERE generation_id = {gen:String} AND topic = {topic:String} AND idempotency_key = {ikey:String}
 		 LIMIT 1`,
-		map[string]string{"gen": genID, "eid": eventID},
+		map[string]string{"gen": genID, "topic": topic, "ikey": idempotencyKey},
 	)
 	if err != nil {
-		return domain.ApplyOutcome{}, false, err
+		return domain.ApplyOutcome{}, "", "", false, err
 	}
 	if len(rows) == 0 || len(rows[0]) == 0 || rows[0][0] == "" {
-		return domain.ApplyOutcome{}, false, nil
+		return domain.ApplyOutcome{}, "", "", false, nil
 	}
 	out, err := unmarshalDurableOutcome(rows[0][0])
 	if err != nil {
-		return domain.ApplyOutcome{}, false, err
+		return domain.ApplyOutcome{}, "", "", false, err
 	}
-	return out, true, nil
+	fp := ""
+	if len(rows[0]) > 1 {
+		fp = rows[0][1]
+	}
+	eid := ""
+	if len(rows[0]) > 2 {
+		eid = rows[0][2]
+	}
+	return out, fp, eid, true, nil
 }
 
 func (s *AnalyticsStore) ensureActiveGeneration(ctx context.Context) (string, error) {
@@ -569,10 +684,10 @@ func (s *AnalyticsStore) loadRatings(ctx context.Context, genID string) ([]domai
 
 // durableOutcome is the byte-stable persisted ApplyOutcome shape.
 type durableOutcome struct {
-	Kind      string             `json:"kind"`
-	EventID   string             `json:"eventId"`
-	Rejection *durableRejection  `json:"rejection,omitempty"`
-	Facts     []durableFact      `json:"facts"`
+	Kind      string            `json:"kind"`
+	EventID   string            `json:"eventId"`
+	Rejection *durableRejection `json:"rejection,omitempty"`
+	Facts     []durableFact     `json:"facts"`
 }
 
 type durableRejection struct {

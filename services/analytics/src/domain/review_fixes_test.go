@@ -28,15 +28,74 @@ func TestMigration_RatingStatisticsOrderByRetainsLeaderboardRows(t *testing.T) {
 			section = section[:next+1]
 		}
 	}
-	if !strings.Contains(section, "ORDER BY (generation_id, event_id, snapshot_id, player_id)") {
-		t.Fatalf("rating_statistics must ORDER BY (generation_id, event_id, snapshot_id, player_id); section=\n%s", section)
+	if !strings.Contains(section, "ORDER BY (generation_id, source_topic, idempotency_key, snapshot_id, player_id)") {
+		t.Fatalf("rating_statistics must ORDER BY (generation_id, source_topic, idempotency_key, snapshot_id, player_id); section=\n%s", section)
+	}
+	if !strings.Contains(section, "source_topic") {
+		t.Fatal("rating_statistics must include source_topic")
 	}
 	// Bare event_id-only key would collapse leaderboard rows sharing one upstream event.
 	if strings.Contains(section, "ORDER BY (event_id)\n") || strings.Contains(section, "ORDER BY (event_id)\r") {
 		t.Fatal("rating_statistics must not use ORDER BY (event_id) alone")
 	}
-	if !strings.Contains(sql, "analytics.processed_events") || !strings.Contains(sql, "ORDER BY (generation_id, event_id)") {
-		t.Fatal("processed_events must still dedupe ingestion by (generation_id, event_id)")
+	if !strings.Contains(sql, "analytics.processed_events") || !strings.Contains(sql, "ORDER BY (generation_id, topic, idempotency_key)") {
+		t.Fatal("processed_events must dedupe ingestion by (generation_id, topic, idempotency_key)")
+	}
+}
+
+func TestMigration_SourceTopicInProjectionReplaceKeys(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", "001_init.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(raw)
+
+	tourIdx := strings.Index(sql, "analytics.tournament_statistics")
+	if tourIdx < 0 {
+		t.Fatal("tournament_statistics missing")
+	}
+	tourSection := sql[tourIdx:]
+	if next := strings.Index(tourSection[1:], "CREATE TABLE"); next > 0 {
+		tourSection = tourSection[:next+1]
+	}
+	if !strings.Contains(tourSection, "source_topic") {
+		t.Fatal("tournament_statistics must include source_topic")
+	}
+	if !strings.Contains(tourSection, "ORDER BY (generation_id, tournament_id, source_topic, idempotency_key)") {
+		t.Fatalf("tournament_statistics ORDER BY must include source_topic; section=\n%s", tourSection)
+	}
+
+	gameIdx := strings.Index(sql, "analytics.gameplay_metrics")
+	if gameIdx < 0 {
+		t.Fatal("gameplay_metrics missing")
+	}
+	gameSection := sql[gameIdx:]
+	if next := strings.Index(gameSection[1:], "CREATE TABLE"); next > 0 {
+		gameSection = gameSection[:next+1]
+	}
+	if !strings.Contains(gameSection, "source_topic") {
+		t.Fatal("gameplay_metrics must include source_topic")
+	}
+	if !strings.Contains(gameSection, "ORDER BY (generation_id, source_topic, idempotency_key)") {
+		t.Fatalf("gameplay_metrics ORDER BY must include source_topic; section=\n%s", gameSection)
+	}
+
+	if !strings.Contains(sql, "analytics.ingestion_conflicts") {
+		t.Fatal("ingestion_conflicts table required")
+	}
+	confIdx := strings.Index(sql, "analytics.ingestion_conflicts")
+	confSection := sql[confIdx:]
+	if next := strings.Index(confSection[1:], "CREATE TABLE"); next > 0 {
+		confSection = confSection[:next+1]
+	}
+	if !strings.Contains(confSection, "ORDER BY (generation_id, topic, idempotency_key, conflicting_fingerprint)") {
+		t.Fatalf("ingestion_conflicts ORDER BY missing; section=\n%s", confSection)
+	}
+	for _, col := range []string{"original_event_id", "seen_event_id", "first_marker_fingerprint", "outcome_json"} {
+		if !strings.Contains(confSection, col) {
+			t.Fatalf("ingestion_conflicts missing %s", col)
+		}
 	}
 }
 
@@ -113,6 +172,26 @@ func TestSource_RequiredTrustedTopicBoundToEventType(t *testing.T) {
 	if unknown.Kind != OutcomeQuarantined || unknown.Rejection == nil || unknown.Rejection.Code != RejectNonPublicSource {
 		t.Fatalf("unknown source: %+v", unknown)
 	}
+
+	// Phase-1 completion sources bind to TournamentStatistic.
+	for _, src := range []SourceTopic{SourceRoomMatchCompleted, SourceTournamentCompleted} {
+		if !src.Valid() {
+			t.Fatalf("%s must be Valid", src)
+		}
+		out := p.Apply(UpstreamEvent{
+			EventID:       EventID("src_" + string(src)),
+			EventType:     EventTournamentStatistic,
+			Source:        src,
+			SchemaVersion: CurrentSchemaVersion,
+			Payload: map[string]any{
+				"tournamentId": "tour_1",
+				"phase":        "completed",
+			},
+		})
+		if out.Kind != OutcomeAccepted {
+			t.Fatalf("%s TournamentStatistic must accept, got %+v", src, out)
+		}
+	}
 }
 
 func TestSource_PublicPlayerFactsRequireTournamentProvenance(t *testing.T) {
@@ -163,9 +242,9 @@ func TestLeaderboard_AtomicAppendOrQuarantine(t *testing.T) {
 			"snapshotId": "lb_1",
 			"sourceType": "casual_elo",
 			"entries": []any{
-				map[string]any{"playerId": "p1", "rating": 1016},
-				map[string]any{"rating": 990}, // missing playerId
-				map[string]any{"playerId": "p3", "rating": 980},
+				map[string]any{"playerId": "p1", "rating": 1016, "rank": 1},
+				map[string]any{"rating": 990, "rank": 2}, // missing playerId
+				map[string]any{"playerId": "p3", "rating": 980, "rank": 3},
 			},
 		},
 	})
@@ -189,8 +268,8 @@ func TestLeaderboard_AtomicAppendOrQuarantine(t *testing.T) {
 			"snapshotId": "lb_2",
 			"sourceType": "casual_elo",
 			"entries": []any{
-				map[string]any{"playerId": "p1", "rating": 1016},
-				map[string]any{"playerId": "p2", "rating": 990},
+				map[string]any{"playerId": "p1", "rating": 1016, "rank": 1},
+				map[string]any{"playerId": "p2", "rating": 990, "rank": 2},
 			},
 		},
 	})
@@ -318,7 +397,7 @@ func TestLeaderboard_MalformedEntryTypeQuarantinesWithoutPartialAppend(t *testin
 			"boardType":  "casual_elo",
 			"snapshotId": "lb_x",
 			"entries": []any{
-				map[string]any{"playerId": "p1", "rating": 10},
+				map[string]any{"playerId": "p1", "rating": 10, "rank": 1},
 				"not-an-object",
 			},
 		},

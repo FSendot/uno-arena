@@ -3,6 +3,9 @@ replicaCount: 1
 env:
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/5
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: spectator-view
+  KAFKA_SPECTATOR_SAFE_TOPIC: room.spectator-safe.events
+  KAFKA_SPECTATOR_SAFE_DLQ_TOPIC: room.spectator-safe.events.spectator-view.dlq
 
 projectionRebuilder:
   enabled: false

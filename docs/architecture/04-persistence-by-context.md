@@ -4,7 +4,7 @@ This document records the **required durable persistence architecture** per boun
 
 For every Postgres-backed producer, authoritative state and its Kafka-bound outbox record commit together. Debezium captures inserts from PostgreSQL WAL and the Outbox Event Router maps standardized logical fields to the context-owned AsyncAPI topic. Each context-owned Postgres database has one Kafka-bound connector. Room Gameplay also commits a realtime outbox captured by a separate Debezium Server Redis sink for its database; Spectator View updates its Redis projection and spectator stream atomically. Redis Streams remain non-authoritative delivery state. Postgres outboxes are time-partitioned and reclaimed only through the LSN/offset safety gate in ADR-0026.
 
-The current offline-friendly capability implementation uses `GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `ANALYTICS_CAPABILITY_MODE` / `SPECTATOR_CAPABILITY_MODE` (real HTTP service paths with bounded in-memory limiters / memory session repo / Analytics memory / Spectator memory) plus explicit Game Integrity memory and HTTP bridges so services can run without durable adapters. Isolated-test fakes remain behind `*_ALLOW_FAKES` only. That offline mode is intentional and must not be described as “Postgres/Kafka/Redis/KurrentDB/ClickHouse are implemented.” Context-owned SQL under `services/*/migrations/` documents intended durable schemas. Identity durable Postgres and Room durable Postgres + Redis timer index are implemented when their writer DSNs are set; Analytics durable ClickHouse HTTP/store is implemented when `CLICKHOUSE_URL` plus scoped credentials are set (Kafka ingestion pending); Spectator durable Redis projection + SSE are implemented when `REDIS_URL` plus scoped credentials are set (Kafka consumer pending); Gateway durable Redis rate-limit + direct player/spectator LiveFeed SSE are implemented when `REDIS_URL`, `GATEWAY_PLAYER_FEED_REDIS_URL`, and `GATEWAY_SPECTATOR_REDIS_URL` are set (Kafka SessionInvalidated consumer and Debezium player-feed sink pending); local kind CDC prerequisites (logical WAL, CDC roles/publications, retention/DLQ topic policy) are implemented, while Debezium connector delivery for Identity/Room outboxes remains pending.
+The current offline-friendly capability implementation uses `GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `ANALYTICS_CAPABILITY_MODE` / `SPECTATOR_CAPABILITY_MODE` (real HTTP service paths with bounded in-memory limiters / memory session repo / Analytics memory / Spectator memory) plus explicit Game Integrity memory and HTTP bridges so services can run without durable adapters. Isolated-test fakes remain behind `*_ALLOW_FAKES` only. That offline mode is intentional and must not be confused with the configured durable path. Context-owned migrations document the durable schemas. Identity/Room/Ranking/Tournament Postgres, Analytics ClickHouse, Game Integrity KurrentDB, Spectator/Ranking/Tournament Redis projections, Room Redis timers, and Gateway Redis admission/LiveFeed adapters are implemented when their context-owned connections are set. The declared Gateway, Tournament, Ranking, Spectator, and Analytics Kafka consumers are implemented when `KAFKA_BROKERS` is set. Room/Tournament/Ranking analytics-backfill and Room spectator-recovery-snapshot APIs plus Spectator/Analytics projection-rebuilder workers are implemented; their Deployments remain disabled pending full live recovery tests. Local kind CDC prerequisites plus Debezium Kafka Connect (four outbox routers) and Debezium Server (Room realtime → Redis) are implemented. Ranking leaderboard, Tournament bracket, Spectator recovery, and Analytics recovery stores have real kind integration coverage, while full worker/clean-cluster proofs remain separate explicit gates.
 
 Each Postgres-backed context initializes an empty database through its own Kubernetes bootstrap Job. The Job serializes with a context-specific advisory lock inside one admin transaction, decides empty/exact/drift before any role or schema mutation, writes the expected schema-version metadata only on empty apply (DDL attributable to the bootstrap role), and leaves runtime credentials without DDL. Exact requires exactly one migrations row and exactly one bootstrap-meta row matching version/checksum/catalog and is a no-op; any other non-empty state fails unchanged. Until a later stateful-upgrade decision exists, resets are explicit database/volume recreation followed by bootstrap.
 
@@ -16,7 +16,7 @@ Non-Postgres stores follow their own model. Analytics owns an empty-or-exact-cur
 
 Every durable Kafka consumer commits its owned-state mutation, AsyncAPI idempotency key, and ordered aggregate checkpoint atomically before acknowledging the source offset. Finite-replay dedupe records remain for at least source retention plus the maximum DLQ/replay window. Permanent replay uses aggregate checkpoints or domain uniqueness constraints; active quarantine/replay references prevent cleanup.
 
-Kafka provides bounded operational replay only. Spectator-safe expiry recovers from sanitized snapshots; metrics expiry uses Analytics backfill; Identity Postgres remains authoritative after invalidation controls expire; business replay beyond seven days uses the producing context's retained state/history. None of these Kafka windows replace context-specific audit retention.
+Kafka provides bounded operational replay only. Spectator-safe expiry recovers through `spectator.projection.rebuild_requested` plus Room's internal sanitized spectator-recovery-snapshot API; metrics and other Analytics source expiry recover through `analytics.projection.rebuild_requested` plus Room/Tournament/Ranking internal analytics-backfill APIs; Identity Postgres remains authoritative after invalidation controls expire; business replay beyond seven days uses the producing context's retained state/history. None of these Kafka windows replace context-specific audit retention.
 
 ## Identity
 
@@ -77,7 +77,9 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers f
 - Existing Room mutations use `READ COMMITTED` with `SELECT ... FOR UPDATE` on the aggregate row. The lock is retained through Game Integrity confirmation and the local commit; all Room-owned child rows follow a consistent lock order.
 - Lock/statement/internal-call deadlines are bounded. Game Integrity failure rolls back the transaction, while append-confirmed/local-commit-failed recovery reconciles from KurrentDB.
 - Read models include the player feed and reconnect snapshot. Players may read their own private hand state plus public room state; spectators must use Spectator View instead.
+- Public room listing (BFF `GET /v1/rooms` → Room `GET /internal/v1/rooms/public-list`) is a bounded keyset read over authoritative `rooms` snapshot columns (`visibility='public'`, status filter, `room_id ASC`) using `rooms_public_list_idx`; never OFFSET/full scan. Opaque HMAC cursor (`ROOM_PUBLIC_LIST_CURSOR_SECRET`, API-only) is bound to the status filter; default 50 / max 100 with one-row lookahead.
 - Retention keeps operational snapshots until the room/match can no longer affect reconnect, tournament advancement, rating, or dispute windows; immutable committed gameplay/integrity history remains in Game Integrity. Structured rejected-command audit records live outside Game Integrity in operational/security observability.
+- Context-owned recovery APIs (ADR-0039, implemented): `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` exports sanitized public state + `resumeCheckpoint`; `POST /internal/v1/rooms/analytics-backfill` pages read-only append-only integration-outbox rows (HMAC cursor; default 100 / max 1000) for Analytics-consumed Room topics. Neither path polls or mutates outbox publish state.
 
 ## Game Integrity
 
@@ -110,7 +112,7 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers f
 **Authoritative store**
 
 - Postgres for tournament state, registration, round progress, and advancement records
-- Durable production path: context-owned pgxpool writer, exact schema/bootstrap readiness, transactional aggregate commit (authoritative rows + command idempotency + append-only outbox) under tournament-row `FOR UPDATE` / create advisory lock. Outbox is Debezium CDC input only — the durable runtime never polls or marks rows. Provisioning worker stays disabled until a safe `WORKER_ROLE` loop exists; provisioning uses synchronous `ProcessProvisioningBatch` with durable recovery.
+- Durable production path: context-owned pgxpool writer, exact schema/bootstrap readiness, transactional aggregate commit (authoritative rows + command idempotency + append-only outbox) under tournament-row `FOR UPDATE` / create advisory lock. Outbox is Debezium CDC input only — the durable runtime never polls or marks rows. Durable `SeedRound(1)` kickoff + `WORKER_ROLE=tournament-seeding` chunk worker (kind-enabled; disabled default/staging/production) schedule/finalize ROUND-1 without whole-aggregate rewrite; later-round seeding remains out of scope. Provisioning uses synchronous `ProcessProvisioningBatch` with durable recovery (`WORKER_ROLE=tournament-provisioning` kind-enabled).
 
 **Supporting store**
 
@@ -119,14 +121,17 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers f
 **Persistence rules**
 
 - Tournament advancement state is durable in Postgres.
-- Sharded provisioning workers can scale independently from the read projection (worker Deployment remains disabled until a safe loop lands).
-- Tournament processing is async around `MatchCompleted`.
+- Sharded provisioning and ROUND-1 seeding workers can scale independently from the read projection (worker Deployments disabled outside kind until ops enable them).
+- Public BracketPage excludes pending seeding rounds/slots until finalization; projectionVersion bumps once on seeding completion.
+- Tournament processing is async around `MatchCompleted`. Durable franz-go consumption of `room.match.completed` is implemented when `KAFKA_BROKERS` is set.
 - Consistency is strong per tournament, round, and slot assignment. Async room results are deduped before they update advancement state.
 - Tournament result/advancement changes, `(roomId, completionVersion)` dedupe, and the tournament/slot checkpoint commit in one Postgres transaction before the Kafka offset.
-- Redis bracket projections are read models only; they are rebuilt from Postgres tournament state and published tournament events.
-- Tournament lifecycle, result, and advancement outbox rows are routed to Kafka through the Tournament database's Debezium connector (connector delivery not claimed by the durable adapter alone).
+- Redis bracket projections are read models only; they are rebuilt from Postgres tournament state and published tournament events. Physical values are chunked by round/provisioning batch, and public reads return only a 100-slot default / 1,000-slot maximum live-keyset page plus compact summary metadata. Stable round/slot cursor identity survives state updates; each page reports its projection version/time.
+- Public standings reads are Postgres one-statement snapshots (`registeredCount` = SUM of 64 registration shards; `finalStandings` from recorded final-round `ranked_result`, max 10) and never hydrate the whole tournament aggregate.
+- Tournament lifecycle, result, and advancement outbox rows are routed to Kafka through the Tournament database's Debezium connector (kind Connect wiring is implemented; live outbox→Kafka proofs remain explicit optional targets).
 - Tournament outbox partitions use the connector-offset reclamation gate; an end-of-round burst cannot be age-deleted while connector progress is unproven.
 - Retention keeps registration, room-slot assignments, match results, advancement decisions, tie-break inputs, and final standings for audit and bracket reconstruction.
+- Context-owned Analytics backfill (ADR-0039, implemented): `POST /internal/v1/tournaments/analytics-backfill` pages read-only append-only outbox rows (HMAC cursor; default 100 / max 1000) for Analytics-consumed Tournament topics; never mutates outbox publish state.
 
 ## Ranking
 
@@ -134,22 +139,34 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers f
 
 - Postgres for rating history and authoritative ranking records
 - Durable production adapter (`services/ranking/src/store`) commits rating mutations, idempotency keys, stable responses, and append-only outbox rows in one writer transaction; Redis is not required for authoritative correctness
+- Durable multi-topic franz-go consumers for `room.game.completed`, `tournament.players.advanced`, and `tournament.completed` (per-source Ranking DLQs) are implemented when `KAFKA_BROKERS` is set
 
 **Cache**
 
-- Redis for leaderboard reads (non-authoritative projection; rebuildable later — not claimed by the durable adapter slice)
+- Redis for leaderboard reads (non-authoritative projection; rebuildable later — not wired in the local durable slice yet)
 
 **Persistence rules**
 
 - Rank updates are derived from authoritative game or tournament results.
+- Tournament-placement updates consume `PlayersAdvanced` as advancement-depth facts and `TournamentCompleted.finalStandings` as final-placement facts. Tournament never supplies a rating delta; Ranking calculates it.
+- Tournament Placement Rating starts at zero, never decreases, and does not reset between tournaments. Seasonal or decaying views, if introduced later, are separate projections and cannot rewrite lifetime achievement history.
+- Advancement awards are fixed at 10 points per accepted `PlayersAdvanced` event. `roundNumber` is stored in history for traceability, while replay-safe accumulation across successive rounds represents advancement depth.
+- Final-placement awards are top-heavy and apply once from ordered `TournamentCompleted.finalStandings`; they supplement rather than replace previously earned advancement points.
+- Ranking maps final places first through tenth to `100, 70, 50, 35, 25, 20, 15, 10, 5, 0` points. A smaller final uses the prefix of the same stable table.
+- A zero-point final standing still commits idempotency, history, stable outcome, and a zero-delta rating-update outbox row. It does not by itself publish a leaderboard snapshot because the stored score is unchanged.
+- A tournament-performance fact is one bounded multi-player Postgres transaction (at most three advancement players or ten finalists). Stable player-ID lock ordering covers every affected aggregate; ratings, history, idempotency, stable outcome, and outbox rows commit together before the Kafka offset.
+- The same transaction persists the AsyncAPI event key plus immutable payload fingerprint: `(tournamentId, roundNumber, sourceSlotId)` for advancement and `eventId` for completion. Exact duplicates reuse the stable outcome; conflicting reuse is event-local DLQ failure before any player mutation.
+- Tournament awards are additive and commutative. A failed event waits in its consumer-owned DLQ without quarantining the whole tournament; later valid facts may apply, and eventual replay of the repaired event converges to the same total.
 - The cache can be rebuilt.
 - Ranking writes should not block gameplay.
 - Consistency is eventual relative to Room Gameplay and Tournament Orchestration. Each rating application is idempotent by upstream event/player keys.
-- Rating history, the contract business key, and the applicable player/game or placement checkpoint commit together before the Kafka offset.
-- Read models include Redis leaderboard snapshots and rating-history queries; stale leaderboards are acceptable while authoritative Postgres rating history catches up. Authoritative HTTP leaderboard/history reads are served from Postgres.
-- Rating update and leaderboard-snapshot outbox rows are routed through the Ranking database's Debezium connector (connector delivery not claimed by the durable adapter alone).
+- Rating history, the contract business key, and the applicable player/game or placement checkpoint commit together before the Kafka offset. Tournament performance uses `(playerId, tournamentId, placementEventId)`, with `placementEventId` equal to the upstream tournament event `eventId`.
+- Read models include a complete incrementally maintained Redis sorted-set leaderboard and rating-history queries; stale leaderboards are acceptable while authoritative Postgres rating history catches up. Public reads are live keyset pages of 100 entries by default and at most 500, ordered from the cursor's `(rating, playerId)` boundary. Each page reports projection version/time; cross-page version drift is visible but does not require frozen million-player Redis generations. Published leaderboard snapshots are bounded top-100 views, never million-entry event payloads. Authoritative HTTP leaderboard/history fallback reads are served from Postgres.
+- Score-changing transactions advance a durable dirty version for the affected board. A Ranking-owned snapshot worker claims unpublished versions and emits no more than one coalesced top-100 snapshot per board every 15 seconds; its published-version checkpoint commits with the snapshot outbox row. Zero-delta tournament facts leave the dirty version unchanged.
+- Rating update and leaderboard-snapshot outbox rows are routed through the Ranking database's Debezium connector (kind Connect wiring is implemented; live outbox→Kafka proofs remain explicit optional targets).
 - Ranking outbox partitions use the connector-offset reclamation gate and remain separate from authoritative rating history retention.
 - Retention keeps rating history and upstream event references so duplicate or corrected inputs can be audited without recomputing from lossy aggregates.
+- Context-owned Analytics backfill (ADR-0039, implemented): `POST /internal/v1/rankings/analytics-backfill` pages read-only append-only outbox rows (HMAC cursor; default 100 / max 1000) for `ranking.player_rating_updated` (requires `projectionVersion`) and `ranking.leaderboard_snapshot_published`; never mutates outbox publish state.
 
 ## Spectator View
 
@@ -172,7 +189,8 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers f
 - Consistency is eventual and versioned by room sequence. The projection may lag briefly but must never include private hand, hidden deck, or player-only action data.
 - Read models are room spectator snapshots and incremental SSE payloads served through the BFF.
 - Projection retention follows active-room and replay needs; lost Redis state is recovered by replaying safe events and sanitized snapshots, not by querying private stores.
-- **Durable adapter status:** Spectator Redis projection + Redis-backed spectator SSE are implemented when `REDIS_URL` plus scoped `SPECTATOR_VIEW_INTERNAL_CREDENTIAL` are set (`/ready` pings Redis; dedicated key prefix; Lua CAS apply/rebuild). Capability memory + process-local StreamHub remain behind explicit non-prod `SPECTATOR_CAPABILITY_MODE`. **Kafka consumer for `room.spectator-safe.events` is pending**; HTTP internal ingest is a test/ops bridge only and is not the production input path.
+- Post-retention/quarantine rebuild (ADR-0039, implemented; Deployment disabled pending live tests): Spectator consumes `spectator.projection.rebuild_requested` keyed by `roomId`, fetches Room's spectator-recovery-snapshot with `ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`, CAS/fences Redis generation-swap against current room sequence/generation (newer live apply wins), records `(recoveryJobId, roomId, failedCheckpoint)` idempotency and releases quarantine atomically only after continuity through held post-gap records is proven.
+- **Durable adapter status:** Spectator Redis projection + Redis-backed spectator SSE are implemented when `REDIS_URL` plus scoped `SPECTATOR_VIEW_INTERNAL_CREDENTIAL` are set (`/ready` pings Redis; dedicated key prefix; Lua CAS apply/rebuild). Capability memory + process-local StreamHub remain behind explicit non-prod `SPECTATOR_CAPABILITY_MODE`. Durable Kafka consumer for `room.spectator-safe.events` is implemented when `KAFKA_BROKERS` is set; HTTP internal ingest is a test/ops bridge only and is not the production input path. Projection-rebuilder worker binary and rebuild-request admission are implemented; `projectionRebuilder.enabled=false` in default/staging/production/`kind` until live recovery tests pass.
 
 ## Analytics and Public Read Models
 
@@ -191,9 +209,10 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers f
 - Analytics is derived and non-authoritative.
 - An Analytics-owned ClickHouse bootstrap Job creates tables, materialized views, retention policies, and the exact schema-version marker with a DDL credential unavailable to runtime pods.
 - Empty and exact-current ClickHouse states are accepted; any other non-empty state fails unchanged until a future stateful-upgrade decision exists.
-- **Durable adapter status:** Analytics ClickHouse HTTP/store is implemented when `CLICKHOUSE_URL` plus scoped runtime credentials are set (`/ready` verifies schema; generation-based rebuild). Capability memory remains behind explicit non-prod `ANALYTICS_CAPABILITY_MODE`. **Kafka ingestion is pending** and is not claimed by this adapter.
+- **Durable adapter status:** Analytics ClickHouse HTTP/store is implemented when `CLICKHOUSE_URL` plus scoped runtime credentials are set (`/ready` verifies schema; generation-based rebuild). Capability memory remains behind explicit non-prod `ANALYTICS_CAPABILITY_MODE`. Durable Kafka ingestion of the nine configured AsyncAPI topics is implemented when `KAFKA_BROKERS` is set. Projection-rebuilder worker binary, rebuild-request admission, and durable ClickHouse recovery (generation/lease/checkpoint, dual-write, server-side clone) are implemented; `projectionRebuilder.enabled=false` in default/staging/production/`kind` until live recovery tests pass.
 - Encrypted daily ClickHouse backup targets RPO ≤24 hours/RTO ≤4 hours; safe retained events and context backfills repair derived intervals beyond the backup point.
 - The model can be rebuilt or backfilled from safe upstream facts.
+- Post-retention/quarantine rebuild (ADR-0039, implemented; Deployment disabled pending live tests): Analytics consumes `analytics.projection.rebuild_requested` keyed by `recoveryJobId`, pages Room/Tournament/Ranking analytics-backfill APIs (producer-owned HMAC cursor; paired range; producer default 100 / max 1000; worker default page 1000), applies under a durable ClickHouse-visible rebuilding generation/lease/checkpoint so live ingest dual-writes into the fenced generation, and claims continuity only after every requested page/checkpoint is reconciled. Process-local mutex alone is insufficient. ClickHouse non-transactional projection-before-marker check-then-act remains; same-generation redelivery is idempotent via FINAL processed markers.
 - More granular public tournament metrics are allowed than ad-hoc anonymized analytics, as long as they remain public and non-authoritative.
 - Consistency is eventual and optimized for ingestion/query throughput, not transactional decisions.
 - Analytics applies the declared event/business key through its versioned ClickHouse deduplication/replacement strategy before acknowledging the source offset; conflicting duplicates are quarantined rather than counted twice.

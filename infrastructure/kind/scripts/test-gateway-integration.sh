@@ -81,7 +81,7 @@ export GATEWAY_SPECTATOR_REDIS_URL="redis://127.0.0.1:${LOCAL_PORT}/${SAFE_SPECT
 echo "GATEWAY_REDIS_URL=${GATEWAY_REDIS_URL}"
 echo "GATEWAY_PLAYER_FEED_REDIS_URL=${GATEWAY_PLAYER_FEED_REDIS_URL}"
 echo "GATEWAY_SPECTATOR_REDIS_URL=${GATEWAY_SPECTATOR_REDIS_URL}"
-echo "note: Kafka/Debezium remain PENDING; suite uses isolated DBs 11/12/13"
+echo "note: suite uses isolated DBs 11/12/13 (Redis adapters only; no Kafka broker required)"
 
 make -C "${REPO_ROOT}" test-gateway-integration
 echo "ok kind-test-gateway-integration"

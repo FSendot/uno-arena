@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -15,6 +17,12 @@ const (
 )
 
 var roomIDKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+
+// HashRebuildIdempotencyIdentity returns a deterministic hex digest for Redis key suffixes.
+func HashRebuildIdempotencyIdentity(identity string) string {
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:])
+}
 
 // KeySpace builds deterministic validated Redis keys rooted in roomId.
 type KeySpace struct {
@@ -72,6 +80,20 @@ func (k KeySpace) Generation(roomID domain.RoomID) string {
 
 func (k KeySpace) Stream(roomID domain.RoomID, generation string) string {
 	return k.root(roomID) + "stream:" + generation
+}
+
+// KafkaQuarantine is the ADR-0017 aggregate quarantine hash for a room.
+// Shares the roomId hash-tag so Lua multi-key commits stay single-slot.
+func (k KeySpace) KafkaQuarantine(roomID domain.RoomID) string {
+	return k.root(roomID) + "kafka_quarantine"
+}
+
+// RebuildDone is the durable recovery idempotency marker for one declared identity.
+// Hash-tagged with roomId so multi-key recovery Lua stays single-slot on Redis Cluster.
+// identity is the exact AsyncAPI key "recoveryJobId|roomId|failedCheckpoint"; the
+// suffix is a deterministic SHA-256 hex digest so key length stays bounded/safe.
+func (k KeySpace) RebuildDone(roomID domain.RoomID, identity string) string {
+	return k.root(roomID) + "rebuild_done:" + HashRebuildIdempotencyIdentity(identity)
 }
 
 // StreamKeyFor returns the active stream key for roomID (tests/ops).

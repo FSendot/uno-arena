@@ -19,6 +19,8 @@ JOB_PATH = File.join(OUT_DIR, "job-kafka-topics.yaml")
 
 KIND_HIGH_PARTITIONS = 8
 KIND_BUSINESS_PARTITIONS = 2
+# ADR-0039 rebuild-request topics keep prod partition count locally (RF stays kind=1).
+KIND_REBUILD_REQUEST_PARTITIONS = 32
 KIND_REPLICATION_FACTOR = 1
 
 # Kind-short retention.ms by ADR-0032 class (no production recovery-window claim).
@@ -35,6 +37,11 @@ CONNECT_TOPICS = [
   { "name" => "connect-status", "partitions" => 3, "replicationFactor" => 1, "cleanupPolicy" => "compact", "class" => "connect-internal" }
 ].freeze
 
+REBUILD_REQUEST_TOPICS = [
+  "spectator.projection.rebuild_requested",
+  "analytics.projection.rebuild_requested"
+].freeze
+
 # Documented consumers only (architecture integration table). Scaffolding topics;
 # consumers themselves remain pending — do not invent undeclared groups.
 DOCUMENTED_DLQ_CONSUMERS = [
@@ -43,6 +50,8 @@ DOCUMENTED_DLQ_CONSUMERS = [
   { "source" => "room.match.completed", "consumer" => "tournament-orchestration" },
   { "source" => "room.match.completed", "consumer" => "analytics" },
   { "source" => "room.spectator-safe.events", "consumer" => "spectator-view" },
+  { "source" => "spectator.projection.rebuild_requested", "consumer" => "spectator-view" },
+  { "source" => "analytics.projection.rebuild_requested", "consumer" => "analytics" },
   { "source" => "room.gameplay.metrics", "consumer" => "analytics" },
   { "source" => "tournament.match.assigned", "consumer" => "analytics" },
   { "source" => "tournament.match.result_recorded", "consumer" => "analytics" },
@@ -50,6 +59,7 @@ DOCUMENTED_DLQ_CONSUMERS = [
   { "source" => "tournament.players.advanced", "consumer" => "ranking" },
   { "source" => "tournament.round.completed", "consumer" => "analytics" },
   { "source" => "tournament.completed", "consumer" => "analytics" },
+  { "source" => "tournament.completed", "consumer" => "ranking" },
   { "source" => "ranking.player_rating_updated", "consumer" => "analytics" },
   { "source" => "ranking.leaderboard_snapshot_published", "consumer" => "analytics" }
 ].freeze
@@ -81,7 +91,13 @@ fail!("AsyncAPI must allow local shorter retention") unless retention_plan["loca
 
 domain_topics = channels.keys.sort.map do |name|
   klass = high_topics.include?(name) ? "high" : "business"
-  partitions = klass == "high" ? KIND_HIGH_PARTITIONS : KIND_BUSINESS_PARTITIONS
+  partitions = if REBUILD_REQUEST_TOPICS.include?(name)
+                 KIND_REBUILD_REQUEST_PARTITIONS
+               elsif klass == "high"
+                 KIND_HIGH_PARTITIONS
+               else
+                 KIND_BUSINESS_PARTITIONS
+               end
   prod_partitions = channels.dig(name, "bindings", "kafka", "partitions")
   ret_class = retention_class_for(name, high_topics)
   {
@@ -103,12 +119,17 @@ end
 
 dlq_topics = DOCUMENTED_DLQ_CONSUMERS.map do |row|
   name = dlq_topic_name(row["source"], row["consumer"])
+  partitions = if REBUILD_REQUEST_TOPICS.include?(row["source"])
+                 KIND_REBUILD_REQUEST_PARTITIONS
+               else
+                 KIND_BUSINESS_PARTITIONS
+               end
   {
     "name" => name,
     "class" => "dlq",
     "retentionClass" => "dlq",
     "retentionMs" => KIND_RETENTION_MS.fetch("dlq"),
-    "partitions" => KIND_BUSINESS_PARTITIONS,
+    "partitions" => partitions,
     "replicationFactor" => KIND_REPLICATION_FACTOR,
     "cleanupPolicy" => "delete",
     "sourceTopic" => row["source"],

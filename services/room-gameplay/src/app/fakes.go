@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -266,6 +267,56 @@ func (r *MemorySessionRepository) PendingOutboxLen() int {
 	return n
 }
 
+// ListPublicRoomRows returns a bounded public-only keyset page ordered by room_id ASC.
+// Private rooms are never included. limit includes one-row lookahead when requested by the service.
+func (r *MemorySessionRepository) ListPublicRoomRows(_ context.Context, status domain.RoomStatus, afterRoomID string, limit int) ([]PublicRoomSummary, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]string, 0, len(r.byID))
+	for id, sess := range r.byID {
+		if sess == nil || sess.Room() == nil {
+			continue
+		}
+		room := sess.Room()
+		if room.Visibility() != domain.VisibilityPublic {
+			continue
+		}
+		if room.Status() != status {
+			continue
+		}
+		rid := string(id)
+		if afterRoomID != "" && rid <= afterRoomID {
+			continue
+		}
+		ids = append(ids, rid)
+	}
+	sort.Strings(ids)
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	out := make([]PublicRoomSummary, 0, len(ids))
+	for _, rid := range ids {
+		room := r.byID[domain.RoomID(rid)].Room()
+		sum := PublicRoomSummary{
+			RoomID:         rid,
+			Status:         string(room.Status()),
+			Visibility:     string(domain.VisibilityPublic),
+			MaxSeats:       room.Roster().Capacity(),
+			CurrentPlayers: room.Roster().OccupiedCount(),
+			HostID:         string(room.HostID()),
+			RoomType:       string(room.Type()),
+		}
+		if room.Type() == domain.RoomTypeTournament && room.TournamentID().Valid() {
+			sum.TournamentID = string(room.TournamentID())
+		}
+		out = append(out, sum)
+	}
+	return out, nil
+}
+
 // FakeGameIntegrity records appends and can fail on demand.
 type FakeGameIntegrity struct {
 	mu       sync.Mutex
@@ -423,6 +474,7 @@ type FakeDealSource struct {
 	resDeck      map[string]string // reservationID -> deckKey
 	resDrawCount map[string]int    // reservationID -> cards to advance on confirm
 	cursor       map[string]int    // deckKey -> next card index (advances only on confirm)
+	remaining    map[string]int    // deckKey -> authoritative remaining draw-pile size
 	DealCalls    int
 	DrawCalls    int
 	ConfirmCalls int
@@ -437,10 +489,28 @@ func NewFakeDealSource() *FakeDealSource {
 		resDeck:      map[string]string{},
 		resDrawCount: map[string]int{},
 		cursor:       map[string]int{},
+		remaining:    map[string]int{},
 	}
 }
 
 func deckKey(roomID, gameID string) string { return roomID + "/" + gameID }
+
+const fakeStandardDeckSize = 108
+
+func (f *FakeDealSource) remainingOf(dk string) int {
+	if _, ok := f.remaining[dk]; !ok {
+		f.remaining[dk] = fakeStandardDeckSize
+	}
+	return f.remaining[dk]
+}
+
+func dealCardCount(deal game.DealMaterial) int {
+	n := 1 // discard
+	for _, h := range deal.Hands {
+		n += len(h)
+	}
+	return n
+}
 
 func fakeReservationID(roomID, gameID, operationID, shape string) string {
 	sum := sha256.Sum256([]byte(roomID + "\x00" + gameID + "\x00" + operationID + "\x00" + shape))
@@ -487,11 +557,19 @@ func (f *FakeDealSource) ReserveDeal(_ context.Context, roomID, gameID, operatio
 	if err != nil {
 		return MaterialReservation{}, err
 	}
-	res := MaterialReservation{ID: id, Deal: &deal}
+	need := dealCardCount(deal)
+	after := f.remainingOf(dk) - need
+	if after < 0 {
+		after = 0
+	}
+	deal.DrawPileSize = after
+	deal.HasDrawPileSize = true
+	res := MaterialReservation{ID: id, Deal: &deal, DrawPileSize: after}
 	f.pending[id] = res
 	f.byOp[opKey] = id
 	f.deckPending[dk] = id
 	f.resDeck[id] = dk
+	f.resDrawCount[id] = need
 	return res, nil
 }
 
@@ -546,7 +624,11 @@ func (f *FakeDealSource) ReserveDraw(_ context.Context, roomID, gameID, operatio
 	if err != nil {
 		return MaterialReservation{}, err
 	}
-	res := MaterialReservation{ID: id, Cards: cards}
+	after := f.remainingOf(dk) - count
+	if after < 0 {
+		after = 0
+	}
+	res := MaterialReservation{ID: id, Cards: cards, DrawPileSize: after}
 	f.pending[id] = res
 	f.byOp[opKey] = id
 	f.deckPending[dk] = id
@@ -574,8 +656,11 @@ func (f *FakeDealSource) ConfirmAt(_ context.Context, _, _, reservationID string
 		return errors.New("unknown reservation")
 	}
 	if dk := f.resDeck[reservationID]; dk != "" {
-		if n := f.resDrawCount[reservationID]; n > 0 {
-			f.cursor[dk] += n
+		f.remaining[dk] = res.DrawPileSize
+		if res.Deal == nil {
+			if n := f.resDrawCount[reservationID]; n > 0 {
+				f.cursor[dk] += n
+			}
 		}
 		if f.deckPending[dk] == reservationID {
 			delete(f.deckPending, dk)

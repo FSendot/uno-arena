@@ -182,7 +182,7 @@ func TestTournament_SeparatedFromCasual(t *testing.T) {
 	out := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
 		CommandID: "t1", EventID: "te1", PlayerID: "alice",
 		TournamentID: "tour1", PlacementEventID: "pe1",
-		Placement: 1, Delta: 50, Reason: ReasonTournamentFinalStanding,
+		Placement: 1, Reason: ReasonTournamentFinalStanding,
 	})
 	if out.Kind != OutcomeAccepted {
 		t.Fatalf("%#v", out)
@@ -190,14 +190,14 @@ func TestTournament_SeparatedFromCasual(t *testing.T) {
 	if p.CasualElo().Value != casualBefore {
 		t.Fatal("tournament mutated casual")
 	}
-	if p.TournamentPlacementRating() != 50 {
+	if p.TournamentPlacementRating() != 100 {
 		t.Fatalf("tour=%d", p.TournamentPlacementRating())
 	}
 	f := out.Facts[0]
 	if f.Name != FactTournamentPlacementRatingUpdated {
 		t.Fatalf("fact=%s", f.Name)
 	}
-	if f.Data["previousRating"] != "0" || f.Data["newRating"] != "50" || f.Data["delta"] != "50" {
+	if f.Data["previousRating"] != "0" || f.Data["newRating"] != "100" || f.Data["delta"] != "100" {
 		t.Fatalf("data=%v", f.Data)
 	}
 	if f.Data["tournamentId"] != "tour1" || f.Data["placementEventId"] != "pe1" {
@@ -207,15 +207,79 @@ func TestTournament_SeparatedFromCasual(t *testing.T) {
 	if len(h) != 1 || h[0].EventID != "te1" || h[0].TournamentID != "tour1" || h[0].PlacementEventID != "pe1" {
 		t.Fatalf("tournament history=%+v", h)
 	}
+	if h[0].Placement != 1 || h[0].AdvancementDepth != 0 {
+		t.Fatalf("history placement/depth=%+v", h[0])
+	}
 
 	_ = p.ApplyCasualEloUpdate(casualCmd("alice", "c1", "ce1", "g1", 1,
 		RatedPlacement{PlayerID: "bob", Placement: 2, Rating: 1000},
 	))
-	if p.TournamentPlacementRating() != 50 {
+	if p.TournamentPlacementRating() != 100 {
 		t.Fatal("casual mutated tournament")
 	}
 	if p.CasualElo().Value == casualBefore {
 		t.Fatal("casual should have changed")
+	}
+}
+
+func TestTournament_AdvancementAwardAndDepth(t *testing.T) {
+	p := NewPlayerRating("alice", DefaultRatingConfig())
+	out := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
+		CommandID: "t1", EventID: "te1", PlayerID: "alice",
+		TournamentID: "tour1", PlacementEventID: "pe1",
+		RoundNumber: 3, Reason: ReasonTournamentAdvancement,
+	})
+	if out.Kind != OutcomeAccepted {
+		t.Fatalf("%#v", out)
+	}
+	if p.TournamentPlacementRating() != TournamentAdvancementAward {
+		t.Fatalf("rating=%d", p.TournamentPlacementRating())
+	}
+	h := p.History()
+	if len(h) != 1 || h[0].AdvancementDepth != 3 || h[0].Placement != 0 || h[0].Delta != 10 {
+		t.Fatalf("history=%+v", h[0])
+	}
+	if out.Facts[0].Data["advancementDepth"] != "3" || out.Facts[0].Data["placement"] != "" {
+		t.Fatalf("fact=%v", out.Facts[0].Data)
+	}
+}
+
+func TestTournament_ZeroFinalStandingAccepted(t *testing.T) {
+	p := NewPlayerRating("alice", DefaultRatingConfig())
+	out := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
+		CommandID: "t1", EventID: "te1", PlayerID: "alice",
+		TournamentID: "tour1", PlacementEventID: "pe1",
+		Placement: 10, Reason: ReasonTournamentFinalStanding,
+	})
+	if out.Kind != OutcomeAccepted {
+		t.Fatalf("%#v", out)
+	}
+	if p.TournamentPlacementRating() != 0 {
+		t.Fatalf("rating=%d", p.TournamentPlacementRating())
+	}
+	h := p.History()
+	if len(h) != 1 || h[0].Delta != 0 || h[0].PreviousRating != 0 || h[0].NewRating != 0 {
+		t.Fatalf("history=%+v", h[0])
+	}
+	if out.Facts[0].Data["delta"] != "0" {
+		t.Fatalf("fact delta=%v", out.Facts[0].Data)
+	}
+}
+
+func TestTournament_MonotonicNondecreasing(t *testing.T) {
+	p := NewPlayerRating("alice", DefaultRatingConfig())
+	_ = p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
+		CommandID: "t1", EventID: "e1", PlayerID: "alice",
+		TournamentID: "tour1", PlacementEventID: "pe1",
+		RoundNumber: 1, Reason: ReasonTournamentAdvancement,
+	})
+	_ = p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
+		CommandID: "t2", EventID: "e2", PlayerID: "alice",
+		TournamentID: "tour1", PlacementEventID: "pe2",
+		Placement: 5, Reason: ReasonTournamentFinalStanding,
+	})
+	if p.TournamentPlacementRating() != TournamentAdvancementAward+25 {
+		t.Fatalf("rating=%d", p.TournamentPlacementRating())
 	}
 }
 
@@ -224,13 +288,13 @@ func TestTournament_DuplicateBusinessKey(t *testing.T) {
 	first := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
 		CommandID: "t1", EventID: "te1", PlayerID: "alice",
 		TournamentID: "tour1", PlacementEventID: "pe1",
-		Placement: 2, Delta: 20, Reason: ReasonTournamentPlacement,
+		RoundNumber: 2, Reason: ReasonTournamentAdvancement,
 	})
 	rating := p.TournamentPlacementRating()
 	dup := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
 		CommandID: "t2", EventID: "te2", PlayerID: "alice",
 		TournamentID: "tour1", PlacementEventID: "pe1",
-		Placement: 2, Delta: 20, Reason: ReasonTournamentPlacement,
+		RoundNumber: 2, Reason: ReasonTournamentAdvancement,
 	})
 	if dup.Kind != OutcomeDuplicate {
 		t.Fatalf("%#v", dup)
@@ -248,17 +312,17 @@ func TestTournament_DuplicateEventStable(t *testing.T) {
 	first := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
 		CommandID: "t1", EventID: "te1", PlayerID: "alice",
 		TournamentID: "tour1", PlacementEventID: "pe1",
-		Placement: 1, Delta: 30, Reason: ReasonTournamentPlacement,
+		RoundNumber: 1, Reason: ReasonTournamentAdvancement,
 	})
 	dup := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
 		CommandID: "t2", EventID: "te1", PlayerID: "alice",
 		TournamentID: "tour2", PlacementEventID: "pe2",
-		Placement: 1, Delta: 30, Reason: ReasonTournamentPlacement,
+		RoundNumber: 1, Reason: ReasonTournamentAdvancement,
 	})
 	if dup.Kind != OutcomeDuplicate {
 		t.Fatalf("%#v", dup)
 	}
-	if p.TournamentPlacementRating() != 30 || len(p.History()) != 1 {
+	if p.TournamentPlacementRating() != TournamentAdvancementAward || len(p.History()) != 1 {
 		t.Fatal("event duplicate mutated")
 	}
 	if first.Facts[0].Data["newRating"] != dup.Facts[0].Data["newRating"] {
@@ -266,19 +330,19 @@ func TestTournament_DuplicateEventStable(t *testing.T) {
 	}
 }
 
-func TestTournament_EnforcesFloor(t *testing.T) {
+func TestTournament_RejectsNegativeImpossibleViaBadReason(t *testing.T) {
 	p := NewPlayerRating("alice", RatingConfig{
 		Floor: 100, InitialCasualElo: 1000, InitialTournamentRating: 105, KFactor: 32,
 	})
 	out := p.ApplyTournamentPlacementUpdate(ApplyTournamentPlacementUpdateCommand{
 		CommandID: "t1", EventID: "te1", PlayerID: "alice",
 		TournamentID: "tour1", PlacementEventID: "pe1",
-		Placement: 8, Delta: -50, Reason: ReasonTournamentPlacement,
+		Placement: 8, Reason: "bogus",
 	})
-	if out.Kind != OutcomeAccepted {
+	if out.Kind != OutcomeRejected {
 		t.Fatalf("%#v", out)
 	}
-	if p.TournamentPlacementRating() != 100 {
+	if p.TournamentPlacementRating() != 105 {
 		t.Fatalf("got %d", p.TournamentPlacementRating())
 	}
 }

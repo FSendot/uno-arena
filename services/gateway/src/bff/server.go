@@ -47,9 +47,16 @@ type Dependencies struct {
 	NotReadyReason              string
 	RedisAdapterBlocked         bool
 	RedisReady                  func(context.Context) error // pings every configured Redis client
+	WorkerReady                 func(context.Context) error // kafka/pubsub lifecycle readiness
+	SessionInvalidation         SessionInvalidationApplier  // durable Redis SI; nil in capability/fakes
 	UpstreamProbes              []UpstreamProbe
 	Clock                       func() time.Time
 	NewID                       func(prefix string) string
+}
+
+// SessionInvalidationApplier persists durable invalidation before local Hub closure.
+type SessionInvalidationApplier interface {
+	Apply(ctx context.Context, eventID, sessionID, playerID, reason, correlationID string, occurredAt time.Time) (duplicate bool, err error)
 }
 
 // Server is the sole public HTTP/SSE edge (Realtime Gateway / BFF).
@@ -72,6 +79,8 @@ type Server struct {
 	notReadyReason              string
 	redisAdapterBlocked         bool
 	redisReady                  func(context.Context) error
+	workerReady                 func(context.Context) error
+	sessionInvalidation         SessionInvalidationApplier
 	upstreamProbes              []UpstreamProbe
 	clock                       func() time.Time
 	newID                       func(prefix string) string
@@ -138,6 +147,8 @@ func NewServer(deps Dependencies) *Server {
 		notReadyReason:              deps.NotReadyReason,
 		redisAdapterBlocked:         deps.RedisAdapterBlocked,
 		redisReady:                  deps.RedisReady,
+		workerReady:                 deps.WorkerReady,
+		sessionInvalidation:         deps.SessionInvalidation,
 		upstreamProbes:              append([]UpstreamProbe(nil), deps.UpstreamProbes...),
 		clock:                       deps.Clock,
 		newID:                       deps.NewID,
@@ -158,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/auth/whoami", s.handleWhoami)
 
 	mux.HandleFunc("/v1/commands", s.handleCommands)
+	mux.HandleFunc("/v1/rooms", s.handlePublicRoomList)
 	mux.HandleFunc("/v1/rooms/", s.handleRoomScoped)
 	mux.HandleFunc("/v1/spectator/rooms/", s.handleSpectatorSnapshot)
 
@@ -167,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/v1/rankings/leaderboards", s.handleLeaderboard)
 	mux.HandleFunc("/v1/analytics/public", s.handlePublicAnalytics)
+	mux.HandleFunc("/v1/tournaments/", s.handleTournamentReads)
 
 	mux.HandleFunc("/internal/v1/control/sessions/", s.handleInternalSessionInvalidated)
 	mux.HandleFunc("/internal/v1/control/rooms/", s.handleInternalRoomTerminal)
@@ -242,6 +255,21 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		if err := s.redisReady(r.Context()); err != nil {
 			s.writeErr(w, r, http.StatusServiceUnavailable, "redis_unavailable",
 				"redis readiness ping failed: "+err.Error(), "")
+			return
+		}
+	}
+	if s.workerReady != nil {
+		if err := s.workerReady(r.Context()); err != nil {
+			code := "not_ready"
+			msg := err.Error()
+			if strings.Contains(msg, "kafka_consumer_not_configured") {
+				code = "kafka_consumer_not_configured"
+			} else if strings.Contains(msg, "kafka_consumer_stopped") {
+				code = "kafka_consumer_stopped"
+			} else if strings.Contains(msg, "si_subscriber_stopped") {
+				code = "si_subscriber_stopped"
+			}
+			s.writeErr(w, r, http.StatusServiceUnavailable, code, msg, "")
 			return
 		}
 	}

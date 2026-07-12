@@ -1,5 +1,7 @@
 package domain
 
+import "strings"
+
 // ProvisioningBatch is a deterministic slot-range work unit for room creation.
 type ProvisioningBatch struct {
 	BatchID          BatchID
@@ -193,4 +195,36 @@ func (b ProvisioningBatch) coversSlotIndex(index int) bool {
 		}
 	}
 	return false
+}
+
+// SanitizeProvisioningReason keeps only a short class/code; never raw operator text,
+// HTTP bodies, or secrets. Empty input stays empty (callers may substitute a default).
+func SanitizeProvisioningReason(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "retry_budget_exhausted") || strings.Contains(lower, "retry budget exhausted"):
+		return "retry_budget_exhausted"
+	case strings.Contains(lower, "room_assignment_conflict") || strings.Contains(lower, "room_id_mismatch"):
+		return "room_assignment_conflict"
+	case strings.Contains(lower, "conflicting_assignment"):
+		return "conflicting_assignment"
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline"):
+		return "room_provision_timeout"
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "connection reset"):
+		return "room_provision_unavailable"
+	case strings.Contains(lower, "http 5"):
+		return "room_provision_http_5xx"
+	case strings.Contains(lower, "http 4"):
+		return "room_provision_http_4xx"
+	case strings.Contains(lower, "lease_owner") || strings.Contains(lower, "provisioning_fence"):
+		return "lease_owner_lost"
+	case strings.Contains(lower, "quarantined") || strings.Contains(lower, "operator"):
+		return "quarantined"
+	default:
+		return "room_provision_failed"
+	}
 }

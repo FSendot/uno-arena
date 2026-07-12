@@ -30,9 +30,18 @@ echo "${kind_out}" | grep -q 'key: "room-service-credential"'
 echo "${kind_out}" | grep -q 'key: "tournament-internal-credential"'
 echo "${kind_out}" | grep -q 'key: "spectator-view-internal-credential"'
 echo "${kind_out}" | grep -q 'DEPLOYMENT_ENV'
+echo "${kind_out}" | grep -q 'KAFKA_BROKERS'
+echo "${kind_out}" | grep -q 'kafka.uno-arena.svc.cluster.local:9092'
+echo "${kind_out}" | grep -q 'KAFKA_CONSUMER_GROUP'
+echo "${kind_out}" | grep -q 'KAFKA_SESSION_INVALIDATED_TOPIC'
+echo "${kind_out}" | grep -q 'KAFKA_SESSION_INVALIDATED_DLQ_TOPIC'
+echo "${kind_out}" | grep -q 'GATEWAY_SESSION_INVALIDATION_TTL'
+echo "${kind_out}" | grep -q 'value: "7h"'
+# ADR-0029 kind rationale is asserted in values.kind.yaml (source 30m + DLQ 6h → 7h).
+grep -q 'ADR-0029' "${CHART}/values.kind.yaml"
+grep -q 'GATEWAY_SESSION_INVALIDATION_TTL: "7h"' "${CHART}/values.kind.yaml"
 echo "${kind_out}" | grep -q 'type: ClusterIP'
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
-! echo "${kind_out}" | grep -q 'KAFKA_BROKERS'
 ! echo "${kind_out}" | grep -q 'GATEWAY_CAPABILITY_MODE'
 ! echo "${kind_out}" | grep -q 'GATEWAY_ALLOW_FAKES'
 

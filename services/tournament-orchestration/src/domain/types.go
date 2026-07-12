@@ -123,7 +123,7 @@ const (
 	FactTournamentCreated                      FactName = "TournamentCreated"
 	FactPlayerRegisteredInTournament           FactName = "PlayerRegisteredInTournament"
 	FactTournamentRegistrationClosed           FactName = "TournamentRegistrationClosed"
-	FactTournamentRoundSeeded                  FactName = "TournamentRoundSeeded"
+	FactTournamentRoundSeeded                  FactName = "TournamentRoundSeeded" // internal-only; no Kafka channel
 	FactTournamentMatchAssigned                FactName = "TournamentMatchAssigned"
 	FactTournamentMatchResultRecorded          FactName = "TournamentMatchResultRecorded"
 	FactPlayersAdvanced                        FactName = "PlayersAdvanced"
@@ -132,8 +132,17 @@ const (
 	FactTournamentCancelled                    FactName = "TournamentCancelled"
 	FactTournamentProvisioningBatchRetried     FactName = "TournamentProvisioningBatchRetried"
 	FactTournamentProvisioningBatchQuarantined FactName = "TournamentProvisioningBatchQuarantined"
-	FactTournamentResultQuarantined            FactName = "TournamentResultQuarantined"
+	// FactTournamentProvisioningBatchCompleted is internal-only (no Kafka topic).
+	// Emitted on a real pending→completed transition. Public BracketPage bumps only when
+	// fact data carries FactDataPublicBracketVisible (last batch → round in_progress).
+	// Semantic duplicates remain factless and version-stable.
+	FactTournamentProvisioningBatchCompleted FactName = "TournamentProvisioningBatchCompleted"
+	FactTournamentResultQuarantined          FactName = "TournamentResultQuarantined"
 )
+
+// FactDataPublicBracketVisible is an internal Fact.Data key. When set to "true", the fact
+// changed BracketPage-visible summary fields (e.g. round status). Not part of Kafka contracts.
+const FactDataPublicBracketVisible = "publicBracketVisible"
 
 // Fact is a named domain fact from an accepted state change. Rejected commands never produce facts.
 type Fact struct {
@@ -170,6 +179,8 @@ const (
 	RejectRoundIncomplete       RejectionCode = "round_incomplete"
 	RejectNotFinal              RejectionCode = "not_final"
 	RejectQuarantined           RejectionCode = "quarantined"
+	RejectBatchCancelled        RejectionCode = "batch_cancelled"
+	RejectUnexpectedBatchStatus RejectionCode = "unexpected_batch_status"
 )
 
 type Rejection struct {
@@ -215,6 +226,11 @@ func acceptedOutcome(commandID CommandID, facts []Fact) CommandOutcome {
 	return CommandOutcome{Kind: OutcomeAccepted, CommandID: commandID, Facts: facts}
 }
 
+// AcceptedWithFacts builds an accepted outcome (durable T-Reg envelope assembly).
+func AcceptedWithFacts(commandID CommandID, facts []Fact) CommandOutcome {
+	return acceptedOutcome(commandID, facts)
+}
+
 func rejectedOutcome(commandID CommandID, rej Rejection) CommandOutcome {
 	r := rej
 	return CommandOutcome{Kind: OutcomeRejected, CommandID: commandID, Rejection: &r, Facts: nil}
@@ -245,6 +261,8 @@ type CreateTournamentCommand struct {
 	Capacity     int
 	RetryBudget  int // optional; <=0 uses DefaultRetryBudget
 	BatchSize    int // optional; <=0 uses DefaultBatchSize
+	// Visibility empty defaults to public; unknown values reject as invalid_command.
+	Visibility TournamentVisibility
 }
 
 type RegisterPlayerCommand struct {

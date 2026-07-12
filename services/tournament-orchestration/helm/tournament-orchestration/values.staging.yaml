@@ -3,8 +3,22 @@ replicaCount: 1
 env:
   DEPLOYMENT_ENV: staging
   ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: tournament-orchestration
+  KAFKA_MATCH_COMPLETED_TOPIC: room.match.completed
+  KAFKA_MATCH_COMPLETED_DLQ_TOPIC: room.match.completed.tournament-orchestration.dlq
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/7
 
 provisioningWorker:
   enabled: false
+  replicaCount: 1
+
+seedingWorker:
+  enabled: false
+  replicaCount: 1
+
+completionWorker:
+  enabled: false
+  replicaCount: 1
 
 existingSecret: tournament-orchestration-secrets

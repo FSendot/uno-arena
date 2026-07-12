@@ -31,14 +31,23 @@ existingSecret: room-gameplay-secrets
 #   room-identity-credential         == identity identity-internal-credential (Room→Identity)
 #   spectator-view-internal-credential == spectator-view chart (Room→Spectator)
 #   ranking-internal-credential      == ranking chart (Room→Ranking)
-#   analytics-room-credential        == analytics chart (Room→Analytics)
+#   analytics-room-credential        == analytics chart (Room↔Analytics pair)
 #   tournament-internal-credential   == tournament chart (Room→Tournament)
 #   game-integrity-internal-credential == game-integrity chart (Room→GI)
 # Producer scope: ROOM_TIMER_SERVICE_CREDENTIAL is Room-timer-only (not Gateway).
+# ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL is Spectator projection-rebuilder-only.
+# ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL is Analytics projection-rebuilder-only
+# (same secret value as analytics-room-credential pair; no Gateway fallback).
+# ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET is API-only opaque keyset MAC (not timer worker).
+# ROOM_PUBLIC_LIST_CURSOR_SECRET is API-only opaque keyset MAC for public room listing (not timer worker).
 secretEnv:
   SERVICE_CREDENTIAL: room-service-credential
   ROOM_SERVICE_CREDENTIAL: room-service-credential
   ROOM_TIMER_SERVICE_CREDENTIAL: room-timer-service-credential
+  ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL: room-spectator-recovery-service-credential
+  ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL: analytics-room-credential
+  ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET: room-analytics-backfill-cursor-secret
+  ROOM_PUBLIC_LIST_CURSOR_SECRET: room-public-list-cursor-secret
   GATEWAY_SERVICE_CREDENTIAL: room-to-gateway-credential
   IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
   ROOM_IDENTITY_CREDENTIAL: room-identity-credential

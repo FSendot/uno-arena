@@ -18,6 +18,9 @@ type DrawCardCommand struct {
 	PlayerID         PlayerID
 	Cards            []Card
 	ExpectedSequence SequenceNumber
+	// DrawPileSize is the authoritative remaining count after this draw confirms (from GI).
+	DrawPileSize    int
+	HasDrawPileSize bool
 }
 
 // ChooseColorCommand resolves a pending wild color choice.
@@ -44,6 +47,9 @@ type ReportMissingUnoCommand struct {
 	Cards            []Card
 	ExpectedSequence SequenceNumber
 	NowUTC           time.Time
+	// DrawPileSize is the authoritative remaining count after this penalty draw confirms (from GI).
+	DrawPileSize    int
+	HasDrawPileSize bool
 }
 
 // ExpireUnoWindowCommand closes an open Uno window after its absolute deadline.

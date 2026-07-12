@@ -11,31 +11,33 @@ import (
 )
 
 type roomRuntimeConfig struct {
-	ServiceName       string
-	ServiceCredential string
-	TimerCredential   string
-	GatewayURL        string
-	GatewayCred       string
-	IdentityURL       string
-	IdentityCred      string
-	GameIntegrityURL  string
-	GameIntegrityCred string
-	DatabaseURL       string
-	RedisURL          string
-	AuditLogPath      string
-	AllowFakes        bool
-	CapabilityMode    bool
-	DeploymentEnv     string
-	WorkerRole        string
-	RoomGameplayURL   string
-	SpectatorURL      string
-	SpectatorCred     string
-	RankingURL        string
-	RankingCred       string
-	AnalyticsURL      string
-	AnalyticsCred     string
-	TournamentURL     string
-	TournamentCred    string
+	ServiceName                 string
+	ServiceCredential           string
+	TimerCredential             string
+	SpectatorRecoveryCredential string
+	AnalyticsBackfillCredential string
+	GatewayURL                  string
+	GatewayCred                 string
+	IdentityURL                 string
+	IdentityCred                string
+	GameIntegrityURL            string
+	GameIntegrityCred           string
+	DatabaseURL                 string
+	RedisURL                    string
+	AuditLogPath                string
+	AllowFakes                  bool
+	CapabilityMode              bool
+	DeploymentEnv               string
+	WorkerRole                  string
+	RoomGameplayURL             string
+	SpectatorURL                string
+	SpectatorCred               string
+	RankingURL                  string
+	RankingCred                 string
+	AnalyticsURL                string
+	AnalyticsCred               string
+	TournamentURL               string
+	TournamentCred              string
 }
 
 type roomRuntime struct {
@@ -69,12 +71,15 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 		depEnv = "development"
 	}
 	return roomRuntimeConfig{
-		ServiceName:       svcName,
-		ServiceCredential: cred,
-		TimerCredential:   strings.TrimSpace(os.Getenv("ROOM_TIMER_SERVICE_CREDENTIAL")),
-		GatewayURL:        strings.TrimSpace(os.Getenv("GATEWAY_URL")),
-		GatewayCred:       gatewayCred,
-		IdentityURL:       strings.TrimSpace(os.Getenv("IDENTITY_URL")),
+		ServiceName:                 svcName,
+		ServiceCredential:           cred,
+		TimerCredential:             strings.TrimSpace(os.Getenv("ROOM_TIMER_SERVICE_CREDENTIAL")),
+		SpectatorRecoveryCredential: strings.TrimSpace(os.Getenv("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL")),
+		// Scoped Analytics pair only — never fall back to Gateway/generic SERVICE_CREDENTIAL.
+		AnalyticsBackfillCredential: strings.TrimSpace(os.Getenv("ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL")),
+		GatewayURL:                  strings.TrimSpace(os.Getenv("GATEWAY_URL")),
+		GatewayCred:                 gatewayCred,
+		IdentityURL:                 strings.TrimSpace(os.Getenv("IDENTITY_URL")),
 		IdentityCred: firstNonEmptyEnv(
 			os.Getenv("IDENTITY_SERVICE_CREDENTIAL"),
 			os.Getenv("ROOM_IDENTITY_CREDENTIAL"),
@@ -97,13 +102,13 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 			os.Getenv("ROOM_GAMEPLAY_URL"),
 			"http://127.0.0.1:8080",
 		),
-		SpectatorURL:  strings.TrimSpace(os.Getenv("SPECTATOR_VIEW_URL")),
-		SpectatorCred: firstEnv("SPECTATOR_VIEW_SERVICE_CREDENTIAL", gatewayCred),
-		RankingURL:    strings.TrimSpace(os.Getenv("RANKING_URL")),
-		RankingCred:   firstEnv("RANKING_SERVICE_CREDENTIAL", gatewayCred),
-		AnalyticsURL:  strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
-		AnalyticsCred: firstEnv("ANALYTICS_SERVICE_CREDENTIAL", gatewayCred),
-		TournamentURL: strings.TrimSpace(os.Getenv("TOURNAMENT_URL")),
+		SpectatorURL:   strings.TrimSpace(os.Getenv("SPECTATOR_VIEW_URL")),
+		SpectatorCred:  firstEnv("SPECTATOR_VIEW_SERVICE_CREDENTIAL", gatewayCred),
+		RankingURL:     strings.TrimSpace(os.Getenv("RANKING_URL")),
+		RankingCred:    firstEnv("RANKING_SERVICE_CREDENTIAL", gatewayCred),
+		AnalyticsURL:   strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
+		AnalyticsCred:  firstEnv("ANALYTICS_SERVICE_CREDENTIAL", gatewayCred),
+		TournamentURL:  strings.TrimSpace(os.Getenv("TOURNAMENT_URL")),
 		TournamentCred: firstEnv("TOURNAMENT_SERVICE_CREDENTIAL", gatewayCred),
 	}
 }
@@ -133,8 +138,11 @@ func wireRoomRuntime(cfg roomRuntimeConfig) (roomRuntime, error) {
 		if cfg.IdentityURL != "" {
 			deps.SessionsV = app.NewHTTPSessionValidator(cfg.IdentityURL, cfg.IdentityCred, nil)
 		}
+		svc := app.NewService(deps)
+		svc.SetAnalyticsBackfillReader(app.NewMemoryAnalyticsBackfillStore())
+		svc.SetPublicListReader(deps.Sessions.(app.PublicRoomLister))
 		return roomRuntime{
-			Service: app.NewService(deps),
+			Service: svc,
 			Deps:    deps,
 			Ready:   true,
 			Mode:    "capability-fakes",
@@ -258,8 +266,11 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 		SessionsV: app.NewHTTPSessionValidator(cfg.IdentityURL, cfg.IdentityCred, nil),
 	}
 	exp := store.DefaultSchemaExpectation()
+	svc := app.NewService(deps)
+	svc.SetAnalyticsBackfillReader(store.NewAnalyticsBackfillStore(pool.Main))
+	svc.SetPublicListReader(sessions)
 	return roomRuntime{
-		Service:   app.NewService(deps),
+		Service:   svc,
 		Deps:      deps,
 		Pool:      pool,
 		Sessions:  sessions,
@@ -268,6 +279,12 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 		Ready:     true,
 		Mode:      "durable",
 		DurableReady: func(ctx context.Context) error {
+			if !app.AnalyticsBackfillCursorSecretConfigured() {
+				return fmt.Errorf("%w", app.ErrAnalyticsBackfillCursorSecretRequired)
+			}
+			if !app.PublicListCursorSecretConfigured() {
+				return fmt.Errorf("%w", app.ErrPublicListCursorSecretRequired)
+			}
 			if err := store.VerifySchema(ctx, pool.Main, exp); err != nil {
 				return err
 			}
@@ -293,7 +310,18 @@ func roomDurableMissing(cfg roomRuntimeConfig) []string {
 	require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)
 	require("GAME_INTEGRITY_CREDENTIAL", cfg.GameIntegrityCred)
 	require("ROOM_TIMER_SERVICE_CREDENTIAL", cfg.TimerCredential)
+	require("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL", cfg.SpectatorRecoveryCredential)
 	require("SERVICE_CREDENTIAL", cfg.ServiceCredential)
+	// Timer worker does not serve analytics-backfill or public-list; skip least-privilege secrets.
+	if cfg.WorkerRole != "room-timer" {
+		require("ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL", cfg.AnalyticsBackfillCredential)
+		if !app.AnalyticsBackfillCursorSecretConfigured() {
+			missing = append(missing, "ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET")
+		}
+		if !app.PublicListCursorSecretConfigured() {
+			missing = append(missing, "ROOM_PUBLIC_LIST_CURSOR_SECRET")
+		}
+	}
 	return missing
 }
 
@@ -336,8 +364,12 @@ func wireRoomCapabilityRuntime(cfg roomRuntimeConfig, clock app.Clock, publisher
 		notReadyReason = "capability_dependencies_missing: " + strings.Join(missing, ",")
 	}
 
+	svc := app.NewService(deps)
+	// Capability: bounded in-memory adapter (no durable outbox); fail-closed without credential.
+	svc.SetAnalyticsBackfillReader(app.NewMemoryAnalyticsBackfillStore())
+	svc.SetPublicListReader(deps.Sessions.(app.PublicRoomLister))
 	return roomRuntime{
-		Service:        app.NewService(deps),
+		Service:        svc,
 		Deps:           deps,
 		Ready:          ready,
 		NotReadyReason: notReadyReason,
@@ -354,6 +386,8 @@ func roomCapabilityMissing(cfg roomRuntimeConfig) []string {
 	}
 	require("SERVICE_CREDENTIAL", cfg.ServiceCredential)
 	require("ROOM_TIMER_SERVICE_CREDENTIAL", cfg.TimerCredential)
+	require("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL", cfg.SpectatorRecoveryCredential)
+	require("ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL", cfg.AnalyticsBackfillCredential)
 	require("IDENTITY_URL", cfg.IdentityURL)
 	require("IDENTITY_CREDENTIAL", cfg.IdentityCred)
 	require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)

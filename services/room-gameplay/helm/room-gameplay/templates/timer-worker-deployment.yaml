@@ -43,7 +43,8 @@ spec:
               value: {{ .Values.env.GAME_INTEGRITY_URL | quote }}
             {{- if .Values.existingSecret }}
             {{- range $envName, $key := .Values.secretEnv }}
-            {{- if and $key (ne $key "") }}
+            {{- /* Analytics backfill + public-list cursor HMAC secrets are API-only. */ -}}
+            {{- if and $key (ne $key "") (ne $envName "ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET") (ne $envName "ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL") (ne $envName "ROOM_PUBLIC_LIST_CURSOR_SECRET") }}
             - name: {{ $envName }}
               valueFrom:
                 secretKeyRef:

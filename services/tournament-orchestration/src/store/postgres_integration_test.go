@@ -63,15 +63,25 @@ func applyMigration(t *testing.T, ctx context.Context, pool *store.Pool) {
 func resetPublic(t *testing.T, ctx context.Context, pool *store.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
+		DROP TABLE IF EXISTS round_advancing_players CASCADE;
+		DROP TABLE IF EXISTS tournament_round_slot_players CASCADE;
 		DROP TABLE IF EXISTS advancement_records CASCADE;
+		DROP TABLE IF EXISTS match_result_quarantines CASCADE;
 		DROP TABLE IF EXISTS match_results CASCADE;
 		DROP TABLE IF EXISTS assigned_matches CASCADE;
 		DROP TABLE IF EXISTS bracket_slots CASCADE;
+		DROP TABLE IF EXISTS round_seeding_batches CASCADE;
+		DROP TABLE IF EXISTS round_seeding_jobs CASCADE;
+		DROP TABLE IF EXISTS round_progress_shards CASCADE;
 		DROP TABLE IF EXISTS provisioning_batches CASCADE;
 		DROP TABLE IF EXISTS tournament_rounds CASCADE;
 		DROP TABLE IF EXISTS tournament_registrations CASCADE;
+		DROP TABLE IF EXISTS tournament_registration_shards CASCADE;
+		DROP TABLE IF EXISTS bracket_projection_shards CASCADE;
+		DROP TABLE IF EXISTS bracket_projection_versions CASCADE;
 		DROP TABLE IF EXISTS outbox_events CASCADE;
 		DROP TABLE IF EXISTS command_idempotency CASCADE;
+		DROP TABLE IF EXISTS kafka_consumer_quarantine CASCADE;
 		DROP TABLE IF EXISTS tournaments CASCADE;
 		DROP TABLE IF EXISTS schema_migrations CASCADE;
 		DROP TABLE IF EXISTS schema_bootstrap_meta CASCADE;
@@ -107,9 +117,11 @@ func provisionedTournament(t *testing.T, ts *store.TournamentStore, tid string, 
 	_ = tr.CloseRegistration(domain.CloseRegistrationCommand{CommandID: "close"})
 	_ = tr.SeedRound(domain.SeedRoundCommand{CommandID: "seed", RoundNumber: 1})
 	_ = tr.ProvisionRoundMatches(domain.ProvisionRoundMatchesCommand{CommandID: "prov", RoundNumber: 1})
+	cmdID := "prov-" + tid
 	if err := ts.Commit(ctx, store.CommitRequest{
-		Tournament: tr, CommandID: "prov",
-		Outcome: envelope.Accepted("prov", "ProvisionRoundMatches", nil, json.RawMessage(`{}`)),
+		Tournament: tr, CommandID: cmdID,
+		Outcome:           envelope.Accepted(cmdID, "ProvisionRoundMatches", nil, json.RawMessage(`{}`)),
+		ProjectionChanged: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +134,29 @@ func provisionedTournament(t *testing.T, ts *store.TournamentStore, tid string, 
 		t.Fatal("round missing")
 	}
 	return got, round.Slots[0]
+}
+
+// markRoundMatchingReady transitions provisioning → in_progress (post room assignment)
+// so CompleteRound O(64) readiness can evaluate. Does not seed later rounds (T4 handoff).
+func markRoundMatchingReady(t *testing.T, pool *store.Pool, tid string, roundNumber int) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		UPDATE provisioning_batches
+		SET status = 'completed', completed_at = COALESCE(completed_at, now()), updated_at = now()
+		WHERE tournament_id = $1 AND round_number = $2
+		  AND status <> 'quarantined'
+	`, tid, roundNumber); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE tournament_rounds
+		SET status = 'in_progress'
+		WHERE tournament_id = $1 AND round_number = $2
+		  AND status IN ('provisioning', 'seeded')
+	`, tid, roundNumber); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func standingsFour(a, b, c, d string) []domain.PlayerMatchStanding {
@@ -188,9 +223,9 @@ func TestIntegration_AtomicRollbackAndExactReplay(t *testing.T) {
 	if err := ts.Commit(ctx, store.CommitRequest{
 		Tournament: tr, CommandID: "c-create", Outcome: res,
 		Events: []store.OutboxEvent{{
-			EventID: "c-create:TournamentCreated:0", EventType: "TournamentCreated",
-			TournamentID: "t1", Topic: "tournament.lifecycle", PartitionKey: "t1",
-			SchemaVersion: 1, Payload: map[string]string{"tournamentId": "t1"}, CreatedAt: time.Now().UTC(),
+			EventID: "c-create:TournamentMatchAssigned:0", EventType: "TournamentMatchAssigned",
+			TournamentID: "t1", Topic: "tournament.match.assigned", PartitionKey: "t1",
+			SchemaVersion: 1, Payload: map[string]any{"tournamentId": "t1", "schemaVersion": 1}, CreatedAt: time.Now().UTC(),
 		}},
 	}); err != nil {
 		t.Fatal(err)
@@ -247,9 +282,9 @@ func TestIntegration_NoDuplicateOutboxOnRetry(t *testing.T) {
 		CommandID: "c1", TournamentID: "t-out", Capacity: 2,
 	})
 	ev := store.OutboxEvent{
-		EventID: "same-event", EventType: "TournamentCreated", TournamentID: "t-out",
-		Topic: "tournament.lifecycle", PartitionKey: "t-out", SchemaVersion: 1,
-		Payload: map[string]string{"tournamentId": "t-out"}, CreatedAt: time.Now().UTC(),
+		EventID: "same-event", EventType: "TournamentMatchAssigned", TournamentID: "t-out",
+		Topic: "tournament.match.assigned", PartitionKey: "t-out", SchemaVersion: 1,
+		Payload: map[string]any{"tournamentId": "t-out", "schemaVersion": 1}, CreatedAt: time.Now().UTC(),
 	}
 	res := envelope.Accepted("c1", "CreateTournament", nil, json.RawMessage(`{"facts":[]}`))
 	if err := ts.Commit(ctx, store.CommitRequest{Tournament: tr, CommandID: "c1", Outcome: res, Events: []store.OutboxEvent{ev}}); err != nil {
@@ -330,12 +365,12 @@ func TestIntegration_MatchCompletedRestartExactReplay(t *testing.T) {
 	}
 	evs := []store.OutboxEvent{{
 		EventID: "ingest:evt-restart:TournamentMatchResultRecorded:0", EventType: "TournamentMatchResultRecorded",
-		TournamentID: "t-restart", Topic: "tournament.match.result", PartitionKey: "t-restart",
-		SchemaVersion: 1, Payload: map[string]string{"roomId": string(slot.RoomID)}, CreatedAt: time.Now().UTC(),
+		TournamentID: "t-restart", Topic: "tournament.match.result_recorded", PartitionKey: "t-restart",
+		SchemaVersion: 1, Payload: map[string]any{"roomId": string(slot.RoomID), "schemaVersion": 1}, CreatedAt: time.Now().UTC(),
 	}, {
 		EventID: "ingest:evt-restart:PlayersAdvanced:1", EventType: "PlayersAdvanced",
-		TournamentID: "t-restart", Topic: "tournament.advancement", PartitionKey: "t-restart",
-		SchemaVersion: 1, Payload: map[string]string{"roomId": string(slot.RoomID)}, CreatedAt: time.Now().UTC(),
+		TournamentID: "t-restart", Topic: "tournament.players.advanced", PartitionKey: "t-restart",
+		SchemaVersion: 1, Payload: map[string]any{"roomId": string(slot.RoomID), "schemaVersion": 1}, CreatedAt: time.Now().UTC(),
 	}}
 	payload, _ := json.Marshal(map[string]any{"facts": []any{
 		map[string]any{"name": "TournamentMatchResultRecorded"},
@@ -500,8 +535,8 @@ func TestIntegration_ConcurrentDuplicateAndDistinctEvents(t *testing.T) {
 				Tournament: cur, CommandID: a.commandID, Outcome: res,
 				Events: []store.OutboxEvent{{
 					EventID: a.commandID + ":TournamentMatchResultRecorded:0", EventType: "TournamentMatchResultRecorded",
-					TournamentID: "t-c", Topic: "tournament.match.result", PartitionKey: "t-c",
-					SchemaVersion: 1, Payload: map[string]string{"eventId": a.eventID}, CreatedAt: time.Now().UTC(),
+					TournamentID: "t-c", Topic: "tournament.match.result_recorded", PartitionKey: "t-c",
+					SchemaVersion: 1, Payload: map[string]any{"eventId": a.eventID, "schemaVersion": 1}, CreatedAt: time.Now().UTC(),
 				}},
 				MatchResultSource: &store.MatchResultSource{
 					EventID: a.eventID, RoomID: string(a.slot.RoomID), CompletionVersion: a.version,

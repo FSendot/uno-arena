@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"unoarena/services/tournament-orchestration/domain"
 	"unoarena/shared/envelope"
 )
 
@@ -102,6 +103,19 @@ func postJSON(t *testing.T, mux http.Handler, path string, cred string, body any
 func getJSON(t *testing.T, mux http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-Service-Credential", testCred)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+func getJSONHeaders(t *testing.T, mux http.Handler, path string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-Service-Credential", testCred)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	return w
@@ -132,33 +146,92 @@ func commandBody(commandID, typ string, payload map[string]any, playerID, sessio
 
 func provisionAllBatches(t *testing.T, h testHarness, mux http.Handler, tournamentID string, roundNumber int, corr map[string]string) {
 	t.Helper()
-	bracket := getJSON(t, mux, "/v1/tournaments/"+tournamentID+"/bracket")
-	var body map[string]any
-	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	rounds, _ := body["rounds"].([]any)
-	if len(rounds) == 0 {
-		t.Fatal("no rounds")
+	tr, ok := h.repo.Get(domain.TournamentID(tournamentID))
+	if !ok {
+		t.Fatalf("tournament %s missing", tournamentID)
 	}
-	round0 := rounds[0].(map[string]any)
-	batches, _ := round0["batches"].([]any)
-	for i, raw := range batches {
-		b := raw.(map[string]any)
+	round, ok := tr.Round(roundNumber)
+	if !ok {
+		t.Fatalf("round %d missing", roundNumber)
+	}
+	for i, b := range round.Batches {
 		w := postJSON(t, mux, "/internal/v1/tournaments/"+tournamentID+"/rounds/"+itoa(roundNumber)+"/provisioning-batches", testCred, map[string]any{
 			"commandId":     "worker-" + tournamentID + "-" + itoa(i),
 			"schemaVersion": 1,
-			"batchId":       b["batchId"],
-			"slotFrom":      b["slotFrom"],
-			"slotTo":        b["slotTo"],
-			"slotSize":      b["slotSize"],
+			"batchId":       string(b.BatchID),
+			"slotFrom":      string(b.SlotFrom),
+			"slotTo":        string(b.SlotTo),
+			"slotSize":      len(b.SlotIndexes),
 		}, corr)
 		if w.Code != http.StatusOK {
-			t.Fatalf("worker batch %v: %d %s", b["batchId"], w.Code, w.Body.String())
+			t.Fatalf("worker batch %v: %d %s", b.BatchID, w.Code, w.Body.String())
 		}
 		res := decodeResult(t, w)
 		if res.Status != envelope.StatusAccepted {
 			t.Fatalf("worker batch rejected: %+v", res)
 		}
 	}
+}
+
+func decodeBracket(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode bracket: %v body=%s", err, w.Body.String())
+	}
+	return body
+}
+
+func bracketSummaryRounds(t *testing.T, body map[string]any) []any {
+	t.Helper()
+	summary, ok := body["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing summary: %v", body)
+	}
+	rounds, _ := summary["rounds"].([]any)
+	if len(rounds) == 0 {
+		t.Fatal("no rounds in summary")
+	}
+	return rounds
+}
+
+func bracketBatches(t *testing.T, h testHarness, tournamentID string, roundNumber int) []domain.ProvisioningBatch {
+	t.Helper()
+	tr, ok := h.repo.Get(domain.TournamentID(tournamentID))
+	if !ok {
+		t.Fatalf("tournament %s missing", tournamentID)
+	}
+	round, ok := tr.Round(roundNumber)
+	if !ok || len(round.Batches) == 0 {
+		t.Fatalf("round %d batches missing", roundNumber)
+	}
+	return append([]domain.ProvisioningBatch(nil), round.Batches...)
+}
+
+func bracketSummaryBatchCount(t *testing.T, body map[string]any, roundIdx int) int {
+	t.Helper()
+	rounds := bracketSummaryRounds(t, body)
+	if roundIdx >= len(rounds) {
+		t.Fatalf("round idx %d out of range (%d)", roundIdx, len(rounds))
+	}
+	round0 := rounds[roundIdx].(map[string]any)
+	if _, ok := round0["batches"]; ok {
+		t.Fatal("public summary must not list batches")
+	}
+	n, ok := round0["batchCount"].(float64)
+	if !ok {
+		t.Fatalf("batchCount missing: %v", round0)
+	}
+	return int(n)
+}
+
+func bracketSlots(t *testing.T, body map[string]any) []any {
+	t.Helper()
+	slots, _ := body["slots"].([]any)
+	if len(slots) == 0 {
+		t.Fatal("no slots")
+	}
+	return slots
 }
 
 func TestHealthAndReady(t *testing.T) {
@@ -283,13 +356,11 @@ func TestCreateRegisterCloseSeedProvisionAdvanceFinalize(t *testing.T) {
 	}
 	var bracketBody map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&bracketBody)
-	rounds, _ := bracketBody["rounds"].([]any)
+	rounds := bracketSummaryRounds(t, bracketBody)
 	if len(rounds) != 1 {
 		t.Fatalf("bracket rounds=%v", bracketBody)
 	}
-	round0 := rounds[0].(map[string]any)
-	slots := round0["slots"].([]any)
-	slot0 := slots[0].(map[string]any)
+	slot0 := bracketSlots(t, bracketBody)[0].(map[string]any)
 	roomID, _ := slot0["roomId"].(string)
 	slotID, _ := slot0["slotId"].(string)
 	if roomID == "" || slotID == "" {
@@ -337,8 +408,23 @@ func TestCreateRegisterCloseSeedProvisionAdvanceFinalize(t *testing.T) {
 	}
 	var standingsBody map[string]any
 	_ = json.NewDecoder(standingsW.Body).Decode(&standingsBody)
-	if standingsBody["phase"] != "completed" || standingsBody["championId"] != "p1" {
-		t.Fatalf("standings=%v", standingsBody)
+	if standingsBody["phase"] != "completed" {
+		t.Fatalf("standings phase=%v", standingsBody["phase"])
+	}
+	if _, hasChamp := standingsBody["championId"]; hasChamp {
+		t.Fatalf("championId must be absent: %v", standingsBody)
+	}
+	if _, hasPlayers := standingsBody["registeredPlayers"]; hasPlayers {
+		t.Fatalf("registeredPlayers must be absent: %v", standingsBody)
+	}
+	final, ok := standingsBody["finalStandings"].([]any)
+	if !ok || len(final) < 1 || final[0] != "p1" {
+		t.Fatalf("finalStandings=%v", standingsBody["finalStandings"])
+	}
+	for _, key := range []string{"tournamentId", "projectionVersion", "generatedAt", "registeredCount", "currentRound"} {
+		if _, ok := standingsBody[key]; !ok {
+			t.Fatalf("missing %s in %v", key, standingsBody)
+		}
 	}
 
 	if h.audit.Len() != 0 {
@@ -417,7 +503,7 @@ func TestMatchCompletedIngestionIdempotentAndConflictQuarantine(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/tour-ingest/bracket")
 	var bracketBody map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&bracketBody)
-	slot0 := bracketBody["rounds"].([]any)[0].(map[string]any)["slots"].([]any)[0].(map[string]any)
+	slot0 := bracketSlots(t, bracketBody)[0].(map[string]any)
 	roomID := slot0["roomId"].(string)
 	slotID := slot0["slotId"].(string)
 
@@ -593,16 +679,17 @@ func TestProvisioningBatchRoute(t *testing.T) {
 	bracket := getJSON(t, mux, "/v1/tournaments/t-batch/bracket")
 	var body map[string]any
 	_ = json.NewDecoder(bracket.Body).Decode(&body)
-	b0 := body["rounds"].([]any)[0].(map[string]any)["batches"].([]any)[0].(map[string]any)
+	_ = body
+	b0 := bracketBatches(t, h, "t-batch", 1)[0]
 
 	before := h.rooms.CallCount()
 	w = postJSON(t, mux, "/internal/v1/tournaments/t-batch/rounds/1/provisioning-batches", testCred, map[string]any{
 		"commandId":     "b-prov-batch",
 		"schemaVersion": 1,
-		"batchId":       b0["batchId"],
-		"slotFrom":      b0["slotFrom"],
-		"slotTo":        b0["slotTo"],
-		"slotSize":      b0["slotSize"],
+		"batchId":       string(b0.BatchID),
+		"slotFrom":      string(b0.SlotFrom),
+		"slotTo":        string(b0.SlotTo),
+		"slotSize":      len(b0.SlotIndexes),
 	}, corr)
 	if w.Code != http.StatusOK {
 		t.Fatalf("provisioning-batches: %d %s", w.Code, w.Body.String())

@@ -15,8 +15,12 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	test-gateway test-identity \
 	test-ranking test-room-gameplay test-spectator-view test-tournament-orchestration \
 	test-modules validate-yaml validate-compose test-compose-topology \
-	test-capability-stack check build-shared \
+	test-capability-stack test-client-checkpoint test-client-dockerfile \
+	check build-shared \
 	kind-render kind-validate kind-create-cluster kind-build-load-bootstrap \
+	kind-load-debezium-server kind-status-debezium-server kind-test-debezium-server-structure \
+	kind-load-debezium-connect kind-test-debezium-connectors kind-test-debezium-connect-structure \
+	kind-test-debezium-postgres-to-kafka-live kind-test-debezium-postgres-to-redis-live \
 	kind-apply kind-wait kind-reset kind-test-game-integrity-adapter \
 	kind-deploy-identity kind-test-identity-adapter kind-test-identity-integration \
 	test-identity-helm test-identity-integration \
@@ -24,14 +28,20 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	test-room-helm test-room-integration \
 	kind-deploy-tournament-orchestration kind-test-tournament-adapter \
 	kind-test-tournament-adapter-structure kind-test-tournament-integration \
+	kind-test-tournament-redis-integration \
 	test-tournament-helm test-tournament-integration \
 	kind-deploy-ranking kind-test-ranking-adapter kind-test-ranking-adapter-structure \
-	kind-test-ranking-integration test-ranking-helm test-ranking-integration \
+	kind-test-ranking-integration kind-test-ranking-redis-integration \
+	test-ranking-helm test-ranking-integration test-ranking-redis-integration \
 	kind-deploy-analytics kind-test-analytics-adapter kind-test-analytics-adapter-structure \
 	kind-test-analytics-integration test-analytics-helm test-analytics-integration \
+	kind-test-analytics-kafka-consumer-structure kind-test-analytics-kafka-to-clickhouse-live \
+	kind-test-analytics-projection-rebuilder-structure \
 	kind-deploy-spectator-view kind-test-spectator-adapter kind-test-spectator-adapter-structure \
-	kind-test-spectator-integration test-spectator-helm test-spectator-integration \
+	kind-test-spectator-integration kind-test-spectator-projection-rebuilder-structure \
+	test-spectator-helm test-spectator-integration \
 	kind-deploy-gateway kind-test-gateway-adapter kind-test-gateway-adapter-structure \
+	kind-test-gateway-si-redis-admission-live kind-test-gateway-session-invalidation-live \
 	kind-test-gateway-integration test-gateway-helm test-gateway-integration \
 	kind-test-redis-aof kind-test-redis-aof-structure
 
@@ -58,7 +68,8 @@ help:
 	@echo "  kind-deploy-tournament-orchestration EXPLICIT: helm upgrade --install Tournament (kind values)"
 	@echo "  kind-test-tournament-adapter EXPLICIT/NETWORKED: Tournament durable create/outbox (no CDC claim)"
 	@echo "  kind-test-tournament-adapter-structure offline Tournament deploy/adapter/PF structure checks"
-	@echo "  kind-test-tournament-integration EXPLICIT/NETWORKED: ephemeral test DB + Tournament store integration"
+	@echo "  kind-test-tournament-integration EXPLICIT/NETWORKED: ephemeral test DB + Tournament store + service integration"
+	@echo "  kind-test-tournament-redis-integration EXPLICIT/NETWORKED: Tournament Redis bracket projection (DB 14)"
 	@echo "  test-tournament-helm         offline Tournament helm lint/template checks"
 	@echo "  test-tournament-integration  live Postgres integration (safe unoarena_tournament_test_* DSN only)"
 	@echo "  kind-deploy-ranking          EXPLICIT: helm upgrade --install Ranking (kind values)"
@@ -70,16 +81,21 @@ help:
 	@echo "  kind-deploy-analytics        EXPLICIT: helm upgrade --install Analytics (kind values)"
 	@echo "  kind-test-analytics-adapter  EXPLICIT/NETWORKED: Analytics durable ClickHouse ingest (no Kafka claim)"
 	@echo "  kind-test-analytics-adapter-structure offline Analytics deploy/adapter/PF structure checks"
+	@echo "  kind-test-analytics-kafka-consumer-structure offline Analytics Kafka consumer structure"
+	@echo "  kind-test-analytics-kafka-to-clickhouse-live EXPLICIT: Kafka→ClickHouse Analytics ingest proof"
 	@echo "  kind-test-analytics-integration EXPLICIT/NETWORKED: ephemeral test DB + Analytics store integration"
 	@echo "  test-analytics-helm          offline Analytics helm lint/template checks"
 	@echo "  test-analytics-integration   live ClickHouse integration (safe unoarena_analytics_test_* DB only)"
 	@echo "  kind-deploy-spectator-view   EXPLICIT: helm upgrade --install Spectator View (kind values)"
-	@echo "  kind-test-spectator-adapter  EXPLICIT/NETWORKED: Spectator durable Redis ingest (Kafka PENDING)"
+	@echo "  kind-test-spectator-adapter  EXPLICIT/NETWORKED: Spectator durable Redis ingest (Kafka consumer wired; live probe may still use HTTP bridge)"
 	@echo "  kind-test-spectator-adapter-structure offline Spectator deploy/adapter/PF structure checks"
+	@echo "  kind-test-spectator-projection-rebuilder-structure offline ADR-0039 rebuilder/worker/topic structure checks"
 	@echo "  kind-test-spectator-integration EXPLICIT/NETWORKED: Redis DB 14 + tagged store suite"
 	@echo "  kind-deploy-gateway          EXPLICIT: helm upgrade --install Gateway (kind values)"
-	@echo "  kind-test-gateway-adapter    EXPLICIT/NETWORKED: Gateway durable Redis ready (Kafka/Debezium PENDING)"
+	@echo "  kind-test-gateway-adapter    EXPLICIT/NETWORKED: Gateway durable Redis ready (SessionInvalidated Kafka wired)"
 	@echo "  kind-test-gateway-adapter-structure offline Gateway deploy/adapter/PF structure checks"
+	@echo "  kind-test-gateway-si-redis-admission-live EXPLICIT/NETWORKED: Redis DB6 SI cross-Hub admission only (not Kafka→SSE E2E)"
+	@echo "  kind-test-gateway-session-invalidation-live alias → kind-test-gateway-si-redis-admission-live"
 	@echo "  kind-test-gateway-integration EXPLICIT/NETWORKED: Redis DBs 11/12/13 + tagged gateway suite"
 	@echo "  kind-test-redis-aof-structure offline Redis AOF manifest + live-script structure checks"
 	@echo "  kind-test-redis-aof          EXPLICIT/NETWORKED: DB15 prefix survives Redis PID 1 restart"
@@ -91,14 +107,24 @@ help:
 	@echo "  validate-compose       docker compose config (requires local docker; no pull)"
 	@echo "  test-compose-topology  edge+private network assertions on resolved config (no stack)"
 	@echo "  test-capability-stack  Docker capability overlay + CLI/BFF integration harness"
+	@echo "  test-client-checkpoint offline Client Checkpoint CLI tests (fake BFF, no Docker)"
+	@echo "  test-client-dockerfile Client Checkpoint Dockerfile structure (no build/pull)"
 	@echo "  check                  fmt + vet + test-modules + validate-yaml + git diff --check"
 	@echo "  build-shared           go build ./shared/... with GOPROXY=off"
 	@echo "  kind-render            offline AsyncAPI → kind Kafka topic artifacts"
 	@echo "  kind-validate          offline kind foundation checks incl. CDC/retention (no pull / no cluster)"
 	@echo "  kind-create-cluster    EXPLICIT: create disposable kind cluster uno-arena"
 	@echo "  kind-build-load-bootstrap  EXPLICIT: docker build + kind load bootstrap image"
+	@echo "  kind-load-debezium-connect EXPLICIT/NETWORKED: node-native crictl pull Debezium Connect 3.6 (Kafka outbox)"
+	@echo "  kind-test-debezium-connect-structure  offline Connect config/wiring structure checks"
+	@echo "  kind-test-debezium-connectors  EXPLICIT/NETWORKED: Connect REST status for 4 connectors (no delivery claim)"
+	@echo "  kind-test-debezium-postgres-to-kafka-live  EXPLICIT: insert Identity outbox + observe Kafka (no consumer claim)"
+	@echo "  kind-load-debezium-server  EXPLICIT/NETWORKED: node-native crictl pull Debezium Server 3.6 (Room realtime)"
+	@echo "  kind-status-debezium-server  read-only Deployment/health status (no CDC delivery claim)"
+	@echo "  kind-test-debezium-server-structure  offline Server config/wiring structure checks"
+	@echo "  kind-test-debezium-postgres-to-redis-live  EXPLICIT: insert Room realtime outbox + observe Redis DB2 (no SSE E2E claim)"
 	@echo "  kind-apply             EXPLICIT: apply foundation manifests (context kind-uno-arena)"
-	@echo "  kind-wait              wait for foundation Deployments + bootstrap Jobs"
+	@echo "  kind-wait              wait for foundation Deployments + bootstrap Jobs + Debezium Connect/Server"
 	@echo "  kind-reset             EXPLICIT: delete only kind cluster uno-arena"
 
 fmt-shared:
@@ -197,17 +223,24 @@ test-tournament-helm:
 # Requires TOURNAMENT_POSTGRES_URL whose database name is explicitly prefixed
 # unoarena_tournament_test_ (never tournament/postgres/template0/template1). Prefer
 # kind-test-tournament-integration, which creates an ephemeral DB for the run.
+# Runs store integration first, then main-package service durable integration,
+# sequentially against the same safe DSN (main tests reset schema per test).
 test-tournament-integration:
 	@test -n "$$TOURNAMENT_POSTGRES_URL" || (echo "TOURNAMENT_POSTGRES_URL required" >&2; exit 1)
 	cd services/tournament-orchestration/src && GOWORK=off GOPROXY=off GOSUMDB=off \
 		$(GO) test -count=1 -tags=integration -timeout 180s ./store/...
-
+	cd services/tournament-orchestration/src && GOWORK=off GOPROXY=off GOSUMDB=off \
+		$(GO) test -count=1 -tags=integration -timeout 180s .
 # EXPLICIT + NETWORKED: verifies kind-uno-arena, creates unoarena_tournament_test_*,
-# port-forwards postgres-tournament, runs store integration as tournament_runtime, drops DB.
+# port-forwards postgres-tournament, runs store + main-package service integration
+# as tournament_runtime, drops DB.
 # Never applies/resets/deploys. Never accepts caller-supplied database names.
 kind-test-tournament-integration:
 	./infrastructure/kind/scripts/test-tournament-integration-structure.sh
 	./infrastructure/kind/scripts/test-tournament-integration.sh
+
+kind-test-tournament-redis-integration:
+	./infrastructure/kind/scripts/test-tournament-redis-integration.sh
 
 kind-deploy-ranking:
 	./infrastructure/kind/scripts/deploy-ranking.sh
@@ -230,6 +263,11 @@ test-ranking-integration:
 	cd services/ranking/src && GOWORK=off GOPROXY=off GOSUMDB=off \
 		$(GO) test -count=1 -tags=integration -timeout 180s ./store/...
 
+test-ranking-redis-integration:
+	@test -n "$$RANKING_REDIS_URL" || (echo "RANKING_REDIS_URL required" >&2; exit 1)
+	cd services/ranking/src && GOWORK=off GOPROXY=off GOSUMDB=off \
+		$(GO) test -count=1 -tags=redis_integration -timeout 120s ./store/...
+
 # EXPLICIT + NETWORKED: verifies kind-uno-arena, creates unoarena_ranking_test_*,
 # port-forwards postgres-ranking, runs store integration as ranking_runtime, drops DB.
 # Never applies/resets/deploys. Never accepts caller-supplied database names.
@@ -237,11 +275,24 @@ kind-test-ranking-integration:
 	./infrastructure/kind/scripts/test-ranking-integration-structure.sh
 	./infrastructure/kind/scripts/test-ranking-integration.sh
 
+kind-test-ranking-redis-integration:
+	./infrastructure/kind/scripts/test-ranking-redis-integration.sh
+
 kind-deploy-analytics:
 	./infrastructure/kind/scripts/deploy-analytics.sh
 
 kind-test-analytics-adapter-structure:
 	./infrastructure/kind/scripts/test-analytics-adapter-structure.sh
+
+kind-test-analytics-kafka-consumer-structure:
+	./infrastructure/kind/scripts/test-analytics-kafka-consumer-structure.sh
+
+kind-test-analytics-projection-rebuilder-structure:
+	./infrastructure/kind/scripts/test-analytics-projection-rebuilder-structure.sh
+
+kind-test-analytics-kafka-to-clickhouse-live:
+	./infrastructure/kind/scripts/test-analytics-kafka-consumer-structure.sh
+	./infrastructure/kind/scripts/test-analytics-kafka-to-clickhouse-live.sh
 
 kind-test-analytics-adapter:
 	./infrastructure/kind/scripts/test-analytics-adapter-structure.sh
@@ -291,6 +342,12 @@ kind-test-gateway-adapter:
 	./infrastructure/kind/scripts/test-gateway-adapter-structure.sh
 	./infrastructure/kind/scripts/test-gateway-adapter.sh
 
+kind-test-gateway-si-redis-admission-live:
+	./infrastructure/kind/scripts/test-gateway-si-redis-admission-live.sh
+
+# Compatibility alias (exact proof is Redis admission only; see si-redis-admission-live).
+kind-test-gateway-session-invalidation-live: kind-test-gateway-si-redis-admission-live
+
 kind-test-gateway-integration:
 	./infrastructure/kind/scripts/test-gateway-integration-structure.sh
 	./infrastructure/kind/scripts/test-gateway-integration.sh
@@ -323,6 +380,9 @@ kind-deploy-spectator-view:
 
 kind-test-spectator-adapter-structure:
 	./infrastructure/kind/scripts/test-spectator-adapter-structure.sh
+
+kind-test-spectator-projection-rebuilder-structure:
+	./infrastructure/kind/scripts/test-spectator-projection-rebuilder-structure.sh
 
 kind-test-spectator-adapter:
 	./infrastructure/kind/scripts/test-spectator-adapter-structure.sh
@@ -367,6 +427,14 @@ validate-compose:
 test-compose-topology:
 	./client-checkpoint/tests/test-compose-topology.sh
 
+# Offline Client Checkpoint CLI against ephemeral stdlib fake BFF (no Docker).
+test-client-checkpoint:
+	./client-checkpoint/tests/run-tests.sh
+
+# Dockerfile / packaging structure only (no docker build, no pull).
+test-client-dockerfile:
+	./client-checkpoint/tests/test-dockerfile-structure.sh
+
 # Boots an isolated compose project (-p), polls BFF /health then /ready, exercises
 # real-service capability paths via client-checkpoint CLI + curl, then
 # `down -v --remove-orphans` for a harness-started project only.
@@ -391,6 +459,31 @@ kind-create-cluster:
 
 kind-build-load-bootstrap:
 	./infrastructure/kind/scripts/build-load-bootstrap.sh
+
+kind-load-debezium-connect:
+	./infrastructure/kind/scripts/load-debezium-connect.sh
+
+kind-test-debezium-connect-structure:
+	./infrastructure/kind/scripts/test-debezium-connect-structure.sh
+
+kind-test-debezium-connectors:
+	./infrastructure/kind/scripts/test-debezium-connect-structure.sh
+	./infrastructure/kind/scripts/test-debezium-connectors.sh
+
+kind-test-debezium-postgres-to-kafka-live:
+	./infrastructure/kind/scripts/test-debezium-postgres-to-kafka-live.sh
+
+kind-load-debezium-server:
+	./infrastructure/kind/scripts/load-debezium-server.sh
+
+kind-status-debezium-server:
+	./infrastructure/kind/scripts/status-debezium-server.sh
+
+kind-test-debezium-server-structure:
+	./infrastructure/kind/scripts/test-debezium-server-structure.sh
+
+kind-test-debezium-postgres-to-redis-live:
+	./infrastructure/kind/scripts/test-debezium-postgres-to-redis-live.sh
 
 kind-apply:
 	./infrastructure/kind/scripts/apply.sh

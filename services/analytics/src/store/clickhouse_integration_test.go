@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -148,9 +149,9 @@ func leaderboardEvt(id string) domain.UpstreamEvent {
 		Payload: map[string]any{
 			"boardType": "casual_elo", "snapshotId": "snap-" + id, "sourceType": "casual_elo",
 			"entries": []any{
-				map[string]any{"playerId": "p1", "rating": 1200},
-				map[string]any{"playerId": "p2", "rating": 1100},
-				map[string]any{"playerId": "p3", "rating": 1000},
+				map[string]any{"playerId": "p1", "rating": 1200, "rank": 1},
+				map[string]any{"playerId": "p2", "rating": 1100, "rank": 2},
+				map[string]any{"playerId": "p3", "rating": 1000, "rank": 3},
 			},
 		},
 	}
@@ -349,6 +350,7 @@ func TestIntegration_FailedRebuildPreservesOldSnapshot(t *testing.T) {
 func TestIntegration_RebuildActivation(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)
+	s.AllowAdHocRebuild(true)
 	if _, err := s.Apply(ctx, gameplayEvt("old1")); err != nil {
 		t.Fatal(err)
 	}
@@ -395,5 +397,191 @@ func TestIntegration_ReadyAndReconnect(t *testing.T) {
 	s2 := store.NewAnalyticsStore(c2)
 	if err := s2.Ready(ctx); err != nil {
 		t.Fatalf("reconnect ready: %v", err)
+	}
+}
+
+func TestIntegration_RecoveryCloneDualWriteActivation(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	if _, err := s.Apply(ctx, gameplayEvt("live0")); err != nil {
+		t.Fatal(err)
+	}
+
+	owner, err := store.NewOwnerToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job-integration-1"
+	if _, err := s.AcquireOrRenewLease(ctx, jobID, owner, store.DefaultRecoveryLeaseTTL); err != nil {
+		t.Fatal(err)
+	}
+	genID, err := s.EnsureRecoveryBuildingGeneration(ctx, store.RecoveryJobSpec{
+		RecoveryJobID:      jobID,
+		SourceContext:      "room",
+		SourceTopic:        "room.gameplay.metrics",
+		FromCheckpoint:     "1",
+		ToCheckpoint:       "9",
+		HasCheckpointRange: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Live Apply must dual-write into the building generation.
+	if _, err := s.Apply(ctx, gameplayEvt("live1")); err != nil {
+		t.Fatal(err)
+	}
+	cell, err := s.Client().QueryCell(ctx,
+		`SELECT count() FROM gameplay_metrics FINAL WHERE generation_id = {gen:String} AND event_id = {eid:String}`,
+		map[string]string{"gen": genID, "eid": "live1"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cell != "1" {
+		t.Fatalf("building gen missing dual-write live1 count=%s", cell)
+	}
+
+	// Other owner cannot activate.
+	other, _ := store.NewOwnerToken()
+	if err := s.ActivateRecoveryGeneration(ctx, other, jobID); err == nil {
+		t.Fatal("expected lease ownership failure")
+	}
+
+	cp := store.RecoveryPageCheckpoint{
+		RecoveryJobID: jobID, SourceTopic: "room.gameplay.metrics",
+		PageCursor: "", PageIndex: 0, NextPageCursor: "",
+		Status: store.PageStatusApplied, GenerationID: genID, RecordsApplied: 1,
+	}
+	if err := s.PersistPageCheckpoint(ctx, owner, cp); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileRecoveryJobProgressFromCheckpoint(ctx, owner, cp); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateRecoveryGeneration(ctx, owner, jobID); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, m := range snap.GameplayMetrics {
+		ids[string(m.EventID)] = true
+	}
+	if !ids["live0"] || !ids["live1"] {
+		t.Fatalf("activated snap missing cloned/dual-written rows: %v", ids)
+	}
+
+	// Quarantined page must not activate a fresh job.
+	job2 := "job-integration-q"
+	owner2, _ := store.NewOwnerToken()
+	if _, err := s.AcquireOrRenewLease(ctx, job2, owner2, store.DefaultRecoveryLeaseTTL); err != nil {
+		t.Fatal(err)
+	}
+	gen2, err := s.EnsureRecoveryBuildingGeneration(ctx, store.RecoveryJobSpec{
+		RecoveryJobID: job2, SourceContext: "room", SourceTopic: "room.gameplay.metrics",
+		FromCheckpoint: "1", ToCheckpoint: "2", HasCheckpointRange: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := store.RecoveryPageCheckpoint{
+		RecoveryJobID: job2, SourceTopic: "room.gameplay.metrics",
+		PageCursor: "", PageIndex: 0, NextPageCursor: "",
+		Status: store.PageStatusApplied, GenerationID: gen2, QuarantinedCount: 1,
+	}
+	if err := s.PersistPageCheckpoint(ctx, owner2, bad); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.MarkRecoveryFailed(ctx, owner2, job2, store.RecoveryStatusQuarantined, "q", "quarantine", "")
+	if err := s.ActivateRecoveryGeneration(ctx, owner2, job2); err == nil {
+		t.Fatal("quarantined job must not activate")
+	}
+}
+
+func TestIntegration_RecoveryLeaseEqualEpochDeterministicWinner(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	jobID := "job-lease-race"
+	// Seed expired epoch 1 owned by neither contender.
+	seedOwner := "own_seed"
+	if err := s.Client().Exec(ctx, `
+		INSERT INTO recovery_leases (recovery_job_id, owner_token, lease_epoch, expires_at, updated_at)
+		VALUES ({job:String}, {own:String}, {ep:UInt64}, {ex:String}, {up:String})`,
+		map[string]string{
+			"job": jobID, "own": seedOwner, "ep": "1",
+			"ex": "2020-01-01 00:00:00.000", "up": "2020-01-01 00:00:00.000",
+		}); err != nil {
+		t.Fatal(err)
+	}
+	// Two pods both observe expired epoch and insert epoch 2.
+	a, b := "own_aaa", "own_bbb"
+	expires := time.Now().UTC().Add(store.DefaultRecoveryLeaseTTL).Format("2006-01-02 15:04:05.000")
+	for _, own := range []string{a, b} {
+		if err := s.Client().Exec(ctx, `
+			INSERT INTO recovery_leases (recovery_job_id, owner_token, lease_epoch, expires_at)
+			VALUES ({job:String}, {own:String}, {ep:UInt64}, {ex:String})`,
+			map[string]string{"job": jobID, "own": own, "ep": "2", "ex": expires}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	winner, err := s.AcquireOrRenewLease(ctx, jobID, a, store.DefaultRecoveryLeaseTTL)
+	if err != nil {
+		t.Fatalf("lexicographically smaller owner should win/renew: %v", err)
+	}
+	if winner.OwnerToken != a {
+		t.Fatalf("winner=%+v", winner)
+	}
+	if _, err := s.AcquireOrRenewLease(ctx, jobID, b, store.DefaultRecoveryLeaseTTL); !errors.Is(err, store.ErrRecoveryLeaseLost) {
+		// After a renews (epoch advances), b may lose on unexpired foreign lease.
+		t.Fatalf("loser acquire: %v", err)
+	}
+	if err := s.ValidateLeaseOwnership(ctx, jobID, b); err == nil {
+		t.Fatal("loser must not own lease")
+	}
+	// Same-owner renew remains idempotent under advancing epochs.
+	if _, err := s.AcquireOrRenewLease(ctx, jobID, a, store.DefaultRecoveryLeaseTTL); err != nil {
+		t.Fatalf("same-owner renew: %v", err)
+	}
+}
+
+func TestIntegration_EnsureRecoveryRejectsSpecPoisonAndClosedJobs(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	owner, _ := store.NewOwnerToken()
+	jobID := "job-poison"
+	if _, err := s.AcquireOrRenewLease(ctx, jobID, owner, store.DefaultRecoveryLeaseTTL); err != nil {
+		t.Fatal(err)
+	}
+	spec := store.RecoveryJobSpec{
+		RecoveryJobID: jobID, SourceContext: "room", SourceTopic: "room.gameplay.metrics",
+		FromCheckpoint: "1", ToCheckpoint: "9", HasCheckpointRange: true,
+	}
+	if _, err := s.EnsureRecoveryBuildingGeneration(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	poison := spec
+	poison.SourceTopic = "room.match.completed"
+	if _, err := s.EnsureRecoveryBuildingGeneration(ctx, poison); !errors.Is(err, store.ErrRecoveryJobSpecMismatch) {
+		t.Fatalf("topic poison: %v", err)
+	}
+	poisonRange := spec
+	poisonRange.ToCheckpoint = "99"
+	if _, err := s.EnsureRecoveryBuildingGeneration(ctx, poisonRange); !errors.Is(err, store.ErrRecoveryJobSpecMismatch) {
+		t.Fatalf("range poison: %v", err)
+	}
+	// Mark complete then refuse reopen.
+	st, err := s.LoadRecoveryJob(ctx, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Status = store.RecoveryStatusComplete
+	if err := s.UpdateRecoveryJobProgress(ctx, owner, st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureRecoveryBuildingGeneration(ctx, spec); !errors.Is(err, store.ErrRecoveryJobClosed) {
+		t.Fatalf("complete reopen: %v", err)
 	}
 }

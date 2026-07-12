@@ -42,4 +42,14 @@ for j in "${jobs[@]}"; do
   kubectl -n "${KIND_NAMESPACE}" wait --for=condition=complete "job/${j}" --timeout="${TIMEOUT}"
 done
 
+# Debezium Kafka Connect + connector registration Job (status only — no delivery claim).
+echo "waiting for deployment/debezium-connect"
+kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/debezium-connect" --timeout="${TIMEOUT}"
+echo "waiting for job/register-debezium-connectors"
+kubectl -n "${KIND_NAMESPACE}" wait --for=condition=complete "job/register-debezium-connectors" --timeout="${TIMEOUT}"
+
+# Debezium Server after bootstrap Jobs (Room realtime Redis sink). Status only — no delivery claim.
+echo "waiting for deployment/debezium-server-room-realtime"
+kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/debezium-server-room-realtime" --timeout="${TIMEOUT}"
+
 echo "ok kind-wait"

@@ -48,6 +48,7 @@ func validMinimalSnapshot(t *testing.T) *DeckStateSnapshotV1 {
 	rec := confirmedOp{
 		ReservationID: "res-1", OperationID: "op-draw", Kind: reservationDraw,
 		Count: 2, Shape: drawShape(2), Cards: dtos, FromPointer: 0,
+		RemainingAfter: len(cards) - 2,
 	}
 	st.Confirmed["op-draw"] = rec
 	st.ConfirmedByID["res-1"] = rec
@@ -105,6 +106,7 @@ func snapshotWithPendingDraw(t *testing.T) *DeckStateSnapshotV1 {
 		ID: id, RoomID: snap.RoomID, GameID: snap.GameID, OperationID: op,
 		Kind: string(reservationDraw), Count: count, CardCount: count,
 		Cards: cloneCards(dtos), Shape: drawShape(count),
+		RemainingAfter: len(snap.Order) - snap.Pointer - count,
 	}
 	snap.ByOp[op] = id
 	return snap
@@ -125,6 +127,7 @@ func snapshotWithPendingDeal(t *testing.T) *DeckStateSnapshotV1 {
 		Kind: string(reservationDeal), Seats: append([]string(nil), seats...),
 		CardsPerHand: perHand, Count: need, CardCount: need,
 		Deal: cloneDealPtr(&material), Shape: dealShape(seats, perHand),
+		RemainingAfter: len(snap.Order) - snap.Pointer - need,
 	}
 	snap.ByOp[op] = id
 	return snap
@@ -407,6 +410,7 @@ func snapshotWithConfirmedDeal(t *testing.T) *DeckStateSnapshotV1 {
 		Seats: append([]string(nil), seats...), CardsPerHand: perHand,
 		Count: need, Shape: dealShape(seats, perHand),
 		Deal: cloneDealPtr(&material), FromPointer: 0,
+		RemainingAfter: 108 - need,
 	}
 	st.Confirmed["op-deal"] = rec
 	st.ConfirmedByID["res-deal"] = rec
@@ -504,6 +508,7 @@ func TestDeckSnapshot_RejectsMultiplePendingReservations(t *testing.T) {
 		ID: id, RoomID: snap.RoomID, GameID: snap.GameID, OperationID: op,
 		Kind: string(reservationDraw), Count: count, CardCount: count,
 		Cards: cloneCards(dtos), Shape: drawShape(count),
+		RemainingAfter: len(snap.Order) - snap.Pointer - count,
 	}
 	snap.ByOp[op] = id
 	if _, err := deckStateFromSnapshot(snap); err == nil {

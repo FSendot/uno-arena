@@ -238,22 +238,30 @@ func TestTopThree_Table(t *testing.T) {
 			want: []PlayerID{"c", "b", "a"},
 		},
 		{
-			name: "insufficient_eligible_when_forfeits_reduce_below_three",
+			name: "one_or_two_eligible_when_forfeits_reduce_below_three",
 			in: []PlayerMatchStanding{
 				advStanding("a", 2, 0, base, false),
 				advStanding("b", 1, 0, base, false),
 				advStanding("f1", 1, 0, base, true),
 				advStanding("f2", 0, 0, base, true),
 			},
-			wantErr: ErrInsufficientEligible,
+			want: []PlayerID{"a", "b"},
 		},
 		{
-			name: "insufficient_eligible_two_players",
+			name: "two_eligible_players_valid",
 			in: []PlayerMatchStanding{
 				advStanding("a", 2, 0, base, false),
 				advStanding("b", 1, 0, base, false),
 			},
-			wantErr: ErrInsufficientEligible,
+			want: []PlayerID{"a", "b"},
+		},
+		{
+			name: "one_eligible_player_valid",
+			in: []PlayerMatchStanding{
+				advStanding("solo", 2, 0, base, false),
+				advStanding("f1", 1, 0, base, true),
+			},
+			want: []PlayerID{"solo"},
 		},
 		{
 			name: "insufficient_eligible_all_forfeited",
@@ -309,8 +317,8 @@ func TestTopThree_Table(t *testing.T) {
 				if !slices.Equal(got, tt.want) {
 					t.Fatalf("got=%v want %v", got, tt.want)
 				}
-				if len(got) != AdvancersPerMatch {
-					t.Fatalf("len=%d want %d", len(got), AdvancersPerMatch)
+				if len(got) < 1 || len(got) > AdvancersPerMatch {
+					t.Fatalf("len=%d want 1..%d", len(got), AdvancersPerMatch)
 				}
 			}
 			assertStandingsUnchanged(t, orig, tt.in)

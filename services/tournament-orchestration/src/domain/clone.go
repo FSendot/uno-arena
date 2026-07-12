@@ -11,6 +11,7 @@ func (t *Tournament) Clone() *Tournament {
 		capacity:          t.capacity,
 		retryBudget:       t.retryBudget,
 		batchSize:         t.batchSize,
+		visibility:        t.visibility,
 		registrations:     clonePlayerSet(t.registrations),
 		registrationOrder: append([]PlayerID(nil), t.registrationOrder...),
 		rounds:            cloneRounds(t.rounds),

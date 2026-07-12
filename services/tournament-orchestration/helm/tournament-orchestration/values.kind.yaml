@@ -1,5 +1,5 @@
 # Local kind overlay for Tournament Orchestration durable Postgres.
-# Debezium CDC delivery and Redis bracket projection remain PENDING.
+# Redis bracket projection is wired (REDIS_URL DB 7). Debezium CDC delivery remains PENDING.
 kind: true
 
 replicaCount: 1
@@ -14,12 +14,28 @@ env:
   SERVICE_NAME: tournament-orchestration
   DEPLOYMENT_ENV: local
   ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: tournament-orchestration
+  KAFKA_MATCH_COMPLETED_TOPIC: room.match.completed
+  KAFKA_MATCH_COMPLETED_DLQ_TOPIC: room.match.completed.tournament-orchestration.dlq
+  # Disposable Redis bracket projection (kind DB 7).
+  REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/7
   # Durable mode: no TOURNAMENT_CAPABILITY_MODE; DATABASE_URL from secret.
-  # REDIS_URL / KAFKA_BROKERS intentionally omitted until those slices.
-  # Provisioning worker stays disabled; use synchronous ProcessProvisioningBatch.
+  # Provisioning worker enabled below (2 replicas exercise SKIP LOCKED).
+  # Seeding worker enabled below (2 replicas exercise SKIP LOCKED).
+  # Completion worker enabled below (2 replicas exercise idempotent CompleteRound).
 
 provisioningWorker:
-  enabled: false
+  enabled: true
+  replicaCount: 2
+
+seedingWorker:
+  enabled: true
+  replicaCount: 2
+
+completionWorker:
+  enabled: true
+  replicaCount: 2
 
 existingSecret: uno-arena-local-credentials
 secretEnv:
@@ -27,3 +43,6 @@ secretEnv:
   SERVICE_CREDENTIAL: tournament-internal-credential
   ROOM_SERVICE_CREDENTIAL: room-service-credential
   DATABASE_URL: tournament-database-url
+  TOURNAMENT_BRACKET_CURSOR_SECRET: tournament-bracket-cursor-secret
+  TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL: analytics-tournament-credential
+  TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET: tournament-analytics-backfill-cursor-secret

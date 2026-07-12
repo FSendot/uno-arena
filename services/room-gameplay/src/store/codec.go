@@ -28,6 +28,7 @@ type engineStateJSON struct {
 	Placement     []string               `json:"placement"`
 	CardPoints    map[string]int         `json:"cardPoints"`
 	Outcomes      map[string]outcomeJSON `json:"outcomes"`
+	DrawPileSize  int                    `json:"drawPileSize"`
 }
 
 type unoWindowJSON struct {
@@ -101,6 +102,7 @@ func encodeGame(g *game.Game) ([]byte, error) {
 		Placement:     playerIDsToStrings(g.PlacementOrder()),
 		CardPoints:    intMapToJSON(g.CardPoints()),
 		Outcomes:      gameOutcomesToJSON(g.OutcomesMap()),
+		DrawPileSize:  g.DrawPileSize(),
 	}
 	if uw := g.UnoWindow(); uw != nil {
 		st.Uno = &unoWindowJSON{
@@ -135,6 +137,9 @@ func decodeGame(b []byte) (*game.Game, error) {
 		)
 		uno = &uw
 	}
+	if st.DrawPileSize < 0 {
+		return nil, fmt.Errorf("drawPileSize must be >= 0")
+	}
 	return game.RestoreGame(game.RestoreGameInput{
 		ID:            game.GameID(st.ID),
 		Seats:         stringsToPlayerIDs(st.Seats),
@@ -154,6 +159,7 @@ func decodeGame(b []byte) (*game.Game, error) {
 		Placement:     stringsToPlayerIDs(st.Placement),
 		CardPoints:    intMapFromJSON(st.CardPoints),
 		Outcomes:      gameOutcomesFromJSON(st.Outcomes),
+		DrawPileSize:  st.DrawPileSize,
 	}), nil
 }
 

@@ -126,6 +126,7 @@ var allowedFields = map[string]struct{}{
 	"turnplayerid":          {},
 	"penaltyamount":         {},
 	"penaltytarget":         {},
+	"drawpilesize":          {},
 	"gamewins":              {},
 	"matchwins":             {},
 	"gamescore":             {},

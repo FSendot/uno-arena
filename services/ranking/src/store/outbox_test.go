@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,7 +94,11 @@ func TestOutboxFromFact_LeaderboardSnapshotSatisfiesEventMetadata(t *testing.T) 
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	ev, err := outboxFromFact(domain.Fact{
 		Name: domain.FactLeaderboardSnapshotPublished,
-		Data: map[string]string{"snapshotId": "snap-1", "boardType": "casual_elo"},
+		Data: map[string]string{
+			"snapshotId": "snap-1", "boardType": "casual_elo", "playerCount": "2",
+			"rank_1": "alice", "rating_1": "1200",
+			"rank_2": "bob", "rating_2": "1100",
+		},
 	}, outboxMeta{
 		CorrelationID: "corr-snap",
 		CausationID:   "rebuild-1",
@@ -108,6 +113,60 @@ func TestOutboxFromFact_LeaderboardSnapshotSatisfiesEventMetadata(t *testing.T) 
 	assertRequiredEventMetadata(t, ev.Payload, msgLeaderboardSnapshotPublished)
 	if ev.Payload["snapshotId"] != "snap-1" || ev.Payload["boardType"] != "casual_elo" {
 		t.Fatalf("snapshot fields: %+v", ev.Payload)
+	}
+	entries, ok := ev.Payload["entries"].([]map[string]any)
+	if !ok {
+		t.Fatalf("entries type %T", ev.Payload["entries"])
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries=%d", len(entries))
+	}
+	if entries[0]["playerId"] != "alice" || entries[0]["rating"] != 1200 || entries[0]["rank"] != 1 {
+		t.Fatalf("entry0=%+v", entries[0])
+	}
+	if entries[1]["playerId"] != "bob" || entries[1]["rank"] != 2 {
+		t.Fatalf("entry1=%+v", entries[1])
+	}
+}
+
+func TestLeaderboardEntriesFromFact_CapsAt100(t *testing.T) {
+	data := map[string]string{"playerCount": "150"}
+	for i := 1; i <= 150; i++ {
+		rk := "rank_" + strconv.Itoa(i)
+		data[rk] = "p" + strconv.Itoa(i)
+		data["rating_"+strconv.Itoa(i)] = "1000"
+	}
+	entries := leaderboardEntriesFromFact(data)
+	if len(entries) != LeaderboardSnapshotTopN {
+		t.Fatalf("want %d got %d", LeaderboardSnapshotTopN, len(entries))
+	}
+}
+
+func TestStampPlayerRatingProjectionVersion(t *testing.T) {
+	ev, err := outboxFromFact(domain.Fact{
+		Name: domain.FactPlayerRatingUpdated,
+		Data: map[string]string{
+			"playerId": "p1", "gameId": "g1", "eventId": "e1",
+			"previousRating": "1000", "newRating": "1016",
+		},
+	}, outboxMeta{UpstreamEventID: "e1", Now: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := outboxFromFact(domain.Fact{
+		Name: domain.FactLeaderboardSnapshotPublished,
+		Data: map[string]string{"snapshotId": "s1", "boardType": "casual_elo", "playerCount": "0"},
+	}, outboxMeta{Now: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []OutboxEvent{ev, snap}
+	stampPlayerRatingProjectionVersion(events, 17)
+	if events[0].Payload["projectionVersion"] != int64(17) {
+		t.Fatalf("rating payload version=%v", events[0].Payload["projectionVersion"])
+	}
+	if _, ok := events[1].Payload["projectionVersion"]; ok {
+		t.Fatal("snapshot must not receive projectionVersion")
 	}
 }
 

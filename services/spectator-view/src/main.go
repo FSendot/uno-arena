@@ -7,7 +7,11 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"unoarena/services/spectator-view/domain"
@@ -24,6 +28,7 @@ type Server struct {
 	mode               string
 	readyReason        string
 	readyOverride      *bool // tests
+	durableReady       func(context.Context) error
 }
 
 // NewServer constructs a Spectator View HTTP server (capability defaults).
@@ -44,6 +49,17 @@ func NewServerWithFeed(app SpectatorApplication, feed SpectatorLiveFeed, interna
 		feed:               feed,
 		internalCredential: internalCredential,
 		mode:               mode,
+	}
+}
+
+func newServerFromRuntime(rt spectatorRuntime) *Server {
+	return &Server{
+		app:                rt.app,
+		feed:               rt.feed,
+		internalCredential: rt.cred,
+		mode:               rt.mode,
+		readyReason:        rt.reason,
+		durableReady:       rt.durableReady,
 	}
 }
 
@@ -125,6 +141,17 @@ func (s *Server) isReady(ctx context.Context) bool {
 	}
 	if s.app == nil || s.internalCredential == "" {
 		return false
+	}
+	if s.mode == "durable" && s.durableReady != nil {
+		if err := s.durableReady(ctx); err != nil {
+			if strings.Contains(err.Error(), "kafka_consumer_stopped") {
+				s.readyReason = "kafka_consumer_stopped"
+			} else {
+				s.readyReason = "redis_unavailable"
+			}
+			return false
+		}
+		return true
 	}
 	if err := s.app.Ready(ctx); err != nil {
 		s.readyReason = "redis_unavailable"
@@ -252,17 +279,17 @@ func (s *Server) admissionHandler(w http.ResponseWriter, r *http.Request) {
 
 // canonicalSpectatorEvent is the single Room/Gateway spectator-safe envelope.
 type canonicalSpectatorEvent struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	EventID       string         `json:"eventId"`
-	Stream        string         `json:"stream"`
-	RoomID        string         `json:"roomId"`
-	Sequence      uint64         `json:"sequence"`
-	Event         string         `json:"event"`
-	Data          map[string]any `json:"data"`
-	Facts         []canonicalFact `json:"facts"`
-	EventType      string         `json:"eventType"`
-	SequenceNumber uint64         `json:"sequenceNumber"`
-	Payload        map[string]any `json:"payload"`
+	SchemaVersion  int             `json:"schemaVersion"`
+	EventID        string          `json:"eventId"`
+	Stream         string          `json:"stream"`
+	RoomID         string          `json:"roomId"`
+	Sequence       uint64          `json:"sequence"`
+	Event          string          `json:"event"`
+	Data           map[string]any  `json:"data"`
+	Facts          []canonicalFact `json:"facts"`
+	EventType      string          `json:"eventType"`
+	SequenceNumber uint64          `json:"sequenceNumber"`
+	Payload        map[string]any  `json:"payload"`
 }
 
 type canonicalFact struct {
@@ -800,26 +827,58 @@ func itoa(n int) string {
 }
 
 func main() {
+	if workerRoleFromEnv() == workerRoleSpectatorProjectionRebuilder {
+		rt, err := wireProjectionRebuildWorker()
+		if err != nil {
+			log.Fatalf(`{"level":"error","service":"spectator-view","event":"projection_rebuilder_startup_failed","error":%q}`, err.Error())
+		}
+		runProjectionRebuildWorker(rt)
+		return
+	}
+
 	rt, err := wireSpectatorRuntime()
 	if err != nil {
 		log.Fatalf(`{"level":"error","service":"spectator-view","event":"startup_failed","error":%q}`, err.Error())
 	}
-	srv := NewServerWithFeed(rt.app, rt.feed, rt.cred, rt.mode)
-	srv.readyReason = rt.reason
+	defer rt.close()
+
+	srv := newServerFromRuntime(rt)
 	if !rt.ready {
 		ready := false
 		srv.readyOverride = &ready
-	} else {
-		// Keep readyOverride nil so isReady pings Redis in durable mode.
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				_ = rt.durableReady(context.Background())
-			}
-		}()
 	}
 
-	log.Printf(`{"level":"info","service":"spectator-view","event":"startup","mode":%q}`, rt.mode)
-	log.Fatal(http.ListenAndServe(":8080", srv.routes()))
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.start(rootCtx)
+		log.Printf(`{"level":"info","service":"spectator-view","event":"kafka_consumer_started","group":%q,"topic":%q}`,
+			rt.kafka.consumer.cfg.Group, rt.kafka.consumer.cfg.Topic)
+	}
+
+	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf(`{"level":"info","service":"spectator-view","event":"startup","mode":%q}`, rt.mode)
+		errCh <- httpSrv.ListenAndServe()
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	case <-sigCh:
+	}
+
+	rootCancel()
+	if rt.kafka != nil {
+		rt.kafka.stop()
+		rt.kafka = nil // close() must not double-stop
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(ctx)
 }

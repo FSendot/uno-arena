@@ -1,5 +1,6 @@
 # Local kind overlay for Gateway durable Redis rate-limit + LiveFeed SSE.
-# Kafka SessionInvalidated consumer and Debezium player-feed sink remain PENDING.
+# Kafka SessionInvalidated consumer is wired via franz-go (identity.session.invalidated).
+# Room realtime player feeds arrive via Debezium Server → Redis DB2 (Gateway XREAD).
 kind: true
 
 replicaCount: 1
@@ -19,7 +20,7 @@ env:
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
-  # Rate-limit buckets — dedicated DB 6 (distinct from Room timers DB 2 / Spectator DB 5).
+  # Rate-limit buckets + session-invalidation store — dedicated DB 6.
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/6
   # Player feeds (room:{roomId}:player) — same Redis instance as Room timers (DB 2).
   GATEWAY_PLAYER_FEED_REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
@@ -30,8 +31,14 @@ env:
   GATEWAY_EDGE_RATE_WINDOW: "1m"
   GATEWAY_PRINCIPAL_RATE_LIMIT: "1000"
   GATEWAY_PRINCIPAL_RATE_WINDOW: "1m"
+  # ADR-0029: Redis SI TTL must outlast kind source (30m) + DLQ (6h) → ≥6h30m; use 7h.
+  # Production default remains 31d via code / staging+production overlays.
+  GATEWAY_SESSION_INVALIDATION_TTL: "7h"
+  KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
+  KAFKA_CONSUMER_GROUP: gateway
+  KAFKA_SESSION_INVALIDATED_TOPIC: identity.session.invalidated
+  KAFKA_SESSION_INVALIDATED_DLQ_TOPIC: identity.session.invalidated.gateway.dlq
   # Durable mode: no capability/fakes flags.
-  # Kafka brokers intentionally omitted — SessionInvalidated consumer PENDING.
 
 existingSecret: uno-arena-local-credentials
 secretEnv:

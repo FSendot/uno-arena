@@ -295,6 +295,8 @@ func (s *Session) DrawCard(cmd DrawCardCommand) CommandOutcome {
 		PlayerID:         game.PlayerID(cmd.PlayerID),
 		Cards:            cmd.Cards,
 		ExpectedSequence: s.game.Sequence(),
+		DrawPileSize:     cmd.DrawPileSize,
+		HasDrawPileSize:  cmd.HasDrawPileSize,
 	})
 	return s.commitGameplay(cmd.CommandID, cmd.ExpectedSequence, gout, "", time.Time{})
 }
@@ -350,6 +352,8 @@ func (s *Session) ReportMissingUno(cmd ReportMissingUnoCommand) CommandOutcome {
 		Cards:            cmd.Cards,
 		ExpectedSequence: s.game.Sequence(),
 		NowUTC:           cmd.NowUTC,
+		DrawPileSize:     cmd.DrawPileSize,
+		HasDrawPileSize:  cmd.HasDrawPileSize,
 	})
 	out := s.commitGameplay(cmd.CommandID, cmd.ExpectedSequence, gout, "", time.Time{})
 	if out.Accepted() && out.Rejection == nil {

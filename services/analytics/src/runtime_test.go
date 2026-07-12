@@ -1,7 +1,7 @@
 package main
 
 import (
-	"os"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +54,7 @@ func TestWireRuntime_DurableRequiresScopedCredsAndPassword(t *testing.T) {
 	t.Setenv("CLICKHOUSE_URL", "http://127.0.0.1:8123")
 	t.Setenv("CLICKHOUSE_USER", "")
 	t.Setenv("CLICKHOUSE_PASSWORD", "")
+	t.Setenv("KAFKA_BROKERS", "")
 	t.Setenv("ANALYTICS_ROOM_CREDENTIAL", "r")
 	t.Setenv("ANALYTICS_RANKING_CREDENTIAL", "k")
 	t.Setenv("ANALYTICS_TOURNAMENT_CREDENTIAL", "t")
@@ -65,5 +66,45 @@ func TestWireRuntime_DurableRequiresScopedCredsAndPassword(t *testing.T) {
 	if rt.mode != "durable" || rt.ready {
 		t.Fatalf("want durable not ready without CH user/pass: %+v", rt)
 	}
-	_ = os.Getenv
+}
+
+func TestWireRuntime_DurableRequiresKafka(t *testing.T) {
+	t.Setenv("ANALYTICS_CAPABILITY_MODE", "")
+	t.Setenv("DEPLOYMENT_ENV", "local")
+	t.Setenv("CLICKHOUSE_URL", "http://127.0.0.1:8123")
+	t.Setenv("CLICKHOUSE_USER", "u")
+	t.Setenv("CLICKHOUSE_PASSWORD", "p")
+	t.Setenv("KAFKA_BROKERS", "")
+	t.Setenv("ANALYTICS_ROOM_CREDENTIAL", "r")
+	t.Setenv("ANALYTICS_RANKING_CREDENTIAL", "k")
+	t.Setenv("ANALYTICS_TOURNAMENT_CREDENTIAL", "t")
+	t.Setenv("ANALYTICS_OPS_CREDENTIAL", "o")
+	rt, err := wireAnalyticsRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.mode != "durable" || rt.ready {
+		t.Fatalf("want durable not ready without kafka: %+v", rt)
+	}
+	if !strings.Contains(rt.readyReason, "kafka") {
+		t.Fatalf("reason=%q", rt.readyReason)
+	}
+}
+
+func TestWireRuntime_CapabilityIgnoresKafkaEnv(t *testing.T) {
+	t.Setenv("ANALYTICS_CAPABILITY_MODE", "1")
+	t.Setenv("DEPLOYMENT_ENV", "local")
+	t.Setenv("CLICKHOUSE_URL", "")
+	t.Setenv("KAFKA_BROKERS", "kafka:9092")
+	t.Setenv("ANALYTICS_ROOM_CREDENTIAL", "r")
+	t.Setenv("ANALYTICS_RANKING_CREDENTIAL", "k")
+	t.Setenv("ANALYTICS_TOURNAMENT_CREDENTIAL", "t")
+	t.Setenv("ANALYTICS_OPS_CREDENTIAL", "o")
+	rt, err := wireAnalyticsRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.mode != "capability" || !rt.ready || rt.kafka != nil {
+		t.Fatalf("capability must ignore kafka: %+v", rt)
+	}
 }

@@ -3,24 +3,36 @@
 # Speaks only to the Realtime Gateway / BFF via UNOARENA_API_URL. No direct service calls.
 set -euo pipefail
 
+SEED_MAX_COUNT=10000
+SEED_DEFAULT_PREFIX="seed"
+
 usage() {
   cat >&2 <<'USAGE'
 Usage:
   unoarena health
   unoarena register --user <username> --pass <password>
   unoarena login --user <username> --pass <password>
-  unoarena whoami --token <bearer-token>
-  unoarena room create --token <bearer-token> [--command-id <id>] [--payload <json>]
+  unoarena logout
+  unoarena whoami [--token <bearer-token>]
+  unoarena seed --count <N> [--prefix <p>]
+  unoarena room create [--max <N>] [--token <bearer-token>] [--command-id <id>]
+                       [--payload <json>]
+  unoarena room list [--status <waiting|locked|in_progress>] [--limit <n>] [--cursor <c>]
+  unoarena room join <roomId> [--token <bearer-token>] [--command-id <id>]
+  unoarena room leave [<roomId>] [--token <bearer-token>] [--command-id <id>]
   unoarena command --token <bearer-token> --type <CommandType>
                    [--room-id <roomId>] [--command-id <id>]
                    --expected-sequence <n>   # required for existing room mutations
                    [--payload <json>] [--schema-version <n>]
   unoarena tournament create --token <bearer-token> [--command-id <id>] [--payload <json>]
-  unoarena tournament register --token <bearer-token> [--command-id <id>] [--payload <json>]
+  unoarena tournament register <tournamentId> [--token <bearer-token>] [--command-id <id>]
+  unoarena tournament register --token <bearer-token> [--command-id <id>] --payload <json>
   unoarena tournament close-registration --token <bearer-token>
                    [--command-id <id>] [--payload <json>]
+  unoarena tournament status <tournamentId> [--token <bearer-token>]
   unoarena stream player --token <bearer-token> --room-id <roomId> [--last-event-id <id>]
   unoarena stream spectator --room-id <roomId> [--token <bearer-token>] [--last-event-id <id>]
+  unoarena spectate <roomId> [--token <bearer-token>] [--last-event-id <id>]
   unoarena stream control --token <bearer-token> [--last-event-id <id>]
   unoarena leaderboard
   unoarena analytics
@@ -28,11 +40,13 @@ Usage:
                    [--now <RFC3339>] [--json]
 
 Environment:
-  UNOARENA_API_URL   Gateway/BFF base URL (required except for countdown)
-  UNOARENA_TOKEN     Optional default bearer token when --token is omitted
+  UNOARENA_API_URL       Gateway/BFF base URL (required except for countdown/logout)
+  UNOARENA_TOKEN         Optional default bearer token when --token is omitted
+  UNOARENA_SESSION_FILE  Override session file path (default: XDG state / home)
 
 Notes:
   - All HTTP calls target UNOARENA_API_URL only (OpenAPI BFF paths).
+  - Token resolution for one-shot utilities: --token, then UNOARENA_TOKEN, then session file.
   - HTTP responses are always JSON; --json is only meaningful for countdown
     (structured JSON vs text line).
   - schemaVersion must equal 1.
@@ -41,6 +55,9 @@ Notes:
   - expectedSequenceNumber is required for mutations of an existing room aggregate
     (JoinRoom, PlayCard, …). It must be absent for CreateRoom and the three
     tournament types; passing --expected-sequence for those is rejected locally.
+  - seed passwords are deterministic: password = "<username>-pass"
+    (usernames = "<prefix><NNNN>" with 1-based zero-padded index).
+  - Interactive play (`play`) and headless bot (`bot`) are stage B (not implemented).
   - Countdown is advisory; server expiresAt + openingSequence remain authoritative.
     SSE advisory accepts canonical openingSequence and legacy openingRoomSequence.
   - Graphical UI is deferred; this CLI is the sole current client interface.
@@ -67,6 +84,14 @@ require_uint() {
       fail "${label} must be a non-negative integer (got: ${value})"
       ;;
   esac
+}
+
+require_positive_uint() {
+  local label="$1" value="$2"
+  require_uint "$label" "$value"
+  if [ "$value" -lt 1 ]; then
+    fail "${label} must be >= 1 (got: ${value})"
+  fi
 }
 
 # schemaVersion must equal 1 (current BFF contract).
@@ -189,6 +214,26 @@ print(json.dumps(obj, separators=(",", ":")))
 PY
 }
 
+json_get() {
+  local json="$1" field="$2"
+  require_command python3
+  printf '%s' "$json" | python3 -c '
+import json, sys
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(1)
+v = data.get(field, "")
+if v is None:
+    print("")
+elif isinstance(v, (dict, list)):
+    print(json.dumps(v, separators=(",", ":")))
+else:
+    print(v)
+' "$field"
+}
+
 # Portable RFC3339 -> epoch seconds (UTC). Uses python3 stdlib only.
 rfc3339_to_epoch() {
   local stamp="$1"
@@ -226,14 +271,195 @@ command_sequence_policy() {
   esac
 }
 
-http_json() {
-  # http_json METHOD PATH [curl args...]
-  # Prints response body on stdout. Exits 1 on transport/HTTP error with clear stderr.
+# --- session file helpers ---------------------------------------------------
+
+session_path() {
+  if [ -n "${UNOARENA_SESSION_FILE:-}" ]; then
+    printf '%s' "$UNOARENA_SESSION_FILE"
+    return
+  fi
+  local state_home="${XDG_STATE_HOME:-}"
+  if [ -z "$state_home" ]; then
+    state_home="${HOME}/.local/state"
+  fi
+  printf '%s' "${state_home}/unoarena/session.json"
+}
+
+# Fail closed when the session file exists but is corrupt or world/group-readable.
+# Prints nothing and returns 1 when the file is absent (caller decides).
+# On success prints the JSON object on stdout.
+session_read_json() {
+  local path
+  path="$(session_path)"
+  if [ ! -e "$path" ]; then
+    return 1
+  fi
+  require_command python3
+  python3 - "$path" <<'PY'
+import json, os, stat, sys
+
+path = sys.argv[1]
+try:
+    st = os.stat(path)
+except OSError as exc:
+    print(f"FAIL: cannot read session file: {exc}", file=sys.stderr)
+    sys.exit(1)
+mode = st.st_mode
+if mode & (stat.S_IRWXG | stat.S_IRWXO):
+    print("FAIL: session file permissions are unsafe (must be owner-only, mode 0600)", file=sys.stderr)
+    sys.exit(1)
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"FAIL: corrupt session file: {exc}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict):
+    print("FAIL: corrupt session file: root must be a JSON object", file=sys.stderr)
+    sys.exit(1)
+for key in ("token", "playerId", "sessionId", "username"):
+    val = data.get(key)
+    if not isinstance(val, str) or not val:
+        print(f"FAIL: corrupt session file: missing or invalid '{key}'", file=sys.stderr)
+        sys.exit(1)
+room = data.get("roomId")
+if room is not None and (not isinstance(room, str) or not room):
+    print("FAIL: corrupt session file: invalid 'roomId'", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(data, separators=(",", ":")))
+PY
+}
+
+session_write() {
+  local token="$1" player_id="$2" session_id="$3" username="$4" room_id="${5:-}"
+  local path dir
+  path="$(session_path)"
+  dir="$(dirname "$path")"
+  require_command python3
+  mkdir -p "$dir"
+  python3 - "$path" "$token" "$player_id" "$session_id" "$username" "$room_id" <<'PY'
+import json, os, sys
+
+path, token, player_id, session_id, username, room_id = sys.argv[1:7]
+payload = {
+    "token": token,
+    "playerId": player_id,
+    "sessionId": session_id,
+    "username": username,
+}
+if room_id:
+    payload["roomId"] = room_id
+dirpath = os.path.dirname(path) or "."
+fd, tmp = -1, None
+try:
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=".unoarena-session-", dir=dirpath, text=True)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        fd = -1
+        json.dump(payload, f, separators=(",", ":"))
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    tmp = None
+except Exception as exc:
+    if fd >= 0:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if tmp:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    print(f"FAIL: unable to write session file: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+session_update_room() {
+  # Sets or clears roomId on an existing session file. No-op if absent.
+  local room_id="${1:-}"
+  local path json
+  path="$(session_path)"
+  if [ ! -e "$path" ]; then
+    return 0
+  fi
+  json="$(session_read_json)" || return 1
+  local token player_id session_id username
+  token="$(json_get "$json" token)"
+  player_id="$(json_get "$json" playerId)"
+  session_id="$(json_get "$json" sessionId)"
+  username="$(json_get "$json" username)"
+  session_write "$token" "$player_id" "$session_id" "$username" "$room_id"
+}
+
+session_clear_room() {
+  session_update_room ""
+}
+
+session_remove() {
+  local path
+  path="$(session_path)"
+  rm -f "$path"
+}
+
+session_token_or_empty() {
+  local json
+  if ! json="$(session_read_json 2>/dev/null)"; then
+    # Distinguish absent vs fail-closed: re-run without swallowing failures when file exists.
+    if [ -e "$(session_path)" ]; then
+      session_read_json >/dev/null
+      return 1
+    fi
+    return 1
+  fi
+  json_get "$json" token
+}
+
+session_room_or_empty() {
+  local json
+  json="$(session_read_json)" || return 1
+  json_get "$json" roomId
+}
+
+session_player_id() {
+  local json
+  json="$(session_read_json)" || return 1
+  json_get "$json" playerId
+}
+
+# Resolve TOKEN after flags: --token > UNOARENA_TOKEN > session file.
+# TOKEN_FROM_FLAG=1 means --token was supplied (even if empty → usage later).
+resolve_token() {
+  if [ "${TOKEN_FROM_FLAG:-0}" -eq 1 ]; then
+    return 0
+  fi
+  if [ -n "${UNOARENA_TOKEN:-}" ]; then
+    TOKEN="$UNOARENA_TOKEN"
+    return 0
+  fi
+  local path
+  path="$(session_path)"
+  if [ -e "$path" ]; then
+    local json
+    json="$(session_read_json)" || exit 1
+    TOKEN="$(json_get "$json" token)"
+    return 0
+  fi
+  TOKEN=""
+}
+
+http_exchange() {
+  # http_exchange METHOD PATH [curl args...]
+  # Sets HTTP_CODE and HTTP_BODY. Does not exit on HTTP status.
   local method="$1"
   local path="$2"
   shift 2
   local url="${BASE_URL}${path}"
-  local tmp_body tmp_code code body curl_rc
+  local tmp_body tmp_code curl_rc
   tmp_body="$(mktemp)"
   tmp_code="$(mktemp)"
 
@@ -253,24 +479,29 @@ http_json() {
   curl_rc=$?
   set -e
 
-  code="$(tr -d '\n' <"$tmp_code")"
-  body="$(cat "$tmp_body")"
+  HTTP_CODE="$(tr -d '\n' <"$tmp_code")"
+  HTTP_BODY="$(cat "$tmp_body")"
   rm -f "$tmp_body" "$tmp_code"
 
   if [ "$curl_rc" -ne 0 ]; then
     fail "HTTP request failed (curl exit ${curl_rc}) ${method} ${url}"
   fi
+}
 
-  if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-    echo "FAIL: ${method} ${path} returned HTTP ${code}" >&2
-    if [ -n "$body" ]; then
-      echo "$body" >&2
+http_json() {
+  # http_json METHOD PATH [curl args...]
+  # Prints response body on stdout. Exits 1 on transport/HTTP error with clear stderr.
+  http_exchange "$@"
+  if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+    echo "FAIL: $1 $2 returned HTTP ${HTTP_CODE}" >&2
+    if [ -n "$HTTP_BODY" ]; then
+      echo "$HTTP_BODY" >&2
     fi
     exit 1
   fi
 
-  printf '%s' "$body"
-  if [ -n "$body" ] && [ "${body%"${body##?}"}" != $'\n' ]; then
+  printf '%s' "$HTTP_BODY"
+  if [ -n "$HTTP_BODY" ] && [ "${HTTP_BODY%"${HTTP_BODY##?}"}" != $'\n' ]; then
     printf '\n'
   fi
 }
@@ -526,13 +757,150 @@ cmd_countdown() {
   fi
 }
 
-parse_common_flags() {
-  # Sets globals: USERNAME PASSWORD TOKEN ROOM_ID COMMAND_ID EXPECTED_SEQUENCE
-  # PAYLOAD SCHEMA_VERSION LAST_EVENT_ID CMD_TYPE CORRELATION_ID
-  # HTTP responses are always JSON; --json is not accepted here (countdown only).
+cmd_logout() {
+  if [ "$#" -gt 0 ]; then
+    usage
+  fi
+  session_remove
+  printf '%s\n' '{"status":"ok"}'
+}
+
+register_already_exists() {
+  # Returns 0 when register response indicates username already taken.
+  local code="$1" body="$2"
+  if [ "$code" = "200" ]; then
+    return 1
+  fi
+  printf '%s' "$body" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+text = raw.lower()
+try:
+    obj = json.loads(raw)
+except json.JSONDecodeError:
+    obj = {}
+msg = str(obj.get("message", "")).lower()
+code = str(obj.get("code", "")).lower()
+needles = ("username taken", "already exists", "already registered", "username_taken", "conflict")
+if any(n in msg or n in code or n in text for n in needles):
+    sys.exit(0)
+sys.exit(1)
+'
+}
+
+cmd_seed() {
+  local count="" prefix="$SEED_DEFAULT_PREFIX"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --count)
+        [ "$#" -ge 2 ] || usage
+        count="$2"
+        shift 2
+        ;;
+      --prefix)
+        [ "$#" -ge 2 ] || usage
+        prefix="$2"
+        shift 2
+        ;;
+      *)
+        usage
+        ;;
+    esac
+  done
+  [ -n "$count" ] || usage
+  require_positive_uint "count" "$count"
+  if [ "$count" -gt "$SEED_MAX_COUNT" ]; then
+    fail "count must be <= ${SEED_MAX_COUNT} (got: ${count})"
+  fi
+  case "$prefix" in
+    ''|*[!a-zA-Z0-9_-]*)
+      fail "prefix must be non-empty alphanumeric/[_-] (got: ${prefix})"
+      ;;
+  esac
+
+  local i username password line_status any_fail=0
+  local reg_code reg_body login_body token player_id session_id
+  for ((i = 1; i <= count; i++)); do
+    printf -v username '%s%04d' "$prefix" "$i"
+    password="${username}-pass"
+
+    http_exchange POST "/v1/auth/register" \
+      --header "Content-Type: application/json" \
+      --data "$(json_object string username "$username" string password "$password")"
+    reg_code="$HTTP_CODE"
+    reg_body="$HTTP_BODY"
+
+    if [ "$reg_code" -ge 200 ] && [ "$reg_code" -lt 300 ]; then
+      :
+    elif register_already_exists "$reg_code" "$reg_body"; then
+      :
+    else
+      any_fail=1
+      json_object \
+        string username "$username" \
+        string password "$password" \
+        string result "error" \
+        string error "register HTTP ${reg_code}"
+      printf '\n'
+      continue
+    fi
+
+    http_exchange POST "/v1/auth/login" \
+      --header "Content-Type: application/json" \
+      --data "$(json_object string username "$username" string password "$password")"
+    if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+      any_fail=1
+      json_object \
+        string username "$username" \
+        string password "$password" \
+        string result "error" \
+        string error "login HTTP ${HTTP_CODE}"
+      printf '\n'
+      continue
+    fi
+    login_body="$HTTP_BODY"
+    token="$(json_get "$login_body" token)"
+    player_id="$(json_get "$login_body" playerId)"
+    session_id="$(json_get "$login_body" sessionId)"
+    if [ -z "$token" ] || [ -z "$player_id" ] || [ -z "$session_id" ]; then
+      any_fail=1
+      json_object \
+        string username "$username" \
+        string password "$password" \
+        string result "error" \
+        string error "login response missing token/playerId/sessionId"
+      printf '\n'
+      continue
+    fi
+
+    if [ "$reg_code" -ge 200 ] && [ "$reg_code" -lt 300 ]; then
+      line_status="ok"
+    else
+      line_status="exists"
+    fi
+    json_object \
+      string username "$username" \
+      string password "$password" \
+      string token "$token" \
+      string playerId "$player_id" \
+      string sessionId "$session_id" \
+      string result "$line_status"
+    printf '\n'
+  done
+
+  if [ "$any_fail" -ne 0 ]; then
+    exit 1
+  fi
+}
+
+cmd_room_create() {
+  local max_seats=""
+  local payload_set=0
+  # Re-parse to capture --max while reusing common flags.
   USERNAME=""
   PASSWORD=""
-  TOKEN="${UNOARENA_TOKEN:-}"
+  TOKEN=""
+  TOKEN_FROM_FLAG=0
   ROOM_ID=""
   COMMAND_ID=""
   EXPECTED_SEQUENCE=""
@@ -541,6 +909,401 @@ parse_common_flags() {
   LAST_EVENT_ID=""
   CMD_TYPE=""
   CORRELATION_ID=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --max)
+        [ "$#" -ge 2 ] || usage
+        max_seats="$2"
+        shift 2
+        ;;
+      --user)
+        [ "$#" -ge 2 ] || usage
+        USERNAME="$2"
+        shift 2
+        ;;
+      --pass)
+        [ "$#" -ge 2 ] || usage
+        PASSWORD="$2"
+        shift 2
+        ;;
+      --token)
+        [ "$#" -ge 2 ] || usage
+        TOKEN="$2"
+        TOKEN_FROM_FLAG=1
+        shift 2
+        ;;
+      --room-id)
+        [ "$#" -ge 2 ] || usage
+        ROOM_ID="$2"
+        shift 2
+        ;;
+      --command-id)
+        [ "$#" -ge 2 ] || usage
+        COMMAND_ID="$2"
+        shift 2
+        ;;
+      --expected-sequence)
+        [ "$#" -ge 2 ] || usage
+        EXPECTED_SEQUENCE="$2"
+        shift 2
+        ;;
+      --payload)
+        [ "$#" -ge 2 ] || usage
+        PAYLOAD="$2"
+        payload_set=1
+        shift 2
+        ;;
+      --schema-version)
+        [ "$#" -ge 2 ] || usage
+        SCHEMA_VERSION="$2"
+        shift 2
+        ;;
+      --correlation-id)
+        [ "$#" -ge 2 ] || usage
+        CORRELATION_ID="$2"
+        shift 2
+        ;;
+      *)
+        usage
+        ;;
+    esac
+  done
+
+  resolve_token
+  [ -n "$TOKEN" ] || usage
+
+  if [ "$payload_set" -eq 1 ] && [ -n "$max_seats" ]; then
+    fail "room create: --max and --payload are mutually exclusive"
+  fi
+
+  local room_id=""
+  if [ "$payload_set" -eq 0 ]; then
+    room_id="$(generate_id room)"
+    if [ -n "$max_seats" ]; then
+      require_uint "max" "$max_seats"
+      if [ "$max_seats" -lt 2 ] || [ "$max_seats" -gt 10 ]; then
+        fail "max must be between 2 and 10 (got: ${max_seats})"
+      fi
+      PAYLOAD="$(json_object string roomId "$room_id" number maxSeats "$max_seats")"
+    else
+      PAYLOAD="$(json_object string roomId "$room_id")"
+    fi
+  else
+    room_id="$(printf '%s' "$PAYLOAD" | python3 -c '
+import json, sys
+try:
+    obj = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+v = obj.get("roomId") if isinstance(obj, dict) else None
+print(v if isinstance(v, str) else "")
+')"
+  fi
+
+  local resp status
+  resp="$(submit_command_envelope "$TOKEN" "CreateRoom" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE")"
+  printf '%s' "$resp"
+  if [ -n "$resp" ] && [ "${resp%"${resp##?}"}" != $'\n' ]; then
+    printf '\n'
+  fi
+  status="$(json_get "$resp" status)"
+  if [ "$status" = "accepted" ]; then
+    if [ -z "$room_id" ]; then
+      room_id="$(printf '%s' "$resp" | python3 -c '
+import json, sys
+try:
+    obj = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+payload = obj.get("payload") if isinstance(obj, dict) else None
+if isinstance(payload, dict):
+    v = payload.get("roomId")
+    if isinstance(v, str):
+        print(v)
+')"
+    fi
+    if [ -n "$room_id" ] && [ -e "$(session_path)" ]; then
+      session_update_room "$room_id"
+    fi
+  fi
+}
+
+cmd_room_list() {
+  local status="" limit="" cursor=""
+  CORRELATION_ID=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --status)
+        [ "$#" -ge 2 ] || usage
+        status="$2"
+        shift 2
+        ;;
+      --limit)
+        [ "$#" -ge 2 ] || usage
+        limit="$2"
+        shift 2
+        ;;
+      --cursor)
+        [ "$#" -ge 2 ] || usage
+        cursor="$2"
+        shift 2
+        ;;
+      --correlation-id)
+        [ "$#" -ge 2 ] || usage
+        CORRELATION_ID="$2"
+        shift 2
+        ;;
+      *)
+        usage
+        ;;
+    esac
+  done
+
+  if [ -n "$status" ]; then
+    case "$status" in
+      waiting|locked|in_progress) ;;
+      *) fail "status must be waiting|locked|in_progress (got: ${status})" ;;
+    esac
+  fi
+  if [ -n "$limit" ]; then
+    require_positive_uint "limit" "$limit"
+    if [ "$limit" -gt 100 ]; then
+      fail "limit must be <= 100 (got: ${limit})"
+    fi
+  fi
+
+  local qs="" sep="?"
+  if [ -n "$status" ]; then
+    qs="${qs}${sep}status=$(urlencode "$status")"
+    sep="&"
+  fi
+  if [ -n "$limit" ]; then
+    qs="${qs}${sep}limit=$(urlencode "$limit")"
+    sep="&"
+  fi
+  if [ -n "$cursor" ]; then
+    qs="${qs}${sep}cursor=$(urlencode "$cursor")"
+    sep="&"
+  fi
+  http_json GET "/v1/rooms${qs}"
+}
+
+cmd_room_join() {
+  local room_pos=""
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    room_pos="$1"
+    shift
+  fi
+  parse_common_flags "$@"
+  resolve_token
+  local room_id="${room_pos}"
+  [ -n "$room_id" ] || usage
+  [ -n "$TOKEN" ] || usage
+
+  local snap seq payload resp status
+  snap="$(http_json GET "/v1/spectator/rooms/$(urlencode "$room_id")/snapshot")"
+  seq="$(json_get "$snap" sequence)"
+  case "$seq" in
+    ''|*[!0-9]*)
+      fail "spectator snapshot missing authoritative sequence for room '${room_id}'"
+      ;;
+  esac
+  payload="$(json_object string roomId "$room_id")"
+  resp="$(submit_command_envelope "$TOKEN" "JoinRoom" "$COMMAND_ID" "$SCHEMA_VERSION" "$payload" "$room_id" "$seq")"
+  printf '%s' "$resp"
+  if [ -n "$resp" ] && [ "${resp%"${resp##?}"}" != $'\n' ]; then
+    printf '\n'
+  fi
+  status="$(json_get "$resp" status)"
+  if [ "$status" = "accepted" ] && [ -e "$(session_path)" ]; then
+    session_update_room "$room_id"
+  fi
+}
+
+cmd_room_leave() {
+  local room_pos=""
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    room_pos="$1"
+    shift
+  fi
+  parse_common_flags "$@"
+  resolve_token
+  [ -n "$TOKEN" ] || usage
+
+  local room_id="$room_pos"
+  if [ -z "$room_id" ]; then
+    if [ -e "$(session_path)" ]; then
+      room_id="$(session_room_or_empty || true)"
+    fi
+  fi
+  [ -n "$room_id" ] || fail "room leave requires <roomId> or a session current room"
+
+  local snap seq payload resp status
+  snap="$(http_json GET "/v1/rooms/$(urlencode "$room_id")/snapshot" \
+    --header "Authorization: Bearer ${TOKEN}")"
+  seq="$(json_get "$snap" sequenceNumber)"
+  case "$seq" in
+    ''|*[!0-9]*)
+      fail "player snapshot missing authoritative sequenceNumber for room '${room_id}'"
+      ;;
+  esac
+  payload="$(json_object string roomId "$room_id")"
+  resp="$(submit_command_envelope "$TOKEN" "LeaveRoom" "$COMMAND_ID" "$SCHEMA_VERSION" "$payload" "$room_id" "$seq")"
+  printf '%s' "$resp"
+  if [ -n "$resp" ] && [ "${resp%"${resp##?}"}" != $'\n' ]; then
+    printf '\n'
+  fi
+  status="$(json_get "$resp" status)"
+  if [ "$status" = "accepted" ] && [ -e "$(session_path)" ]; then
+    session_clear_room
+  fi
+}
+
+cmd_tournament_register() {
+  local tour_pos=""
+  local payload_set=0
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    tour_pos="$1"
+    shift
+  fi
+
+  USERNAME=""
+  PASSWORD=""
+  TOKEN=""
+  TOKEN_FROM_FLAG=0
+  ROOM_ID=""
+  COMMAND_ID=""
+  EXPECTED_SEQUENCE=""
+  PAYLOAD="{}"
+  SCHEMA_VERSION="1"
+  LAST_EVENT_ID=""
+  CMD_TYPE=""
+  CORRELATION_ID=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --token)
+        [ "$#" -ge 2 ] || usage
+        TOKEN="$2"
+        TOKEN_FROM_FLAG=1
+        shift 2
+        ;;
+      --command-id)
+        [ "$#" -ge 2 ] || usage
+        COMMAND_ID="$2"
+        shift 2
+        ;;
+      --expected-sequence)
+        [ "$#" -ge 2 ] || usage
+        EXPECTED_SEQUENCE="$2"
+        shift 2
+        ;;
+      --payload)
+        [ "$#" -ge 2 ] || usage
+        PAYLOAD="$2"
+        payload_set=1
+        shift 2
+        ;;
+      --schema-version)
+        [ "$#" -ge 2 ] || usage
+        SCHEMA_VERSION="$2"
+        shift 2
+        ;;
+      --correlation-id)
+        [ "$#" -ge 2 ] || usage
+        CORRELATION_ID="$2"
+        shift 2
+        ;;
+      *)
+        usage
+        ;;
+    esac
+  done
+
+  if [ -n "$tour_pos" ] && [ "$payload_set" -eq 1 ]; then
+    fail "tournament register: positional <id> and --payload are mutually exclusive"
+  fi
+  if [ -z "$tour_pos" ] && [ "$payload_set" -eq 0 ]; then
+    usage
+  fi
+
+  resolve_token
+  [ -n "$TOKEN" ] || usage
+
+  if [ -n "$tour_pos" ]; then
+    local player_id=""
+    if [ -e "$(session_path)" ]; then
+      player_id="$(session_player_id || true)"
+    fi
+    if [ -z "$player_id" ]; then
+      local who
+      who="$(http_json GET "/v1/auth/whoami" --header "Authorization: Bearer ${TOKEN}")"
+      player_id="$(json_get "$who" playerId)"
+    fi
+    [ -n "$player_id" ] || fail "unable to resolve playerId for tournament register"
+    PAYLOAD="$(json_object string tournamentId "$tour_pos" string playerId "$player_id")"
+  fi
+
+  submit_command_envelope "$TOKEN" "RegisterPlayer" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
+}
+
+cmd_tournament_status() {
+  local tour_id=""
+  if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+    tour_id="$1"
+    shift
+  fi
+  parse_common_flags "$@"
+  resolve_token
+  [ -n "$tour_id" ] || usage
+
+  local standings bracket
+  if [ -n "$TOKEN" ]; then
+    standings="$(http_json GET "/v1/tournaments/$(urlencode "$tour_id")/standings" \
+      --header "Authorization: Bearer ${TOKEN}")"
+    bracket="$(http_json GET "/v1/tournaments/$(urlencode "$tour_id")/bracket" \
+      --header "Authorization: Bearer ${TOKEN}")"
+  else
+    standings="$(http_json GET "/v1/tournaments/$(urlencode "$tour_id")/standings")"
+    bracket="$(http_json GET "/v1/tournaments/$(urlencode "$tour_id")/bracket")"
+  fi
+  python3 - "$tour_id" "$standings" "$bracket" <<'PY'
+import json, sys
+tid, standings_raw, bracket_raw = sys.argv[1:4]
+standings = json.loads(standings_raw)
+bracket = json.loads(bracket_raw)
+print(json.dumps({
+    "tournamentId": tid,
+    "standings": standings,
+    "bracket": bracket,
+}, separators=(",", ":")))
+PY
+  printf '\n'
+}
+
+parse_common_flags() {
+  # Sets globals: USERNAME PASSWORD TOKEN ROOM_ID COMMAND_ID EXPECTED_SEQUENCE
+  # PAYLOAD SCHEMA_VERSION LAST_EVENT_ID CMD_TYPE CORRELATION_ID TOKEN_FROM_FLAG
+  # HTTP responses are always JSON; --json is not accepted here (countdown only).
+  USERNAME=""
+  PASSWORD=""
+  TOKEN=""
+  TOKEN_FROM_FLAG=0
+  ROOM_ID=""
+  COMMAND_ID=""
+  EXPECTED_SEQUENCE=""
+  PAYLOAD="{}"
+  SCHEMA_VERSION="1"
+  LAST_EVENT_ID=""
+  CMD_TYPE=""
+  CORRELATION_ID=""
+  MAX_SEATS=""
+  STATUS_FILTER=""
+  LIMIT=""
+  CURSOR=""
+  COUNT=""
+  PREFIX=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -557,6 +1320,7 @@ parse_common_flags() {
       --token)
         [ "$#" -ge 2 ] || usage
         TOKEN="$2"
+        TOKEN_FROM_FLAG=1
         shift 2
         ;;
       --room-id)
@@ -599,6 +1363,36 @@ parse_common_flags() {
         CMD_TYPE="$2"
         shift 2
         ;;
+      --max)
+        [ "$#" -ge 2 ] || usage
+        MAX_SEATS="$2"
+        shift 2
+        ;;
+      --status)
+        [ "$#" -ge 2 ] || usage
+        STATUS_FILTER="$2"
+        shift 2
+        ;;
+      --limit)
+        [ "$#" -ge 2 ] || usage
+        LIMIT="$2"
+        shift 2
+        ;;
+      --cursor)
+        [ "$#" -ge 2 ] || usage
+        CURSOR="$2"
+        shift 2
+        ;;
+      --count)
+        [ "$#" -ge 2 ] || usage
+        COUNT="$2"
+        shift 2
+        ;;
+      --prefix)
+        [ "$#" -ge 2 ] || usage
+        PREFIX="$2"
+        shift 2
+        ;;
       *)
         usage
         ;;
@@ -625,11 +1419,17 @@ case "$command_name" in
     ;;
 esac
 
-# Countdown is local-only and does not require the gateway URL.
-if [ "$command_name" = "countdown" ]; then
-  cmd_countdown "$@"
-  exit 0
-fi
+# Local-only commands (no gateway URL).
+case "$command_name" in
+  countdown)
+    cmd_countdown "$@"
+    exit 0
+    ;;
+  logout)
+    cmd_logout "$@"
+    exit 0
+    ;;
+esac
 
 API_URL="${UNOARENA_API_URL:?UNOARENA_API_URL must be set}"
 BASE_URL="${API_URL%/}"
@@ -649,22 +1449,43 @@ case "$command_name" in
   login)
     parse_common_flags "$@"
     [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] || usage
-    http_json POST "/v1/auth/login" \
+    login_body="$(http_json POST "/v1/auth/login" \
       --header "Content-Type: application/json" \
-      --data "$(json_object string username "$USERNAME" string password "$PASSWORD")"
+      --data "$(json_object string username "$USERNAME" string password "$PASSWORD")")"
+    printf '%s' "$login_body"
+    if [ -n "$login_body" ] && [ "${login_body%"${login_body##?}"}" != $'\n' ]; then
+      printf '\n'
+    fi
+    login_token="$(json_get "$login_body" token)"
+    login_player="$(json_get "$login_body" playerId)"
+    login_session="$(json_get "$login_body" sessionId)"
+    if [ -n "$login_token" ] && [ -n "$login_player" ] && [ -n "$login_session" ]; then
+      session_write "$login_token" "$login_player" "$login_session" "$USERNAME" ""
+    fi
     ;;
   whoami)
     parse_common_flags "$@"
+    resolve_token
     [ -n "$TOKEN" ] || usage
     http_json GET "/v1/auth/whoami" \
       --header "Authorization: Bearer ${TOKEN}"
     ;;
+  seed)
+    cmd_seed "$@"
+    ;;
   room)
     case "$subcommand" in
       create)
-        parse_common_flags "$@"
-        [ -n "$TOKEN" ] || usage
-        submit_command_envelope "$TOKEN" "CreateRoom" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
+        cmd_room_create "$@"
+        ;;
+      list)
+        cmd_room_list "$@"
+        ;;
+      join)
+        cmd_room_join "$@"
+        ;;
+      leave)
+        cmd_room_leave "$@"
         ;;
       *)
         usage
@@ -673,29 +1494,50 @@ case "$command_name" in
     ;;
   command)
     parse_common_flags "$@"
+    resolve_token
     [ -n "$TOKEN" ] && [ -n "$CMD_TYPE" ] || usage
     submit_command_envelope "$TOKEN" "$CMD_TYPE" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "$ROOM_ID" "$EXPECTED_SEQUENCE"
     ;;
   tournament)
-    parse_common_flags "$@"
-    [ -n "$TOKEN" ] || usage
     case "$subcommand" in
       create)
+        parse_common_flags "$@"
+        resolve_token
+        [ -n "$TOKEN" ] || usage
         submit_command_envelope "$TOKEN" "CreateTournament" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
         ;;
       register)
-        submit_command_envelope "$TOKEN" "RegisterPlayer" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
+        cmd_tournament_register "$@"
         ;;
       close-registration)
+        parse_common_flags "$@"
+        resolve_token
+        [ -n "$TOKEN" ] || usage
         submit_command_envelope "$TOKEN" "CloseRegistration" "$COMMAND_ID" "$SCHEMA_VERSION" "$PAYLOAD" "" "$EXPECTED_SEQUENCE"
+        ;;
+      status)
+        cmd_tournament_status "$@"
         ;;
       *)
         usage
         ;;
     esac
     ;;
+  spectate)
+    room_pos=""
+    if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+      room_pos="$1"
+      shift
+    fi
+    parse_common_flags "$@"
+    resolve_token
+    [ -n "$room_pos" ] || usage
+    stream_sse "/v1/streams/spectator?roomId=$(urlencode "$room_pos")" \
+      "$TOKEN" "$LAST_EVENT_ID"
+    ;;
   stream)
     parse_common_flags "$@"
+    resolve_token
     case "$subcommand" in
       player)
         [ -n "$ROOM_ID" ] || usage

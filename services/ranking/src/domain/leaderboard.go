@@ -34,8 +34,11 @@ func LeaderboardFromSnapshots(snaps []PlayerRatingSnapshot, boardType RatingSour
 	return OrderLeaderboard(entries)
 }
 
+// MaxLeaderboardSnapshotEntries is the AsyncAPI bound for LeaderboardSnapshotPublished.entries.
+const MaxLeaderboardSnapshotEntries = 100
+
 // PublishLeaderboardSnapshot emits a LeaderboardSnapshotPublished fact for an ordered board.
-// Snapshot generation may repeat safely.
+// Snapshot generation may repeat safely. Entries are capped at the public top-100 bound.
 func PublishLeaderboardSnapshot(cmd PublishLeaderboardSnapshotCommand) CommandOutcome {
 	if !cmd.CommandID.Valid() || !cmd.SnapshotID.Valid() {
 		return rejectedOutcome(cmd.CommandID, Rejection{
@@ -50,6 +53,9 @@ func PublishLeaderboardSnapshot(cmd PublishLeaderboardSnapshotCommand) CommandOu
 		})
 	}
 	ordered := OrderLeaderboard(cmd.Entries)
+	if len(ordered) > MaxLeaderboardSnapshotEntries {
+		ordered = ordered[:MaxLeaderboardSnapshotEntries]
+	}
 	data := map[string]string{
 		"snapshotId":  string(cmd.SnapshotID),
 		"boardType":   string(cmd.BoardType),

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,33 +29,44 @@ var timerCommandAllowlist = map[string]struct{}{
 	app.CmdForfeitPlayer:        {},
 	app.CmdSkipDisconnectedTurn: {},
 }
+
 // Server wires HTTP handlers to the Room Gameplay application service.
 type Server struct {
-	svc                *app.Service
-	internalCredential string
-	timerCredential    string
-	serviceName        string
-	ready              bool
-	notReadyReason     string
-	durableReady       func(context.Context) error
+	svc                         *app.Service
+	internalCredential          string
+	timerCredential             string
+	spectatorRecoveryCredential string
+	analyticsBackfillCredential string
+	serviceName                 string
+	ready                       bool
+	notReadyReason              string
+	durableReady                func(context.Context) error
 }
 
 // NewServer constructs an injectable HTTP server.
 func NewServer(svc *app.Service, internalCredential, serviceName string) *Server {
-	return NewServerWithTimerCred(svc, internalCredential, "", serviceName)
+	return NewServerWithScopedCreds(svc, internalCredential, "", "", "", serviceName)
 }
 
 // NewServerWithTimerCred constructs a server with a dedicated timer-worker credential.
 func NewServerWithTimerCred(svc *app.Service, internalCredential, timerCredential, serviceName string) *Server {
+	return NewServerWithScopedCreds(svc, internalCredential, timerCredential, "", "", serviceName)
+}
+
+// NewServerWithScopedCreds constructs a server with dedicated timer, spectator-recovery,
+// and Analytics backfill credentials.
+func NewServerWithScopedCreds(svc *app.Service, internalCredential, timerCredential, spectatorRecoveryCredential, analyticsBackfillCredential, serviceName string) *Server {
 	if serviceName == "" {
 		serviceName = "room-gameplay"
 	}
 	return &Server{
-		svc:                svc,
-		internalCredential: internalCredential,
-		timerCredential:    timerCredential,
-		serviceName:        serviceName,
-		ready:              true,
+		svc:                         svc,
+		internalCredential:          internalCredential,
+		timerCredential:             timerCredential,
+		spectatorRecoveryCredential: spectatorRecoveryCredential,
+		analyticsBackfillCredential: analyticsBackfillCredential,
+		serviceName:                 serviceName,
+		ready:                       true,
 	}
 }
 
@@ -70,6 +82,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/ready", s.readyHandler)
 	mux.HandleFunc("/internal/v1/commands", s.internalCommandsHandler)
 	mux.HandleFunc("/internal/v1/rooms/provision", s.provisionHandler)
+	mux.HandleFunc("/internal/v1/rooms/analytics-backfill", s.analyticsBackfillHandler)
+	mux.HandleFunc("/internal/v1/rooms/public-list", s.publicListHandler)
 	mux.HandleFunc("/internal/v1/rooms/", s.internalRoomScopedHandler)
 	mux.HandleFunc("/v1/rooms/", s.roomScopedHandler)
 	mux.HandleFunc("/v1/rooms", s.createRoomHandler)
@@ -83,6 +97,17 @@ func (s *Server) authorizeInternal(r *http.Request) bool {
 func (s *Server) authorizeTimer(r *http.Request) bool {
 	// Dedicated timer credential only — never fall back to the generic service credential.
 	return credentialMatch(r.Header.Get(internalCredentialHeader), s.timerCredential)
+}
+
+func (s *Server) authorizeSpectatorRecovery(r *http.Request) bool {
+	// Dedicated spectator projection-rebuilder credential only — never fall back to
+	// the generic service credential or the timer credential.
+	return credentialMatch(r.Header.Get(internalCredentialHeader), s.spectatorRecoveryCredential)
+}
+
+func (s *Server) authorizeAnalyticsBackfill(r *http.Request) bool {
+	// Scoped Analytics pair credential only — never fall back to Gateway/generic/timer/spectator.
+	return credentialMatch(r.Header.Get(internalCredentialHeader), s.analyticsBackfillCredential)
 }
 
 func credentialMatch(got, want string) bool {
@@ -205,19 +230,79 @@ func (s *Server) internalRoomScopedHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] != "timer-commands" {
+	if len(parts) != 2 || parts[0] == "" {
 		_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "route not found", "", "")
 		return
 	}
-	if r.Method != http.MethodPost {
-		_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+	roomID := parts[0]
+	action := parts[1]
+	switch action {
+	case "timer-commands":
+		if r.Method != http.MethodPost {
+			_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+			return
+		}
+		if !s.authorizeTimer(r) {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid timer service credential", "", "")
+			return
+		}
+		s.dispatchCommand(w, r, roomID, true)
+	case "spectator-recovery-snapshot":
+		if r.Method != http.MethodGet {
+			_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+			return
+		}
+		if !s.authorizeSpectatorRecovery(r) {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid spectator recovery service credential", "", "")
+			return
+		}
+		s.spectatorRecoverySnapshotHandler(w, r, roomID)
+	default:
+		_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "route not found", "", "")
+	}
+}
+
+func (s *Server) spectatorRecoverySnapshotHandler(w http.ResponseWriter, r *http.Request, roomID string) {
+	q := r.URL.Query()
+	failedCheckpointRaw := strings.TrimSpace(q.Get("failedCheckpoint"))
+	recoveryJobID := strings.TrimSpace(q.Get("recoveryJobId"))
+	schemaVersionRaw := strings.TrimSpace(q.Get("schemaVersion"))
+
+	if failedCheckpointRaw == "" || recoveryJobID == "" || schemaVersionRaw == "" {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "failedCheckpoint, recoveryJobId, and schemaVersion are required", "", "")
 		return
 	}
-	if !s.authorizeTimer(r) {
-		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid timer service credential", "", "")
+	failedCheckpoint, err := strconv.ParseInt(failedCheckpointRaw, 10, 64)
+	if err != nil || failedCheckpoint < 1 {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "failedCheckpoint must be an integer >= 1", "", "")
 		return
 	}
-	s.dispatchCommand(w, r, parts[0], true)
+	schemaVersion, err := strconv.Atoi(schemaVersionRaw)
+	if err != nil || schemaVersion != 1 {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "schemaVersion must be 1", "", "")
+		return
+	}
+
+	corr := correlation.FromHTTP(r.Header).WithDefaults()
+	if corr.CorrelationID != "" {
+		w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
+	}
+
+	snap, err := s.svc.SpectatorRecoverySnapshot(r.Context(), roomID)
+	if err != nil {
+		switch {
+		case errors.Is(err, app.ErrNotFound):
+			_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "room not found", corr.CorrelationID, "")
+		default:
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "spectator recovery snapshot failed", corr.CorrelationID, "")
+		}
+		return
+	}
+	snap["schemaVersion"] = schemaVersion
+	snap["roomId"] = roomID
+	snap["recoveryJobId"] = recoveryJobID
+	snap["failedCheckpoint"] = failedCheckpoint
+	_ = httpx.WriteJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) provisionHandler(w http.ResponseWriter, r *http.Request) {
@@ -274,6 +359,82 @@ func (s *Server) provisionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = httpx.WriteJSON(w, http.StatusOK, res.Result)
+}
+
+func (s *Server) analyticsBackfillHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+		return
+	}
+	if !s.requireReady(w) {
+		return
+	}
+	if !s.authorizeAnalyticsBackfill(r) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid analytics service credential", "", "")
+		return
+	}
+	corr := correlation.FromHTTP(r.Header).WithDefaults()
+	if corr.CorrelationID != "" {
+		w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
+	}
+	var req app.AnalyticsBackfillRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "invalid json", corr.CorrelationID, "")
+		return
+	}
+	resp, err := s.svc.AnalyticsBackfill(r.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, app.ErrAnalyticsBackfillBadRequest):
+			_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", err.Error(), corr.CorrelationID, "")
+		case errors.Is(err, app.ErrAnalyticsBackfillUnavailable):
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", "analytics backfill unavailable", corr.CorrelationID, "")
+		case errors.Is(err, app.ErrAnalyticsBackfillCorrupt):
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "corrupt_outbox", "stored envelope failed validation", corr.CorrelationID, "")
+		default:
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "analytics backfill failed", corr.CorrelationID, "")
+		}
+		return
+	}
+	_ = httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) publicListHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
+		return
+	}
+	if !s.requireReady(w) {
+		return
+	}
+	// Gateway↔Room scoped credential only (constant-time). Public list needs no player bearer.
+	if !s.authorizeInternal(r) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
+		return
+	}
+	corr := correlation.FromHTTP(r.Header).WithDefaults()
+	if corr.CorrelationID != "" {
+		w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
+	}
+	q := r.URL.Query()
+	parsed, err := app.ParsePublicListQuery(q.Get("status"), q.Get("cursor"), q.Get("limit"))
+	if err != nil {
+		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", err.Error(), corr.CorrelationID, "")
+		return
+	}
+	page, err := s.svc.PublicList(r.Context(), parsed)
+	if err != nil {
+		switch {
+		case errors.Is(err, app.ErrPublicListBadRequest), errors.Is(err, app.ErrInvalidPublicListCursor):
+			_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", err.Error(), corr.CorrelationID, "")
+		case errors.Is(err, app.ErrPublicListUnavailable), errors.Is(err, app.ErrPublicListCursorSecretRequired):
+			_ = httpx.WriteError(w, http.StatusServiceUnavailable, "not_ready", "public list unavailable", corr.CorrelationID, "")
+		default:
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "public list failed", corr.CorrelationID, "")
+		}
+		return
+	}
+	_ = httpx.WriteJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request, roomID string) {
@@ -521,7 +682,7 @@ func main() {
 		defer rw.Stop()
 	}
 
-	srv := NewServerWithTimerCred(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.ServiceName)
+	srv := NewServerWithScopedCreds(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.SpectatorRecoveryCredential, cfg.AnalyticsBackfillCredential, cfg.ServiceName)
 	srv.SetReady(wired.Ready, wired.NotReadyReason)
 	srv.durableReady = wired.DurableReady
 	log.Printf(`{"level":"info","service":"%s","event":"startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)

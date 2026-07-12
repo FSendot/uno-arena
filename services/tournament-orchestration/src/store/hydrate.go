@@ -28,13 +28,14 @@ func fmtNilPool() error { return errors.New("nil pool") }
 
 func (s *TournamentStore) loadTournamentQ(ctx context.Context, q dbQuerier, tid string) (*domain.Tournament, error) {
 	var (
-		phase    string
-		capacity int
-		rulesRaw []byte
+		phase      string
+		capacity   int
+		visibility string
+		rulesRaw   []byte
 	)
 	err := q.QueryRow(ctx, `
-		SELECT phase, capacity, rules FROM tournaments WHERE tournament_id = $1
-	`, tid).Scan(&phase, &capacity, &rulesRaw)
+		SELECT phase, capacity, visibility, rules FROM tournaments WHERE tournament_id = $1
+	`, tid).Scan(&phase, &capacity, &visibility, &rulesRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -43,6 +44,11 @@ func (s *TournamentStore) loadTournamentQ(ctx context.Context, q dbQuerier, tid 
 	}
 	var rules tournamentRules
 	_ = json.Unmarshal(rulesRaw, &rules)
+
+	vis, verr := domain.NormalizeTournamentVisibility(visibility)
+	if verr != nil {
+		vis = domain.TournamentVisibilityPublic
+	}
 
 	regs := map[domain.PlayerID]struct{}{}
 	order := make([]domain.PlayerID, 0)
@@ -290,6 +296,7 @@ func (s *TournamentStore) loadTournamentQ(ctx context.Context, q dbQuerier, tid 
 		Capacity:          capacity,
 		RetryBudget:       rules.RetryBudget,
 		BatchSize:         rules.BatchSize,
+		Visibility:        vis,
 		Registrations:     regs,
 		RegistrationOrder: order,
 		Rounds:            rounds,
@@ -303,32 +310,31 @@ func (s *TournamentStore) loadTournamentQ(ctx context.Context, q dbQuerier, tid 
 
 func loadSlotsQ(ctx context.Context, q dbQuerier, tid string, roundNumber int) ([]domain.BracketSlot, error) {
 	rows, err := q.Query(ctx, `
-		SELECT slot_id, status, seeded_player_ids
+		SELECT slot_id, slot_index, status, seeded_player_ids
 		FROM bracket_slots
 		WHERE tournament_id = $1 AND round_number = $2
-		ORDER BY slot_id
+		ORDER BY slot_index ASC
 	`, tid, roundNumber)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := make([]domain.BracketSlot, 0)
-	idx := 0
 	for rows.Next() {
 		var (
 			slotID, status string
+			slotIndex      int
 			seeded         []string
 		)
-		if err := rows.Scan(&slotID, &status, &seeded); err != nil {
+		if err := rows.Scan(&slotID, &slotIndex, &status, &seeded); err != nil {
 			return nil, err
 		}
 		out = append(out, domain.BracketSlot{
 			SlotID:        domain.SlotID(slotID),
-			Index:         idx,
+			Index:         slotIndex,
 			Status:        domain.SlotStatus(status),
 			SeededPlayers: textToPlayerIDs(seeded),
 		})
-		idx++
 	}
 	return out, rows.Err()
 }
@@ -356,12 +362,12 @@ func loadBatchesQ(ctx context.Context, q dbQuerier, tid string, roundNumber int,
 		}
 		indexes := make([]int, 0)
 		inRange := false
-		for i, s := range slots {
+		for _, s := range slots {
 			if string(s.SlotID) == from {
 				inRange = true
 			}
 			if inRange {
-				indexes = append(indexes, i)
+				indexes = append(indexes, s.Index)
 			}
 			if string(s.SlotID) == to {
 				break

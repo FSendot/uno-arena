@@ -135,6 +135,8 @@ type DrawCardCommand struct {
 	PlayerID         PlayerID
 	Cards            []game.Card
 	ExpectedSequence SequenceNumber
+	DrawPileSize     int
+	HasDrawPileSize  bool
 }
 
 type ChooseColorCommand struct {
@@ -158,6 +160,8 @@ type ReportMissingUnoCommand struct {
 	Cards            []game.Card
 	ExpectedSequence SequenceNumber
 	NowUTC           time.Time
+	DrawPileSize     int
+	HasDrawPileSize  bool
 }
 
 type StartNextGameCommand struct {

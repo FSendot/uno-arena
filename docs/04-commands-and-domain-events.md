@@ -40,19 +40,25 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | `CreateTournament` | Organizer | `TournamentCreated` | Organizer defines tournament rules and capacity | Duplicate requests collapse by request key |
 | `RegisterPlayer` | Player or organizer | `PlayerRegisteredInTournament` | Validated through Identity and Session | Idempotent by `(tournamentId, playerId)` |
 | `CloseRegistration` | System or organizer | `TournamentRegistrationClosed` | Triggered at capacity or deadline | Duplicate close ignored |
-| `SeedRound` | Tournament policy | `TournamentRoundSeeded` | Triggered after registration closes | Idempotent by `(tournamentId, roundNumber)` |
+| `SeedRound` | Tournament policy | `TournamentRoundSeeded` | Triggered after registration closes | Idempotent by `(tournamentId, roundNumber)`. Durable path schedules ROUND-1 only (worker finalizes); `TournamentRoundSeeded` is internal-only (no Kafka channel). |
 | `ProvisionRoundMatches` | Tournament policy | `TournamentMatchAssigned` | Creates room assignments for bracket slots | Duplicate assignments ignored by slot identity |
 | `RecordMatchResult` | Tournament policy | `TournamentMatchResultRecorded`, `PlayersAdvanced` | Consumes authoritative `MatchCompleted` containing ranked match facts such as match wins, card points, completion time, and forfeit/abandonment markers; Tournament Orchestration calculates the advancing players | Idempotent by `(roomId, completionVersion)` |
 | `CompleteRound` | Tournament policy | `TournamentRoundCompleted` | Triggered when all assigned matches are terminal | Idempotent by round status |
-| `CompleteTournament` | Tournament policy | `TournamentCompleted` | Triggered when the final room has an authoritative ranked result | Idempotent by tournament status |
+| `CompleteTournament` | Tournament policy | `TournamentCompleted` | Triggered when the final room has an authoritative ranked result; publishes every final-room player in ordered `finalStandings`, whose first entry is the champion | Idempotent by tournament status |
 
 ## Ranking Commands
 
 | Command | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
 | `ApplyCasualEloUpdate` | Ranking policy | `PlayerRatingUpdated` | Consumes authoritative completed non-abandoned casual `GameCompleted`; event payload includes `playerId`, `gameId`, `previousRating`, `newRating`, and placement | Idempotent by `(playerId, gameId)` |
-| `ApplyTournamentPlacementUpdate` | Ranking policy | `TournamentPlacementRatingUpdated` | Consumes tournament match placement and final standing facts, not casual `GameCompleted` | Idempotent by `(playerId, tournamentId, placementEventId)` |
-| `PublishLeaderboardSnapshot` | Ranking policy | `LeaderboardSnapshotPublished` | Triggered after rating updates or on schedule | Snapshot generation may repeat safely |
+| `ApplyTournamentPlacementUpdate` | Ranking policy | `TournamentPlacementRatingUpdated` | Consumes advancement depth from `PlayersAdvanced` and ordered final placement from `TournamentCompleted`; Ranking awards a non-negative achievement increment and never accepts a delta from Tournament Orchestration | Idempotent by `(playerId, tournamentId, placementEventId)`, where `placementEventId` is the upstream event `eventId` |
+| `PublishLeaderboardSnapshot` | Ranking snapshot worker | `LeaderboardSnapshotPublished` | A score-changing transaction marks the board dirty; worker coalesces and publishes at most once per board every 15 seconds | Publishes only the ordered public top 100; zero-delta facts do not dirty the board; generation may repeat safely |
+
+Tournament achievement awards are fixed by Ranking policy: each accepted advancement is worth 10 points, while final places first through tenth are worth `100, 70, 50, 35, 25, 20, 15, 10, 5, 0` points. A smaller final uses the prefix of that table.
+
+The tenth-place zero-point result remains an accepted, idempotent history fact and emits a zero-delta `PlayerRatingUpdated`; it does not trigger a leaderboard snapshot because the score is unchanged.
+
+Each tournament-performance event is one Ranking transaction across all affected players. Ratings, history, per-player idempotency, the stable event outcome, and all rating-update outbox rows commit together; any invalid or conflicting participant prevents every update from that event.
 
 ## Identity and Session Commands
 

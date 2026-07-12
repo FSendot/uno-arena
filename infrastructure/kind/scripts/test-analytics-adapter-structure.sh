@@ -21,8 +21,9 @@ PF="${SCRIPT_DIR}/port-forward-analytics.sh"
 STRUCT="${SCRIPT_DIR}/test-analytics-adapter-structure.sh"
 INTEG="${SCRIPT_DIR}/test-analytics-integration.sh"
 INTEG_STRUCT="${SCRIPT_DIR}/test-analytics-integration-structure.sh"
+KAFKA_STRUCT="${SCRIPT_DIR}/test-analytics-kafka-consumer-structure.sh"
 
-for f in "${DEPLOY}" "${LIVE}" "${PF}" "${STRUCT}" "${INTEG}" "${INTEG_STRUCT}"; do
+for f in "${DEPLOY}" "${LIVE}" "${PF}" "${STRUCT}" "${INTEG}" "${INTEG_STRUCT}" "${KAFKA_STRUCT}"; do
   [[ -f "${f}" ]] || { echo "FAIL: missing ${f}" >&2; fail=1; }
 done
 
@@ -46,9 +47,21 @@ CHART="${REPO_ROOT}/services/analytics/helm/analytics"
 [[ -f "${CHART}/helm-test.sh" ]] || { echo "FAIL: missing helm-test.sh" >&2; fail=1; }
 [[ -f "${CHART}/templates/_helpers.tpl" ]] || { echo "FAIL: missing _helpers.tpl" >&2; fail=1; }
 
+KIND_VALUES="${CHART}/values.kind.yaml"
+check "${KIND_VALUES}" "KAFKA_BROKERS"
+check "${KIND_VALUES}" "kafka.uno-arena.svc.cluster.local:9092"
+check "${KIND_VALUES}" "KAFKA_CONSUMER_GROUP"
+check "${KIND_VALUES}" "KAFKA_TOPICS"
+if grep -qiE 'kafka.*(pending|intentionally omitted)|pending.*kafka' "${KIND_VALUES}"; then
+  echo "FAIL: values.kind.yaml must not say Kafka pending/omitted" >&2
+  fail=1
+fi
+
 SECRETS="${MANIFESTS_DIR}/01-local-secrets.yaml"
 check "${SECRETS}" "analytics-runtime-user"
 check "${SECRETS}" "analytics-ops-credential"
+
+"${KAFKA_STRUCT}" || fail=1
 
 [[ "${fail}" -eq 0 ]] || exit 1
 echo "ok analytics-adapter-structure"
