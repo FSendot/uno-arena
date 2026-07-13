@@ -265,6 +265,19 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 		result, err = s.tournament.SubmitCommand(r.Context(), dispatch)
 	}
 	if err != nil {
+		if he, ok := err.(*httpStatusError); ok {
+			if he.retryAfter != "" {
+				w.Header().Set("Retry-After", he.retryAfter)
+			}
+			switch he.status {
+			case http.StatusServiceUnavailable, http.StatusConflict:
+				s.writeErr(w, r, http.StatusServiceUnavailable, "room_starting", "room runtime is not ready", cmd.CommandID)
+				return
+			case http.StatusTooManyRequests:
+				s.writeErr(w, r, http.StatusTooManyRequests, "room_busy", "room mutation queue is full", cmd.CommandID)
+				return
+			}
+		}
 		s.writeErr(w, r, http.StatusBadGateway, "upstream_error", "command dispatch failed", cmd.CommandID)
 		return
 	}

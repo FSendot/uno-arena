@@ -24,6 +24,7 @@ It is intentionally traceable rather than expansive. The goal is to show how the
 - Kafka carries bounded-context-specific event streams, not a single undifferentiated bus.
 - Postgres-backed contexts publish Kafka integration events through transactional outboxes captured from WAL by Debezium; application request paths do not poll or synchronously publish those events.
 - Each bounded context owns one physical authoritative database; native table partitioning and indexes may organize high-volume data without crossing that context boundary.
+- Each active room executes in its own lifecycle-bound Kubernetes state-machine pod.
 - Spectator-safe data is derived, filtered, and privacy-aware by design.
 - Spectators may connect while a room is `waiting`, `locked`, or `in_progress`; admission is denied in `completed`/`cancelled`, and terminal room/match state closes existing spectator streams.
 - Ad-hoc host leave before lock/start reassigns to the lowest occupied seat or cancels immediately if empty; after lock/start the host label has no gameplay authority.
@@ -47,6 +48,7 @@ It is intentionally traceable rather than expansive. The goal is to show how the
 | Game Integrity is a separate BC/service; KurrentDB 26.0.3 LTS is authoritative append-only per room/game; internal-only audit/replay API | `02-bounded-context-architecture.md`, `04-persistence-by-context.md`, `03-communication-patterns.md`, `docs/adr/0035-kurrentdb-26-lts-with-native-arm64-local-image.md` |
 | Replay-sensitive Game Integrity payloads use per-game envelope encryption; storage administrators cannot read seeds without audited key-provider authorization | `02-bounded-context-architecture.md`, `04-persistence-by-context.md`, `06-cross-cutting-concerns.md`, `docs/adr/0024-envelope-encryption-for-game-integrity-payloads.md` |
 | Room Gameplay owns Uno rules and calls Game Integrity before broadcast | `02-bounded-context-architecture.md`, `07-sequence-diagrams.md` |
+| One dedicated Kubernetes state-machine pod executes each active room | `01-context-and-container-view.md`, `02-bounded-context-architecture.md`, `05-capacity-sketch.md`, `docs/adr/0040-dedicated-state-machine-pod-per-room.md` |
 | Room Gameplay commits Postgres snapshots plus integration/realtime outboxes; Debezium routes the realtime outbox to ordered Redis player feeds; timers remain durable in Postgres with Redis only as a scheduling index | `03-communication-patterns.md`, `04-persistence-by-context.md`, `05-capacity-sketch.md`, `docs/adr/0015-redis-streams-for-realtime-sse-delivery.md` |
 | Existing Room mutations serialize with `SELECT ... FOR UPDATE` through Game Integrity confirmation and the local Postgres commit | `03-communication-patterns.md`, `04-persistence-by-context.md`, `07-sequence-diagrams.md`, `docs/adr/0019-room-commands-use-pessimistic-row-locking.md` |
 | Room timer workers claim partitioned Redis sorted-set entries with visibility leases and revalidate authoritative Postgres deadlines before mutation | `03-communication-patterns.md`, `04-persistence-by-context.md`, `07-sequence-diagrams.md`, `docs/adr/0020-redis-sorted-sets-for-room-timer-scheduling.md` |

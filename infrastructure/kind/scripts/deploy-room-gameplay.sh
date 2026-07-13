@@ -26,4 +26,6 @@ helm upgrade --install "${RELEASE}" "${CHART}" \
 
 echo "waiting for deployment/${RELEASE}"
 kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/${RELEASE}" --timeout="${TIMEOUT}"
+kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/${RELEASE}-runtime-controller" --timeout="${TIMEOUT}"
+kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/${RELEASE}-pgbouncer" --timeout="${TIMEOUT}"
 echo "ok kind-deploy-room-gameplay release=${RELEASE}"

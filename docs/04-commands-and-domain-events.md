@@ -72,6 +72,8 @@ Each tournament-performance event is one Ranking transaction across all affected
 | `LoginPlayer` | Player | `SessionInvalidated`, `PlayerLoggedIn` | A successful new login invalidates the previous active session before the new session becomes active | Idempotent by login request key |
 | `InvalidateSession` | Identity and Session | `SessionInvalidated` | Triggered by new login, explicit logout, expiry, or takeover response | Idempotent by `sessionId` |
 
+Public `POST /v1/auth/logout` invalidates the current UnoArena session by bearer-token hash through Identity's existing `InvalidateSession` path. Active sessions commit `SessionInvalidated(reason=logout)` through the existing outbox; already-invalid, expired, or unknown tokens return idempotent success without revealing token existence. Logout does not retain or revoke raw external-provider tokens and does not perform global IdP sign-out.
+
 ## Disconnection Commands
 
 | Command | Issuer | Primary Event(s) | Causality | Idempotency |

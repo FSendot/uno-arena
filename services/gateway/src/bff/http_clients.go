@@ -76,6 +76,12 @@ func (c *HTTPIdentityClient) Login(ctx context.Context, username, password strin
 	return out, nil
 }
 
+// Logout forwards only the opaque UnoArena bearer to Identity's internal
+// logout route. doJSON adds the Gateway-to-Identity service credential.
+func (c *HTTPIdentityClient) Logout(ctx context.Context, token string, corr correlation.Headers) error {
+	return c.doJSON(ctx, http.MethodPost, "/internal/v1/sessions/logout", token, corr, nil, nil)
+}
+
 func (c *HTTPIdentityClient) Whoami(ctx context.Context, token string, corr correlation.Headers) (Principal, error) {
 	return c.ValidateSession(ctx, token, corr)
 }
@@ -358,7 +364,7 @@ func submitCommandHTTP(ctx context.Context, cfg HTTPClientConfig, path string, r
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, MaxRequestBodyBytes))
 	if resp.StatusCode >= 400 {
-		return envelope.Result{}, &httpStatusError{status: resp.StatusCode, body: string(raw)}
+		return envelope.Result{}, &httpStatusError{status: resp.StatusCode, body: string(raw), retryAfter: resp.Header.Get("Retry-After")}
 	}
 	var result envelope.Result
 	if err := json.Unmarshal(raw, &result); err != nil {
@@ -542,8 +548,9 @@ func (g *HTTPSpectatorGate) Snapshot(ctx context.Context, req SpectatorAdmitRequ
 }
 
 type httpStatusError struct {
-	status int
-	body   string
+	status     int
+	body       string
+	retryAfter string
 }
 
 func (e *httpStatusError) Error() string {
@@ -571,6 +578,9 @@ func (ClosedIdentity) Register(context.Context, string, string, correlation.Head
 }
 func (ClosedIdentity) Login(context.Context, string, string, correlation.Headers) (LoginResult, error) {
 	return LoginResult{}, fmt.Errorf("identity client not configured")
+}
+func (ClosedIdentity) Logout(context.Context, string, correlation.Headers) error {
+	return fmt.Errorf("identity client not configured")
 }
 func (ClosedIdentity) Whoami(context.Context, string, correlation.Headers) (Principal, error) {
 	return Principal{}, fmt.Errorf("identity client not configured")

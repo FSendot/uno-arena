@@ -194,6 +194,38 @@ func TestRevokeRejectsValidation(t *testing.T) {
 	}
 }
 
+func TestLogoutByTokenInvalidatesOnceAndIsIdempotent(t *testing.T) {
+	svc, _, sessions, _, _, transport := newTestService(t)
+	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	login, err := svc.Login(context.Background(), "alice", "secret")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	transport.Reset()
+
+	if err := svc.LogoutByToken(context.Background(), login.Token); err != nil {
+		t.Fatalf("active logout: %v", err)
+	}
+	if _, err := svc.ValidateToken(context.Background(), login.Token); !errors.Is(err, domain.ErrSessionInvalid) {
+		t.Fatalf("copied token must be invalid after logout, got %v", err)
+	}
+	if err := svc.LogoutByToken(context.Background(), login.Token); err != nil {
+		t.Fatalf("repeat logout: %v", err)
+	}
+	if err := svc.LogoutByToken(context.Background(), "unknown-token"); err != nil {
+		t.Fatalf("unknown logout must be idempotent: %v", err)
+	}
+
+	if got := len(transport.Delivered()); got != 1 {
+		t.Fatalf("logout must emit one invalidation event, got %d", got)
+	}
+	if got := sessions.OutboxLen(); got != 1 {
+		t.Fatalf("logout must write one outbox entry, got %d", got)
+	}
+}
+
 func TestValidateRejectsExpiredSession(t *testing.T) {
 	svc, _, _, clock, _, _ := newTestService(t)
 	if _, err := svc.Register(context.Background(), "alice", "secret"); err != nil {

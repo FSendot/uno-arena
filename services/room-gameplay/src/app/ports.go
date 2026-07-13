@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"unoarena/services/room-gameplay/domain"
@@ -77,6 +78,17 @@ type RoomCommandStore interface {
 	// CancelReconciliationIntent marks an intent cancelled after a definitive pre-write append failure.
 	CancelReconciliationIntent(ctx context.Context, commandID string) error
 }
+
+// RuntimeGenerationStore is implemented only by the durable Room store. A
+// state-machine pod supplies its pinned generation, so the aggregate lock and
+// generation fence are acquired in the same transaction before any GI append.
+type RuntimeGenerationStore interface {
+	BeginExistingGeneration(ctx context.Context, roomID domain.RoomID, generation int64) (SessionUnitOfWork, error)
+}
+
+// ErrRuntimeGenerationStale means this pod no longer owns the Room generation.
+// Callers must not retry the mutation against the same pod.
+var ErrRuntimeGenerationStale = errors.New("room runtime generation is stale")
 
 // SessionUnitOfWork holds a READ COMMITTED transaction with rooms FOR UPDATE
 // (or create-path uniqueness) across domain apply + Game Integrity append + commit.

@@ -83,6 +83,9 @@ type CommandInput struct {
 	ExpectedSequenceNumber *int64
 	CorrelationID          string
 	AsSystem               bool
+	// RuntimeGeneration is non-zero only for a dedicated state-machine pod.
+	// Capability mode deliberately remains process-local and leaves it unset.
+	RuntimeGeneration int64
 }
 
 // CommandResult is the application outcome (maps to envelope.Result).

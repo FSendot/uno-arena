@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +199,40 @@ func TestValidateSessionInternal(t *testing.T) {
 	_ = json.NewDecoder(valW.Body).Decode(&valResp)
 	if valResp["playerId"] != loginResp["playerId"] || valResp["sessionId"] != loginResp["sessionId"] {
 		t.Fatalf("validate response: %+v", valResp)
+	}
+}
+
+func TestInternalLogoutRevokesBearerWithoutExposingSession(t *testing.T) {
+	srv, _ := newTestServer(t)
+	mux := srv.routes()
+
+	regBody, _ := json.Marshal(map[string]string{"username": "logout-carol", "password": "pass"})
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/auth/register", bytes.NewReader(regBody)))
+	loginBody, _ := json.Marshal(map[string]string{"username": "logout-carol", "password": "pass"})
+	loginW := httptest.NewRecorder()
+	mux.ServeHTTP(loginW, httptest.NewRequest(http.MethodPost, "/v1/auth/login", bytes.NewReader(loginBody)))
+	var login map[string]string
+	_ = json.NewDecoder(loginW.Body).Decode(&login)
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/internal/v1/sessions/logout", nil)
+	logoutReq.Header.Set("Authorization", "Bearer "+login["token"])
+	logoutReq.Header.Set(internalCredentialHeader, "test-internal-credential")
+	logoutReq.Header.Set("X-Correlation-Id", "corr-logout")
+	logoutW := httptest.NewRecorder()
+	mux.ServeHTTP(logoutW, logoutReq)
+	if logoutW.Code != http.StatusOK {
+		t.Fatalf("logout: expected 200, got %d body=%s", logoutW.Code, logoutW.Body.String())
+	}
+	if strings.Contains(logoutW.Body.String(), login["token"]) || strings.Contains(logoutW.Body.String(), login["sessionId"]) {
+		t.Fatalf("logout response exposed session material: %s", logoutW.Body.String())
+	}
+
+	whoReq := httptest.NewRequest(http.MethodGet, "/v1/auth/whoami", nil)
+	whoReq.Header.Set("Authorization", "Bearer "+login["token"])
+	whoW := httptest.NewRecorder()
+	mux.ServeHTTP(whoW, whoReq)
+	if whoW.Code != http.StatusUnauthorized {
+		t.Fatalf("copied token must fail after logout, got %d body=%s", whoW.Code, whoW.Body.String())
 	}
 }
 

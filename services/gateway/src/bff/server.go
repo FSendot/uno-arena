@@ -166,6 +166,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("/v1/auth/register", s.handleRegister)
 	mux.HandleFunc("/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("/v1/auth/whoami", s.handleWhoami)
 
 	mux.HandleFunc("/v1/commands", s.handleCommands)

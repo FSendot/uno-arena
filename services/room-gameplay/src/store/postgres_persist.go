@@ -122,6 +122,13 @@ func persistSessionTx(ctx context.Context, tx pgx.Tx, sess *domain.Session, req 
 		}
 	}
 
+	// The runtime assignment is part of the Room aggregate's durable lifecycle:
+	// creation requests a pod, while a committed terminal Room requests teardown.
+	// This happens before dependent outbox writes and before transaction commit.
+	if err := ensureRuntimeAssignmentTx(ctx, tx, roomID, room.Status().IsTerminal()); err != nil {
+		return err
+	}
+
 	if _, err := tx.Exec(ctx, `DELETE FROM room_roster WHERE room_id = $1`, roomID); err != nil {
 		return err
 	}

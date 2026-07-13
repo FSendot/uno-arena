@@ -232,6 +232,36 @@ func (s *Service) RevokeSession(ctx context.Context, id SessionID, reason string
 	return nil
 }
 
+// LogoutByToken revokes the UnoArena session identified by bearer token. It is
+// deliberately idempotent: unknown, expired, and already-inactive tokens do
+// not disclose session existence and do not enqueue another invalidation.
+func (s *Service) LogoutByToken(ctx context.Context, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrInvalidInput
+	}
+	sess, ok, err := s.sessions.FindByTokenHash(ctx, HashToken(token))
+	if err != nil {
+		return MapRepoError(err)
+	}
+	if !ok || sess.Status != SessionStatusActive {
+		return nil
+	}
+	now := s.clock.Now()
+	if err := sess.IsActiveAt(now); err != nil {
+		// Expired bearers are a successful, non-revealing logout outcome. The
+		// normal validation path owns expiry invalidation and its outbox fact.
+		return nil
+	}
+	if err := s.invalidateWithOutbox(ctx, sess, ReasonLogout, now); err != nil {
+		return MapRepoError(err)
+	}
+	if s.transport != nil {
+		_, _ = s.DrainOutbox(ctx, s.drainLimit)
+	}
+	return nil
+}
+
 func (s *Service) ValidateToken(ctx context.Context, token string) (SessionPrincipal, error) {
 	if token == "" {
 		return SessionPrincipal{}, ErrSessionInvalid

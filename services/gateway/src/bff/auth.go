@@ -88,6 +88,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
+		return
+	}
+	if !s.allowEdge(w, r) {
+		return
+	}
+	token, ok := bearerToken(r)
+	if !ok {
+		s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "missing bearer token", "")
+		return
+	}
+	if err := s.identity.Logout(r.Context(), token, s.correlation(r)); err != nil {
+		s.writeErr(w, r, http.StatusBadGateway, "upstream_error", "logout unavailable", "")
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")

@@ -12,6 +12,10 @@ import (
 	"unoarena/shared/envelope"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
 func TestHTTPIdentityClient_ValidateSession(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/v1/sessions/validate", func(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +48,33 @@ func TestHTTPIdentityClient_ValidateSession(t *testing.T) {
 	}
 	if p.PlayerID != "p1" || p.SessionID != "s1" {
 		t.Fatalf("%+v", p)
+	}
+}
+
+func TestHTTPIdentityClient_LogoutForwardsBearerCredentialAndCorrelation(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/sessions/logout" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer session-token" {
+			t.Fatalf("bearer=%q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("X-Service-Credential") != "identity-credential" {
+			t.Fatalf("credential=%q", r.Header.Get("X-Service-Credential"))
+		}
+		if r.Header.Get(correlation.HeaderCorrelationID) != "corr-logout" {
+			t.Fatalf("correlation=%q", r.Header.Get(correlation.HeaderCorrelationID))
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	})
+
+	client := bff.NewHTTPIdentityClient(bff.HTTPClientConfig{
+		BaseURL:           "http://identity.test",
+		ServiceCredential: "identity-credential",
+		HTTPClient:        &http.Client{Transport: transport},
+	})
+	if err := client.Logout(context.Background(), "session-token", correlation.Headers{CorrelationID: "corr-logout"}); err != nil {
+		t.Fatalf("logout: %v", err)
 	}
 }
 

@@ -82,6 +82,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/whoami", s.whoamiHandler)
 
 	mux.HandleFunc("/internal/v1/sessions/validate", s.validateSessionHandler)
+	mux.HandleFunc("/internal/v1/sessions/logout", s.logoutSessionHandler)
 	mux.HandleFunc("/internal/v1/sessions/", s.invalidateSessionHandler)
 	return mux
 }
@@ -385,6 +386,38 @@ func (s *Server) validateSessionHandler(w http.ResponseWriter, r *http.Request) 
 		"roles":     principal.Roles,
 		"expiresAt": principal.ExpiresAt.UTC().Format(time.RFC3339),
 	})
+	logRequest(r, r.URL.Path)
+}
+
+// logoutSessionHandler is the Gateway-only session logout seam. It accepts the
+// opaque UnoArena bearer solely to identify its hashed session; provider tokens
+// and principal claims are never returned.
+func (s *Server) logoutSessionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	if !s.authorizeInternal(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
+		return
+	}
+	if !s.requireService(w, r) {
+		return
+	}
+	token, ok := bearerToken(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "missing session token")
+		return
+	}
+	if err := s.svc.LogoutByToken(r.Context(), token); err != nil {
+		status, code, msg := mapDomainHTTP(err)
+		if status == http.StatusInternalServerError {
+			msg = "logout failed"
+		}
+		writeError(w, r, status, code, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	logRequest(r, r.URL.Path)
 }
 

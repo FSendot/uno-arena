@@ -64,6 +64,8 @@ cleanup() {
     kubectl -n "${KIND_NAMESPACE}" delete pod "${POD}" --ignore-not-found --wait=false >/dev/null
   fi
   if [[ "${ROOM_CREATED}" -eq 1 ]]; then
+    runtime_pod="$(room_psql -Atc "SELECT pod_name FROM room_runtime_assignments WHERE room_id = '${ROOM_ID}'" 2>/dev/null || true)"
+    [[ -z "${runtime_pod}" ]] || kubectl -n "${KIND_NAMESPACE}" delete pod "${runtime_pod}" --ignore-not-found --wait=false >/dev/null
     # Outboxes/idempotency are intentionally not FK-owned; delete only this run's rows.
     room_psql <<SQL >/dev/null
 BEGIN;
@@ -159,6 +161,16 @@ create_response="$(curl -fsS -X POST "http://127.0.0.1:${ROOM_LOCAL_PORT}/v1/com
   || die "failed to create Room recovery fixture"
 [[ "$(jq -r '.status // empty' <<<"${create_response}")" == "accepted" ]] \
   || die "Room fixture rejected: ${create_response}"
+
+# Dedicated Room runtimes are admitted asynchronously. Do not publish the
+# rebuild request until the authoritative assignment is Ready and routable.
+deadline=$((SECONDS + 60))
+runtime_state=""
+until [[ "${runtime_state}" == "ready" ]]; do
+  (( SECONDS < deadline )) || die "Room runtime did not become ready for recovery fixture"
+  runtime_state="$(room_psql -Atc "SELECT observed_state FROM room_runtime_assignments WHERE room_id = '${ROOM_ID}'" 2>/dev/null || true)"
+  [[ "${runtime_state}" == "ready" ]] || sleep 1
+done
 
 QUARANTINE_KEY="${REDIS_PREFIX}v1:room:{${ROOM_ID}}:kafka_quarantine"
 redis HSET "${QUARANTINE_KEY}" active 1 consumer_group spectator-view \

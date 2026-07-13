@@ -1,0 +1,110 @@
+{{- include "room-gameplay.validateTopologySecurity" . -}}
+{{- if and .Values.topology.enabled .Values.topology.pgbouncer.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-pgbouncer
+data:
+  pgbouncer.ini: |
+    [databases]
+    room_gameplay = host=postgres-room-gameplay port=5432 dbname=room_gameplay
+    [pgbouncer]
+    listen_addr = 0.0.0.0
+    listen_port = 6432
+    pool_mode = {{ .Values.topology.pgbouncer.poolMode }}
+    max_client_conn = {{ .Values.topology.pgbouncer.maxClientConn }}
+    default_pool_size = {{ .Values.topology.pgbouncer.defaultPoolSize }}
+    reserve_pool_size = {{ .Values.topology.pgbouncer.reservePoolSize }}
+    auth_type = {{ .Values.topology.pgbouncer.authType }}
+    auth_file = /etc/pgbouncer/userlist.txt
+    {{- if .Values.topology.pgbouncer.tls.enabled }}
+    client_tls_sslmode = {{ .Values.topology.pgbouncer.tls.clientMode }}
+    client_tls_ca_file = /etc/pgbouncer/tls/ca.crt
+    client_tls_cert_file = /etc/pgbouncer/tls/tls.crt
+    client_tls_key_file = /etc/pgbouncer/tls/tls.key
+    server_tls_sslmode = {{ .Values.topology.pgbouncer.tls.serverMode }}
+    server_tls_ca_file = /etc/pgbouncer/tls/ca.crt
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pgbouncer
+  labels:
+    app: {{ .Release.Name }}-pgbouncer
+spec:
+  replicas: {{ .Values.topology.pgbouncer.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-pgbouncer
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-pgbouncer
+    spec:
+      containers:
+        - name: pgbouncer
+          image: {{ .Values.topology.pgbouncer.image | quote }}
+          ports:
+            - containerPort: 6432
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pgbouncer
+              readOnly: true
+            {{- if .Values.topology.pgbouncer.tls.enabled }}
+            - name: tls
+              mountPath: /etc/pgbouncer/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap:
+                  name: {{ .Release.Name }}-pgbouncer
+                  items:
+                    - key: pgbouncer.ini
+                      path: pgbouncer.ini
+              - secret:
+                  name: {{ .Values.existingSecret }}
+                  items:
+                    - key: {{ .Values.secretEnv.ROOM_PGBOUNCER_USERLIST | quote }}
+                      path: userlist.txt
+        {{- if .Values.topology.pgbouncer.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.topology.pgbouncer.tls.secretName | quote }}
+            items:
+              - key: {{ .Values.topology.pgbouncer.tls.caKey | quote }}
+                path: ca.crt
+              - key: {{ .Values.topology.pgbouncer.tls.certKey | quote }}
+                path: tls.crt
+              - key: {{ .Values.topology.pgbouncer.tls.privateKeyKey | quote }}
+                path: tls.key
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-pgbouncer
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}-pgbouncer
+  ports:
+    - port: 6432
+      targetPort: 6432
+{{- if .Values.topology.pgbouncer.mesh.enforceStrictMTLS }}
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ .Release.Name }}-pgbouncer-strict-mtls
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-pgbouncer
+  mtls:
+    mode: STRICT
+{{- end }}
+{{- end }}

@@ -16,7 +16,7 @@ const (
 	ExpectedMigrationVersion = "001_init"
 	ExpectedBootstrapVersion = "001_init"
 	// ExpectedSchemaChecksum is SHA-256 of services/room-gameplay/migrations/001_init.sql bytes.
-	ExpectedSchemaChecksum = "f39b929e4c2a2d93e64cdac0db2345a676478a4466282894e4588f11685ae9a8"
+	ExpectedSchemaChecksum = "7f07c43f3836e148902d5cffdc2c830d0b0a5dd9909ee0f979153aa2d2b505b7"
 )
 
 // SchemaExpectation holds the exact version/checksum VerifySchema requires.

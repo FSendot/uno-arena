@@ -103,21 +103,31 @@ def canonical_card(card: Any) -> str:
 
 def playable(card: dict[str, Any], game: dict[str, Any], hand: list[dict[str, Any]] | None = None) -> bool:
     face = str(card.get("face", ""))
+    active = str(game.get("activeColor", "")).lower()
+    top = game.get("discardTop") or {}
+    top_face = str(top.get("face", ""))
+    wild_draw_four_legal = not any(
+        other is not card
+        and str(other.get("color", "")).lower() == active
+        and str(other.get("face", "")) not in ("wild", "wild_draw_four")
+        for other in (hand or [])
+    )
+
+    ordinary = (
+        str(card.get("color", "")).lower() == active
+        or (top_face not in ("wild", "wild_draw_four") and face == top_face)
+    )
+    if int(game.get("penaltyAmount", 0) or 0) > 0:
+        if face == "draw_two":
+            return ordinary
+        if face == "wild_draw_four":
+            return wild_draw_four_legal
+        return False
     if face == "wild":
         return True
     if face == "wild_draw_four":
-        active = str(game.get("activeColor", "")).lower()
-        return not any(
-            other is not card
-            and str(other.get("color", "")).lower() == active
-            and str(other.get("face", "")) not in ("wild", "wild_draw_four")
-            for other in (hand or [])
-        )
-    top = game.get("discardTop") or {}
-    return (
-        str(card.get("color", "")).lower() == str(game.get("activeColor", "")).lower()
-        or face == str(top.get("face", ""))
-    )
+        return wild_draw_four_legal
+    return ordinary
 
 
 @dataclass
@@ -553,12 +563,7 @@ def bot_action(gateway: Gateway, room: str, snapshot: dict[str, Any], player_id:
                rng: random.Random) -> tuple[str, dict[str, Any], str | None]:
     game = snapshot.get("game") or {}
     hand = snapshot.get("hand") or []
-    if int(game.get("penaltyAmount", 0) or 0) > 0:
-        choices = [card for card in hand if isinstance(card, dict)
-                   and str(card.get("face", "")) in ("draw_two", "wild_draw_four")
-                   and playable(card, game, hand)]
-    else:
-        choices = [card for card in hand if isinstance(card, dict) and playable(card, game, hand)]
+    choices = [card for card in hand if isinstance(card, dict) and playable(card, game, hand)]
     if choices:
         card = rng.choice(choices)
         color = rng.choice(list(COLORS.values())) if card.get("face") in ("wild", "wild_draw_four") else None

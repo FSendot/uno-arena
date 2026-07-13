@@ -24,6 +24,38 @@ env:
 timerWorker:
   enabled: false
 
+# Durable Kubernetes topology: the stable router and leaderless controller are
+# deployments; active Rooms are controller-created bare Pods only.
+topology:
+  enabled: true
+  controller:
+    replicaCount: 2
+    dbPoolMaxConns: 4
+    claimBatch: 16
+    concurrency: 4
+    readinessTimeoutSeconds: 60
+  runtime:
+    mutationQueueCapacity: 16
+  pgbouncer:
+    enabled: true
+    image: edoburu/pgbouncer:v1.24.1-p1@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e
+    replicaCount: 2
+    poolMode: transaction
+    maxClientConn: 10000
+    defaultPoolSize: 16
+    reservePoolSize: 4
+    authType: scram-sha-256
+    tls:
+      enabled: false
+      secretName: ""
+      caKey: ca.crt
+      certKey: tls.crt
+      privateKeyKey: tls.key
+      clientMode: require
+      serverMode: verify-full
+    mesh:
+      enforceStrictMTLS: false
+
 existingSecret: room-gameplay-secrets
 # Cross-chart equality (secret *values* must match; keys stay chart-local — no hardcoded secrets):
 #   room-service-credential          == gateway gateway-room-service-credential (Gateway→Room)
@@ -58,6 +90,21 @@ secretEnv:
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
   GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
   DATABASE_URL: database-url
+  ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
+  ROOM_PGBOUNCER_URL: room-pgbouncer-database-url
+  ROOM_PGBOUNCER_USERLIST: room-pgbouncer-userlist
+
+# The controller resolves only its own database credential. Runtime credentials
+# remain SecretKeyRef names until the controller writes the dedicated pod spec.
+controllerSecretEnv:
+  DATABASE_URL: database-url
+runtimeSecretEnv:
+  SERVICE_CREDENTIAL: room-service-credential
+  ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
+  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
+  ROOM_PGBOUNCER_URL: room-pgbouncer-database-url
 
 resources:
   requests:

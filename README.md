@@ -47,6 +47,8 @@ This repository contains the current UnoArena design package and the architectur
 - [ADR-0012. Monorepo Change Detection via rules:changes per Service Fragment](./docs/adr/0012-monorepo-change-detection-via-rules-changes.md)
 - [ADR-0013. Infrastructure Workers Bundled with Their Owning Service](./docs/adr/0013-workers-bundled-with-owning-service.md)
 - [ADR-0014. Async Contract Check: Room Gameplay to Spectator View](./docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md)
+- [ADR-0040. Dedicated State-Machine Pod per Room](./docs/adr/0040-dedicated-state-machine-pod-per-room.md)
+- [ADR-0041. PgBouncer for Room Pod Transaction Pooling](./docs/adr/0041-pgbouncer-for-room-pod-transaction-pooling.md)
 
 ## Change Tracking
 
@@ -65,6 +67,8 @@ This repository contains the current UnoArena design package and the architectur
 - Settled product decisions cover rejected-command operational/security audit records (no domain events or Game Integrity entries), spectator admission through `waiting`/`locked`/`in_progress` with terminal room/match closure on `RoomCompleted`/`RoomCancelled` (not individual `GameCompleted`), deterministic ad-hoc host reassignment before lock/start, and server-authoritative Uno `expiresAt` plus `openingSequence` with advisory client countdown.
 - BFF contracts include player/spectator snapshot routes and SSE `409 snapshot_required` when `Last-Event-ID` is unknown or evicted.
 - This implementation uses the repo-owned simple CLI under `client-checkpoint/` as the sole client and test interface. A graphical interface is deferred for later refactoring and does not change the BFF-only external boundary.
+- Each active room executes in one dedicated, lifecycle-bound Kubernetes state-machine pod as defined by ADR-0040. The pod is that room's exclusive command executor; Room Gameplay's context-owned Postgres remains authoritative and supports reconstruction after pod replacement.
+- Every Helm/Kubernetes durable path, including `kind`, uses the dedicated Room topology. The explicitly non-Kubernetes Compose/capability harness may use one process for fast command-semantics tests and is not Kubernetes-topology evidence.
 
 ## Client Checkpoint
 
@@ -95,7 +99,7 @@ flags and response examples.
 | `unoarena health` | `GET /health` |
 | `unoarena register --user U --pass P` | `POST /v1/auth/register` |
 | `unoarena login --user U --pass P` | `POST /v1/auth/login` |
-| `unoarena logout` | Local session-file removal |
+| `unoarena logout` | `POST /v1/auth/logout`; remove local session only after authoritative/idempotent success |
 | `unoarena whoami [--token T]` | `GET /v1/auth/whoami` |
 | `unoarena seed --count N [--prefix P]` | Register + login once per generated account; JSONL output |
 | `unoarena room list` | `GET /v1/rooms` |

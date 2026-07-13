@@ -4,6 +4,7 @@ metadata:
   name: {{ .Release.Name }}
   labels:
     app: {{ .Release.Name }}
+    unoarena.io/component: room-router
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -13,7 +14,9 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}
+        unoarena.io/component: room-router
     spec:
+      serviceAccountName: {{ .Release.Name }}-router
       containers:
         - name: {{ .Release.Name }}
           image: {{ include "room-gameplay.image" . | quote }}
@@ -21,6 +24,14 @@ spec:
           ports:
             - containerPort: 8080
           env:
+            - name: WORKER_ROLE
+              value: "room-router"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ROOM_DB_POOL_MAX_CONNS
+              value: "4"
             {{- range $name, $val := .Values.env }}
             - name: {{ $name }}
               value: {{ $val | quote }}

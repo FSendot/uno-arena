@@ -1,0 +1,69 @@
+{{- if .Values.topology.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-runtime-controller
+  labels:
+    app: {{ .Release.Name }}-runtime-controller
+    unoarena.io/component: room-runtime-controller
+spec:
+  replicas: {{ .Values.topology.controller.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-runtime-controller
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-runtime-controller
+        unoarena.io/component: room-runtime-controller
+    spec:
+      serviceAccountName: {{ .Release.Name }}-runtime-controller
+      containers:
+        - name: room-runtime-controller
+          image: {{ include "room-gameplay.image" . | quote }}
+          imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
+          env:
+            - name: WORKER_ROLE
+              value: "room-runtime-controller"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ROOM_RUNTIME_IMAGE
+              value: {{ include "room-gameplay.image" . | quote }}
+            - name: ROOM_DB_POOL_MAX_CONNS
+              value: {{ .Values.topology.controller.dbPoolMaxConns | quote }}
+            - name: ROOM_RUNTIME_CONTROLLER_CLAIM_BATCH
+              value: {{ .Values.topology.controller.claimBatch | quote }}
+            - name: ROOM_RUNTIME_CONTROLLER_CONCURRENCY
+              value: {{ .Values.topology.controller.concurrency | quote }}
+            - name: ROOM_RUNTIME_READINESS_TIMEOUT_SECONDS
+              value: {{ .Values.topology.controller.readinessTimeoutSeconds | quote }}
+            - name: ROOM_RUNTIME_SECRET_NAME
+              value: {{ .Values.existingSecret | quote }}
+            - name: ROOM_RUNTIME_SECRET_ENV_JSON
+              value: {{ .Values.runtimeSecretEnv | toJson | quote }}
+            - name: ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY
+              value: {{ .Values.topology.runtime.mutationQueueCapacity | quote }}
+            {{- range $name, $val := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- if .Values.existingSecret }}
+            {{- range $envName, $key := .Values.controllerSecretEnv }}
+            {{- if and $key (ne $key "") }}
+            - name: {{ $envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

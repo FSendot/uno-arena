@@ -763,6 +763,20 @@ cmd_logout() {
   if [ "$#" -gt 0 ]; then
     usage
   fi
+
+  local path json token
+  path="$(session_path)"
+  if [ ! -e "$path" ]; then
+    printf '%s\n' '{"status":"ok"}'
+    return
+  fi
+  json="$(session_read_json)" || return 1
+  token="$(json_get "$json" token)"
+  [ -n "$token" ] || fail "corrupt session file: missing or invalid 'token'"
+
+  API_URL="${UNOARENA_API_URL:?UNOARENA_API_URL must be set}"
+  BASE_URL="${API_URL%/}"
+  http_json POST "/v1/auth/logout" --header "Authorization: Bearer ${token}" >/dev/null
   session_remove
   printf '%s\n' '{"status":"ok"}'
 }

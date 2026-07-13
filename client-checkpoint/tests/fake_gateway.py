@@ -182,6 +182,7 @@ class GatewayState:
         self.requests: list[dict[str, Any]] = []
         self.lock = threading.Lock()
         self.fail_next_stream = False
+        self.fail_next_logout = False
         self.registered_usernames: set[str] = set()
         self.room_sequences: dict[str, int] = {}
 
@@ -280,6 +281,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"status": "ok"})
             return
 
+        if path == "/__fail-next-logout":
+            with STATE.lock:
+                STATE.fail_next_logout = True
+            self._json(200, {"status": "ok"})
+            return
+
         if path == "/v1/auth/register":
             data = json.loads(body or b"{}")
             username = data.get("username", "")
@@ -304,6 +311,19 @@ class Handler(BaseHTTPRequestHandler):
                     "token": f"tok-{username}",
                 },
             )
+            return
+        if path == "/v1/auth/logout":
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or not auth[len("Bearer ") :].strip():
+                self._json(401, {"code": "unauthorized", "message": "missing bearer token"})
+                return
+            with STATE.lock:
+                fail = STATE.fail_next_logout
+                STATE.fail_next_logout = False
+            if fail:
+                self._json(503, {"code": "upstream_error", "message": "logout unavailable"})
+                return
+            self._json(200, {"status": "ok"})
             return
         if path == "/v1/commands":
             data = json.loads(body or b"{}")

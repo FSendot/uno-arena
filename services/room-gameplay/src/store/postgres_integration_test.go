@@ -73,12 +73,44 @@ func resetPublic(t *testing.T, pool *pgxpool.Pool) {
 			realtime_outbox_events, integration_outbox_events,
 			processed_reconciliation_offsets, pending_integrity_reconciliations,
 			pending_rejection_audits, player_stream_highwater, tournament_provisions,
-			player_session_bindings, next_game_continuations, reconnect_deadlines, uno_deadlines,
-			command_idempotency, current_games, room_roster, rooms,
+		player_session_bindings, next_game_continuations, reconnect_deadlines, uno_deadlines,
+		command_idempotency, current_games, room_roster, room_runtime_assignments, rooms,
 			schema_migrations, schema_bootstrap_meta CASCADE
 	`)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIntegration_RuntimeAssignmentCreatedAndGenerationFenced(t *testing.T) {
+	pool := openPool(t)
+	sessions := store.NewSessionStore(pool)
+	room, outcome := domain.CreateRoom(domain.CreateRoomCommand{
+		CommandID: "runtime-create", RoomID: "runtime-room", HostID: "host", Visibility: domain.VisibilityPrivate, MaxSeats: 2,
+	})
+	if room == nil || !outcome.Accepted() {
+		t.Fatalf("create room outcome = %#v", outcome)
+	}
+	if err := sessions.Commit(context.Background(), app.CommitRequest{Session: domain.OpenSession(room)}); err != nil {
+		t.Fatal(err)
+	}
+	var generation int64
+	var desired string
+	if err := pool.QueryRow(context.Background(), `SELECT generation, desired_state FROM room_runtime_assignments WHERE room_id = 'runtime-room'`).Scan(&generation, &desired); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 || desired != "running" {
+		t.Fatalf("assignment = generation %d desired %s", generation, desired)
+	}
+	claimed, err := sessions.ClaimRuntimeAssignments(context.Background(), "integration-controller", 1, 5*time.Second)
+	if err != nil {
+		t.Fatalf("claim runtime assignment with null inet: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].RoomID != "runtime-room" || claimed[0].PodIP != "" {
+		t.Fatalf("claimed assignment = %#v", claimed)
+	}
+	if _, err := sessions.BeginExistingGeneration(context.Background(), "runtime-room", 2); !errors.Is(err, app.ErrRuntimeGenerationStale) {
+		t.Fatalf("stale generation error = %v", err)
 	}
 }
 

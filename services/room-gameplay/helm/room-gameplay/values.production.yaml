@@ -18,6 +18,33 @@ timerWorker:
 
 existingSecret: room-gameplay-secrets
 
+topology:
+  controller:
+    # At the one-second bounded reconcile cadence, 32 replicas x 64 claims
+    # provides admission headroom for a 100k-room burst inside one minute;
+    # API-server and scheduler load tests must validate the final budget.
+    replicaCount: 32
+    claimBatch: 64
+    concurrency: 16
+    readinessTimeoutSeconds: 90
+  pgbouncer:
+    # Initial production envelope: six PgBouncer processes admit up to 300k
+    # lazy runtime clients while bounding this database/user pair to at most
+    # 240 backend connections. Load tests and Postgres connection budgets own
+    # the final values; this is not a target-throughput claim.
+    replicaCount: 6
+    maxClientConn: 50000
+    defaultPoolSize: 32
+    reservePoolSize: 8
+    authType: scram-sha-256
+    tls:
+      enabled: true
+      secretName: room-gameplay-pgbouncer-tls
+      clientMode: require
+      serverMode: verify-full
+    mesh:
+      enforceStrictMTLS: true
+
 resources:
   requests:
     cpu: 100m

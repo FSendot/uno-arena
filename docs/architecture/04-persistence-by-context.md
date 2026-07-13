@@ -62,7 +62,13 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers t
 **Persistence rules**
 
 - The room snapshot is the operational truth for gameplay.
+- Durable Room lifecycle assignments drive the Room-owned runtime controller. The stable Room router uses those assignments plus ready pod observations to locate the one exclusive executor for each active `roomId`; Kubernetes placement is never authoritative room state.
+- Controller replicas claim bounded due assignments with `FOR UPDATE SKIP LOCKED` and expiring leases. A deterministic `(roomId, generation)` pod identity makes create acknowledgment crash-safe; generation transitions remain serialized on the assignment row.
+- Each assignment has a monotonically increasing generation. Every Room mutation locks and validates the caller pod's `roomId` and generation in the same authoritative transaction; a stale generation fails closed before Game Integrity append or state/outbox mutation.
+- `completed`/`cancelled` Room state and terminal runtime status commit together. Pod deletion is subsequent and disposable; terminal snapshots/results remain durable and readable without recreating an executor.
 - All Room state and outbox rows commit in Room Gameplay's context-owned Postgres database. Native table partitioning and indexes may use `roomId` to control hot-table size and access paths.
+- Room-owned PgBouncer uses transaction-pooling mode between dedicated room pods and the same physical database. Room pods use lazy zero-minimum, one-maximum client pools with short idle lifetime; transaction-scoped locks and atomic state/outbox commits remain unchanged.
+- PgBouncer capacity is explicit per environment: replicas and client admission are sized against active runtimes, while default plus reserve backend pools are bounded against Room Postgres connection capacity. Staging/production require SCRAM-SHA-256, end-to-end database TLS, and strict mesh mTLS; kind retains a lightweight disposable profile.
 - Timer deadlines are durable in Postgres, not Redis.
 - Non-terminal game completion writes `next_game_continuations` in the same Room transaction. Existing Room timer workers claim bounded Postgres batches with visibility leases and deterministic identities; successful next-game commit deletes the row, while expired leases and retryable failures remain recoverable without client redelivery.
 - Redis can accelerate dispatch, but it cannot define room truth.

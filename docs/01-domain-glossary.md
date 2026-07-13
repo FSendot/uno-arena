@@ -12,6 +12,11 @@ This glossary defines the ubiquitous language used across the rest of the submis
 - **Round**: one elimination tier of a tournament. A round contains many matches running in parallel and closes only after every assigned room reports an authoritative terminal result.
 - **Tournament**: the full elimination competition composed of sequential rounds until 10 or fewer players remain for a final room.
 
+## Identity and Session Terms
+
+- **Player Session**: the authoritative UnoArena authentication grant linking one player to one bearer token and session identity. A player may have only one active session.
+- **Logout**: explicit invalidation of the current UnoArena Player Session. It is idempotent for already-invalid, expired, or unknown tokens, does not claim success while Identity's authoritative outcome is indeterminate, and does not sign the player out of the external identity provider or unrelated applications.
+
 ## Room Gameplay Terms
 
 - **Seat**: a player's assigned position inside a room roster.

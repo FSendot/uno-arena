@@ -501,6 +501,12 @@ assert_eq "session username field" "sessuser" "$(json_field "$SESS_JSON" usernam
 WHO_SESS="$("$CLI" whoami --correlation-id corr-who-sess)"
 assert_eq "whoami from session file" "sessuser" "$(json_field "$WHO_SESS" username)"
 
+curl --silent --show-error -X POST "${UNOARENA_API_URL}/__fail-next-logout" >/dev/null
+assert_exit "logout backend failure retains session" 1 "$CLI" logout
+[ -e "$UNOARENA_SESSION_FILE" ]
+echo "ok - logout backend failure retained session file"
+PASS=$((PASS + 1))
+
 LOGOUT_OUT="$("$CLI" logout)"
 assert_contains "logout ok json" '"status":"ok"' "$LOGOUT_OUT"
 case "$LOGOUT_OUT" in
@@ -510,7 +516,13 @@ esac
 [ ! -e "$UNOARENA_SESSION_FILE" ]
 echo "ok - logout removed session file"
 PASS=$((PASS + 1))
-LOGOUT2="$("$CLI" logout)"
+py_assert_request "logout sends session bearer and correlation" '
+logs = [r for r in requests if r["path"] == "/v1/auth/logout"]
+assert logs, "missing logout"
+assert logs[-1]["headers"].get("authorization") == "Bearer tok-sessuser"
+assert logs[-1]["headers"].get("x-correlation-id")
+'
+LOGOUT2="$(env -u UNOARENA_API_URL "$CLI" logout)"
 assert_contains "logout idempotent" '"status":"ok"' "$LOGOUT2"
 
 # Corrupt / unsafe session fails closed for whoami fallback

@@ -84,6 +84,19 @@ func (f *FakeIdentity) Login(_ context.Context, username, password string, corr 
 	return LoginResult{SessionID: p.SessionID, PlayerID: p.PlayerID, Token: token}, nil
 }
 
+func (f *FakeIdentity) Logout(_ context.Context, token string, corr correlation.Headers) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastCorr = corr
+	if f.FailNext {
+		f.FailNext = false
+		return errors.New("identity unavailable")
+	}
+	// An unknown or already-invalid token is intentionally an idempotent success.
+	delete(f.tokens, token)
+	return nil
+}
+
 func (f *FakeIdentity) Whoami(ctx context.Context, token string, corr correlation.Headers) (Principal, error) {
 	return f.ValidateSession(ctx, token, corr)
 }

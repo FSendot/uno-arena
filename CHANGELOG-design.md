@@ -2,6 +2,18 @@
 
 This changelog records design-package updates made while shaping the architecture checkpoint. It is limited to changes that affect traceability between the original design deliverables and the architecture.
 
+## Client Parity and Dedicated Room Runtime Topology (2026-07-13)
+
+- Client playability and bot selection now apply the Room contract during a pending penalty: only an ordinarily legal `Draw Two`, or a `Wild Draw Four` when the hand contains no non-wild active-color card, is selectable. The server remains authoritative.
+- `POST /v1/auth/logout` now authoritatively invalidates the UnoArena session through Identity's existing `SessionInvalidated(reason=logout)` outbox path. The CLI removes its mode-0600 session file only after success and retains it on network/upstream failure.
+- ADR-0040 defines one lifecycle-bound bare Kubernetes state-machine Pod per active Room, a stable pod-IP router, Room-owned leaderless controllers, generation fencing, bounded mutation admission, separate service accounts, and terminal teardown after authoritative commit.
+- ADR-0041 defines Room-owned PgBouncer transaction pooling and two lazy `max=1` pools per dedicated runtime: one for the aggregate transaction and one for the pre-append crash-recovery intent. The Helm/kind topology deploys two controller replicas, PgBouncer, scoped RBAC, and runtime pods without Kubernetes API credentials.
+- The deployment contract keeps controller secret resolution to its Room database URL and passes only kubelet-resolved SecretKeyRef names to dedicated runtimes. Controller admission and PgBouncer client/backend capacity are environment-configurable; production overlays carry the 100,000-room starting budgets while kind stays intentionally small.
+- Staging/production Room renders require PgBouncer SCRAM-SHA-256, client/server database TLS material, and workload-scoped strict Istio mTLS. The disposable kind overlay is the explicit local plaintext exception.
+- Room Postgres now atomically persists desired/observed runtime assignments with the aggregate lifecycle. Existing-room traffic returns retryable `503 room_starting` until the current generation is Ready; queue saturation returns `429 room_busy`.
+- Live clean-kind acceptance passed on ARM64: two rooms produced distinct Ready pods; deleting a Ready pod advanced its durable generation and produced a fenced replacement; stale-generation admission returned `401`; an existing-room `JoinRoom` traversed the router and committed in the assigned pod; Spectator recovery, CDC, durable adapters, and connector probes remained green. CLI logout invalidated a copied token (`401`) and persisted `SessionInvalidated(reason=logout)`.
+- Status: client parity, authoritative logout, durable runtime assignment/fencing, router/controller/runtime roles, PgBouncer, and Helm/kind resources are implemented and live-proven in the disposable cluster.
+
 ## Clean ARM64 Kind Deployment and Recovery Acceptance (2026-07-12)
 
 - The clean-deploy aggregate lane now validates, rebuilds the disposable cluster, builds/loads the bootstrap plus all eight service images, applies the foundation, deploys services in dependency order, and runs the live probe suite. The ARM64 foundation and all eight services have deployed successfully.

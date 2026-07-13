@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +46,30 @@ type Server struct {
 	ready                       bool
 	notReadyReason              string
 	durableReady                func(context.Context) error
+	runtimeRoomID               string
+	runtimeGeneration           int64
+	runtimeCredential           string
+	mutationQueue               *RoomMutationQueue
+}
+
+// ConfigureDedicatedRuntime pins this process to exactly one Room generation.
+// It is intentionally unavailable to the stable router/capability process.
+func (s *Server) ConfigureDedicatedRuntime(roomID string, generation int64, credential string, queueCapacity int) {
+	s.runtimeRoomID = roomID
+	s.runtimeGeneration = generation
+	s.runtimeCredential = credential
+	s.mutationQueue = NewRoomMutationQueue(queueCapacity)
+}
+
+func (s *Server) authorizeRuntime(r *http.Request, roomID string) bool {
+	if s.runtimeRoomID == "" {
+		return true
+	}
+	if roomID != s.runtimeRoomID || !credentialMatch(r.Header.Get(runtimeCredentialHeader), s.runtimeCredential) {
+		return false
+	}
+	generation, err := strconv.ParseInt(r.Header.Get(runtimeGenerationHeader), 10, 64)
+	return err == nil && generation == s.runtimeGeneration
 }
 
 // NewServer constructs an injectable HTTP server.
@@ -174,7 +201,11 @@ func (s *Server) createRoomHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.requireReady(w) {
 		return
 	}
-	if !s.authorizeInternal(r) {
+	if s.runtimeRoomID != "" {
+		_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "route not found", "", "")
+		return
+	}
+	if s.runtimeRoomID == "" && !s.authorizeInternal(r) {
 		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
 		return
 	}
@@ -193,7 +224,11 @@ func (s *Server) roomScopedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := parts[0]
 	action := parts[1]
-	if !s.authorizeInternal(r) {
+	if !s.authorizeRuntime(r, roomID) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
+		return
+	}
+	if s.runtimeRoomID == "" && !s.authorizeInternal(r) {
 		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
 		return
 	}
@@ -219,6 +254,21 @@ func (s *Server) internalCommandsHandler(w http.ResponseWriter, r *http.Request)
 		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
 		return
 	}
+	if s.runtimeRoomID != "" {
+		body, err := readBody(r)
+		if err != nil {
+			_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "unable to read body", "", "")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var command struct {
+			RoomID string `json:"roomId"`
+		}
+		if json.Unmarshal(body, &command) != nil || !s.authorizeRuntime(r, command.RoomID) {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
+			return
+		}
+	}
 	s.dispatchCommand(w, r, "", false)
 }
 
@@ -238,13 +288,17 @@ func (s *Server) internalRoomScopedHandler(w http.ResponseWriter, r *http.Reques
 	}
 	roomID := parts[0]
 	action := parts[1]
+	if !s.authorizeRuntime(r, roomID) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
+		return
+	}
 	switch action {
 	case "timer-commands":
 		if r.Method != http.MethodPost {
 			_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
 			return
 		}
-		if !s.authorizeTimer(r) {
+		if s.runtimeRoomID == "" && !s.authorizeTimer(r) {
 			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid timer service credential", "", "")
 			return
 		}
@@ -535,7 +589,7 @@ func (s *Server) dispatchCommand(w http.ResponseWriter, r *http.Request, pathRoo
 		roomID = p.RoomID
 	}
 
-	res := s.svc.HandleCommand(r.Context(), app.CommandInput{
+	input := app.CommandInput{
 		CommandID:              raw.CommandID,
 		Type:                   raw.Type,
 		SchemaVersion:          raw.SchemaVersion,
@@ -546,8 +600,22 @@ func (s *Server) dispatchCommand(w http.ResponseWriter, r *http.Request, pathRoo
 		ExpectedSequenceNumber: raw.ExpectedSequenceNumber,
 		CorrelationID:          corr.CorrelationID,
 		AsSystem:               asSystem,
-	})
+		RuntimeGeneration:      s.runtimeGeneration,
+	}
+	var res app.CommandResult
+	if s.mutationQueue != nil {
+		if err := s.mutationQueue.Do(func() { res = s.svc.HandleCommand(r.Context(), input) }); err != nil {
+			_ = httpx.WriteError(w, http.StatusTooManyRequests, "room_busy", "room mutation queue is full", corr.CorrelationID, raw.CommandID)
+			return
+		}
+	} else {
+		res = s.svc.HandleCommand(r.Context(), input)
+	}
 	if res.Err != nil {
+		if errors.Is(res.Err, app.ErrRuntimeGenerationStale) {
+			_ = httpx.WriteError(w, http.StatusConflict, "stale_room_generation", "room runtime generation is stale", corr.CorrelationID, raw.CommandID)
+			return
+		}
 		_ = httpx.WriteError(w, http.StatusBadGateway, "integrity_append_failed", res.Err.Error(), corr.CorrelationID, raw.CommandID)
 		return
 	}
@@ -653,6 +721,35 @@ func (w *OutboxRetryWorker) loop() {
 
 func main() {
 	cfg := loadRoomRuntimeConfig()
+	if cfg.WorkerRole == "room-runtime-controller" {
+		pool, err := store.NewPool(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer pool.Close()
+		kube, err := kubeClientFromEnvironment(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		controller := NewRuntimeController(store.NewSessionStore(pool.Main), kube, cfg.RuntimeControllerOwner, cfg.RuntimeImage, cfg.RuntimeRouterCredential)
+		controller.ConfigureLimits(cfg.RuntimeControllerClaimBatch, cfg.RuntimeControllerConcurrency, cfg.RuntimeReadinessTimeout)
+		controller.ConfigureRuntimePod(cfg.RuntimeSecretName, cfg.RuntimeSecretEnv, map[string]string{
+			"SERVICE_NAME": cfg.ServiceName, "DEPLOYMENT_ENV": cfg.DeploymentEnv,
+			"IDENTITY_URL": cfg.IdentityURL, "GAME_INTEGRITY_URL": cfg.GameIntegrityURL,
+			"REDIS_URL": cfg.RedisURL, "GATEWAY_URL": cfg.GatewayURL,
+			"SPECTATOR_VIEW_URL": cfg.SpectatorURL, "RANKING_URL": cfg.RankingURL,
+			"ANALYTICS_URL": cfg.AnalyticsURL, "TOURNAMENT_URL": cfg.TournamentURL,
+			"ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY": strconv.Itoa(cfg.RuntimeQueueCapacity),
+		})
+		log.Printf(`{"level":"info","service":"%s","event":"room_runtime_controller_startup"}`, cfg.ServiceName)
+		cadence := boundedRuntimeControllerCadence(cfg.RuntimeControllerCadence)
+		for {
+			if err := controller.ReconcileOnce(context.Background()); err != nil {
+				log.Printf(`{"level":"error","service":"%s","event":"room_runtime_controller_reconcile","error":%q}`, cfg.ServiceName, err.Error())
+			}
+			time.Sleep(cadence)
+		}
+	}
 	wired, err := wireRoomRuntime(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -686,8 +783,92 @@ func main() {
 	}
 
 	srv := NewServerWithScopedCreds(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.SpectatorRecoveryCredential, cfg.AnalyticsBackfillCredential, cfg.ServiceName)
+	if cfg.WorkerRole == "room-runtime" {
+		if cfg.RuntimeRoomID == "" || cfg.RuntimeGeneration < 1 || cfg.RuntimeRouterCredential == "" {
+			log.Fatal("room-runtime requires ROOM_RUNTIME_ROOM_ID, ROOM_RUNTIME_GENERATION, and ROOM_RUNTIME_ROUTER_CREDENTIAL")
+		}
+		srv.ConfigureDedicatedRuntime(cfg.RuntimeRoomID, cfg.RuntimeGeneration, cfg.RuntimeRouterCredential, cfg.RuntimeQueueCapacity)
+	}
 	srv.SetReady(wired.Ready, wired.NotReadyReason)
 	srv.durableReady = wired.DurableReady
+	if cfg.WorkerRole == "room-router" {
+		kube, err := kubeClientFromEnvironment(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		directory := NewPodDirectory()
+		refreshPodDirectory(context.Background(), directory, kube)
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				refreshPodDirectory(context.Background(), directory, kube)
+			}
+		}()
+		router := NewRoomRouter(directory, cfg.RuntimeRouterCredential, nil)
+		base := srv.routes()
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if shouldRouteToRuntime(r) {
+				router.ServeHTTP(w, r)
+				return
+			}
+			base.ServeHTTP(w, r)
+		})
+		log.Printf(`{"level":"info","service":"%s","event":"room_router_startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
+		log.Fatal(http.ListenAndServe(":8080", handler))
+	}
 	log.Printf(`{"level":"info","service":"%s","event":"startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
 	log.Fatal(http.ListenAndServe(":8080", srv.routes()))
+}
+
+func shouldRouteToRuntime(r *http.Request) bool {
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/v1/rooms/") {
+		return true
+	}
+	if path == "/internal/v1/commands" && r.Method == http.MethodPost {
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		if err != nil {
+			return true
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var command struct {
+			Type string `json:"type"`
+		}
+		return json.Unmarshal(body, &command) == nil && command.Type != app.CmdCreateRoom
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/internal/v1/rooms/"), "/")
+	return strings.HasPrefix(path, "/internal/v1/rooms/") && len(parts) == 2 && parts[0] != "" && parts[0] != "provision"
+}
+
+func refreshPodDirectory(ctx context.Context, directory *PodDirectory, kube KubePodClient) {
+	pods, err := kube.List(ctx)
+	if err != nil {
+		log.Printf(`{"level":"warn","event":"room_router_directory_refresh","error":%q}`, err.Error())
+		return
+	}
+	directory.Replace(pods)
+}
+
+func kubeClientFromEnvironment(cfg roomRuntimeConfig) (KubePodClient, error) {
+	baseURL := cfg.KubernetesAPIURL
+	if baseURL == "" {
+		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS")
+		if host == "" {
+			return nil, fmt.Errorf("KUBERNETES_API_URL or in-cluster Kubernetes service is required")
+		}
+		if port == "" {
+			port = "443"
+		}
+		baseURL = "https://" + host + ":" + port
+	}
+	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil && cfg.KubernetesAPIURL == "" {
+		return nil, fmt.Errorf("read Kubernetes service-account token: %w", err)
+	}
+	caPEM, caErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	if caErr != nil && cfg.KubernetesAPIURL == "" {
+		return nil, fmt.Errorf("read Kubernetes service-account CA: %w", caErr)
+	}
+	return newKubeHTTPClient(baseURL, cfg.KubernetesNamespace, strings.TrimSpace(string(token)), caPEM), nil
 }

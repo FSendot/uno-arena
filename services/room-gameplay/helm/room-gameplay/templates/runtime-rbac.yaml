@@ -1,0 +1,65 @@
+{{- if .Values.topology.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-router
+  labels:
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-runtime-controller
+  labels:
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: room-runtime
+  labels:
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-router-pod-observer
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-router-pod-observer
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-router-pod-observer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-runtime-controller-pods
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-runtime-controller-pods
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-runtime-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-runtime-controller-pods
+{{- end }}

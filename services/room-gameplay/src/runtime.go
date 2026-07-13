@@ -2,42 +2,59 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"unoarena/services/room-gameplay/app"
 	"unoarena/services/room-gameplay/store"
 )
 
 type roomRuntimeConfig struct {
-	ServiceName                 string
-	ServiceCredential           string
-	TimerCredential             string
-	SpectatorRecoveryCredential string
-	AnalyticsBackfillCredential string
-	GatewayURL                  string
-	GatewayCred                 string
-	IdentityURL                 string
-	IdentityCred                string
-	GameIntegrityURL            string
-	GameIntegrityCred           string
-	DatabaseURL                 string
-	RedisURL                    string
-	AuditLogPath                string
-	AllowFakes                  bool
-	CapabilityMode              bool
-	DeploymentEnv               string
-	WorkerRole                  string
-	RoomGameplayURL             string
-	SpectatorURL                string
-	SpectatorCred               string
-	RankingURL                  string
-	RankingCred                 string
-	AnalyticsURL                string
-	AnalyticsCred               string
-	TournamentURL               string
-	TournamentCred              string
+	ServiceName                  string
+	ServiceCredential            string
+	TimerCredential              string
+	SpectatorRecoveryCredential  string
+	AnalyticsBackfillCredential  string
+	GatewayURL                   string
+	GatewayCred                  string
+	IdentityURL                  string
+	IdentityCred                 string
+	GameIntegrityURL             string
+	GameIntegrityCred            string
+	DatabaseURL                  string
+	RedisURL                     string
+	AuditLogPath                 string
+	AllowFakes                   bool
+	CapabilityMode               bool
+	DeploymentEnv                string
+	WorkerRole                   string
+	RoomGameplayURL              string
+	SpectatorURL                 string
+	SpectatorCred                string
+	RankingURL                   string
+	RankingCred                  string
+	AnalyticsURL                 string
+	AnalyticsCred                string
+	TournamentURL                string
+	TournamentCred               string
+	RuntimeRoomID                string
+	RuntimeGeneration            int64
+	RuntimeRouterCredential      string
+	RuntimeQueueCapacity         int
+	RuntimeImage                 string
+	RuntimeControllerOwner       string
+	RuntimeControllerClaimBatch  int
+	RuntimeControllerConcurrency int
+	RuntimeControllerCadence     time.Duration
+	RuntimeReadinessTimeout      time.Duration
+	KubernetesAPIURL             string
+	KubernetesNamespace          string
+	RuntimeSecretName            string
+	RuntimeSecretEnv             map[string]string
 }
 
 type roomRuntime struct {
@@ -91,7 +108,7 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 			os.Getenv("ROOM_GAME_INTEGRITY_CREDENTIAL"),
 			cred,
 		),
-		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DatabaseURL:    firstNonEmptyEnv(os.Getenv("ROOM_PGBOUNCER_URL"), os.Getenv("DATABASE_URL")),
 		RedisURL:       strings.TrimSpace(os.Getenv("REDIS_URL")),
 		AuditLogPath:   strings.TrimSpace(os.Getenv("ROOM_AUDIT_LOG_PATH")),
 		AllowFakes:     envTruthy("ROOM_ALLOW_FAKES") || envTruthy("ALLOW_FAKES"),
@@ -102,15 +119,65 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 			os.Getenv("ROOM_GAMEPLAY_URL"),
 			"http://127.0.0.1:8080",
 		),
-		SpectatorURL:   strings.TrimSpace(os.Getenv("SPECTATOR_VIEW_URL")),
-		SpectatorCred:  firstEnv("SPECTATOR_VIEW_SERVICE_CREDENTIAL", gatewayCred),
-		RankingURL:     strings.TrimSpace(os.Getenv("RANKING_URL")),
-		RankingCred:    firstEnv("RANKING_SERVICE_CREDENTIAL", gatewayCred),
-		AnalyticsURL:   strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
-		AnalyticsCred:  firstEnv("ANALYTICS_SERVICE_CREDENTIAL", gatewayCred),
-		TournamentURL:  strings.TrimSpace(os.Getenv("TOURNAMENT_URL")),
-		TournamentCred: firstEnv("TOURNAMENT_SERVICE_CREDENTIAL", gatewayCred),
+		SpectatorURL:                 strings.TrimSpace(os.Getenv("SPECTATOR_VIEW_URL")),
+		SpectatorCred:                firstEnv("SPECTATOR_VIEW_SERVICE_CREDENTIAL", gatewayCred),
+		RankingURL:                   strings.TrimSpace(os.Getenv("RANKING_URL")),
+		RankingCred:                  firstEnv("RANKING_SERVICE_CREDENTIAL", gatewayCred),
+		AnalyticsURL:                 strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
+		AnalyticsCred:                firstEnv("ANALYTICS_SERVICE_CREDENTIAL", gatewayCred),
+		TournamentURL:                strings.TrimSpace(os.Getenv("TOURNAMENT_URL")),
+		TournamentCred:               firstEnv("TOURNAMENT_SERVICE_CREDENTIAL", gatewayCred),
+		RuntimeRoomID:                strings.TrimSpace(os.Getenv("ROOM_RUNTIME_ROOM_ID")),
+		RuntimeGeneration:            envInt64("ROOM_RUNTIME_GENERATION", 0),
+		RuntimeRouterCredential:      strings.TrimSpace(os.Getenv("ROOM_RUNTIME_ROUTER_CREDENTIAL")),
+		RuntimeQueueCapacity:         envInt("ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY", 16),
+		RuntimeImage:                 strings.TrimSpace(os.Getenv("ROOM_RUNTIME_IMAGE")),
+		RuntimeControllerOwner:       firstNonEmptyEnv(os.Getenv("POD_NAME"), os.Getenv("HOSTNAME"), "room-runtime-controller"),
+		RuntimeControllerClaimBatch:  envInt("ROOM_RUNTIME_CONTROLLER_CLAIM_BATCH", 16),
+		RuntimeControllerConcurrency: envInt("ROOM_RUNTIME_CONTROLLER_CONCURRENCY", 4),
+		RuntimeControllerCadence:     time.Duration(envInt("ROOM_RUNTIME_CONTROLLER_CADENCE_MILLIS", 1000)) * time.Millisecond,
+		RuntimeReadinessTimeout:      time.Duration(envInt("ROOM_RUNTIME_READINESS_TIMEOUT_SECONDS", 60)) * time.Second,
+		KubernetesAPIURL:             strings.TrimSpace(os.Getenv("KUBERNETES_API_URL")),
+		KubernetesNamespace:          firstNonEmptyEnv(os.Getenv("POD_NAMESPACE"), os.Getenv("KUBERNETES_NAMESPACE"), "default"),
+		RuntimeSecretName:            strings.TrimSpace(os.Getenv("ROOM_RUNTIME_SECRET_NAME")),
+		RuntimeSecretEnv:             envStringMap("ROOM_RUNTIME_SECRET_ENV_JSON"),
 	}
+}
+
+func envStringMap(name string) map[string]string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	var values map[string]string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	return values
+}
+
+func envInt(name string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
+}
+
+func envInt64(name string, fallback int64) int64 {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
 }
 
 func isNonProd(env string) bool {
@@ -279,11 +346,13 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 		Ready:     true,
 		Mode:      "durable",
 		DurableReady: func(ctx context.Context) error {
-			if !app.AnalyticsBackfillCursorSecretConfigured() {
-				return fmt.Errorf("%w", app.ErrAnalyticsBackfillCursorSecretRequired)
-			}
-			if !app.PublicListCursorSecretConfigured() {
-				return fmt.Errorf("%w", app.ErrPublicListCursorSecretRequired)
+			if cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-timer" {
+				if !app.AnalyticsBackfillCursorSecretConfigured() {
+					return fmt.Errorf("%w", app.ErrAnalyticsBackfillCursorSecretRequired)
+				}
+				if !app.PublicListCursorSecretConfigured() {
+					return fmt.Errorf("%w", app.ErrPublicListCursorSecretRequired)
+				}
 			}
 			if err := store.VerifySchema(ctx, pool.Main, exp); err != nil {
 				return err
@@ -309,11 +378,17 @@ func roomDurableMissing(cfg roomRuntimeConfig) []string {
 	require("IDENTITY_CREDENTIAL", cfg.IdentityCred)
 	require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)
 	require("GAME_INTEGRITY_CREDENTIAL", cfg.GameIntegrityCred)
-	require("ROOM_TIMER_SERVICE_CREDENTIAL", cfg.TimerCredential)
-	require("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL", cfg.SpectatorRecoveryCredential)
+	if cfg.WorkerRole != "room-runtime" {
+		require("ROOM_TIMER_SERVICE_CREDENTIAL", cfg.TimerCredential)
+	}
+	// Every HTTP command executor authenticates the Gateway-to-Room credential.
+	// Dedicated runtimes skip recovery-only authority, but not command ingress.
 	require("SERVICE_CREDENTIAL", cfg.ServiceCredential)
+	if cfg.WorkerRole != "room-runtime" {
+		require("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL", cfg.SpectatorRecoveryCredential)
+	}
 	// Timer worker does not serve analytics-backfill or public-list; skip least-privilege secrets.
-	if cfg.WorkerRole != "room-timer" {
+	if cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-runtime" {
 		require("ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL", cfg.AnalyticsBackfillCredential)
 		if !app.AnalyticsBackfillCursorSecretConfigured() {
 			missing = append(missing, "ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET")

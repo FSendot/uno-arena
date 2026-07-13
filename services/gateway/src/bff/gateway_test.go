@@ -357,6 +357,30 @@ func TestAuth_RegisterLoginWhoami(t *testing.T) {
 	}
 }
 
+func TestAuth_LogoutRevokesBearerAndRequiresAuthentication(t *testing.T) {
+	h := newHarness(t)
+	missing := h.do(http.MethodPost, "/v1/auth/logout", nil, nil)
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing bearer status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	w := h.do(http.MethodPost, "/v1/auth/logout", nil, h.authHeaders())
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), h.token) || strings.Contains(w.Body.String(), h.principal.SessionID) {
+		t.Fatalf("logout response exposed session material: %s", w.Body.String())
+	}
+	if h.identity.LastCorr.CorrelationID != "corr_test" {
+		t.Fatalf("logout correlation=%+v", h.identity.LastCorr)
+	}
+
+	w = h.do(http.MethodGet, "/v1/auth/whoami", nil, h.authHeaders())
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("copied token must be rejected after logout, status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestCorrelationHeadersPropagatedOnCommand(t *testing.T) {
 	h := newHarness(t)
 	body := []byte(`{"commandId":"cmd_c","type":"CreateRoom","schemaVersion":1,"payload":{}}`)

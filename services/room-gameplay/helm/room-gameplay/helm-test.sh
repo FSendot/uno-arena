@@ -23,6 +23,34 @@ echo "${kind_out}" | grep -q 'WORKER_ROLE'
 echo "${kind_out}" | grep -q 'room-timer'
 echo "${kind_out}" | grep -q 'type: ClusterIP'
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
+echo "${kind_out}" | grep -q 'name: room-kind-runtime-controller'
+echo "${kind_out}" | grep -q 'replicas: 2'
+echo "${kind_out}" | grep -q 'name: room-runtime'
+echo "${kind_out}" | grep -q 'automountServiceAccountToken: false'
+echo "${kind_out}" | grep -q 'pool_mode = transaction'
+echo "${kind_out}" | grep -q 'replicas: 1'
+echo "${kind_out}" | grep -q 'max_client_conn = 100'
+echo "${kind_out}" | grep -q 'default_pool_size = 4'
+echo "${kind_out}" | grep -q 'auth_type = plain'
+echo "${kind_out}" | grep -q 'ROOM_RUNTIME_SECRET_ENV_JSON'
+echo "${kind_out}" | grep -q 'room-runtime-router-credential'
+
+controller_doc="$(echo "${kind_out}" | awk '/name: room-kind-runtime-controller$/,/^---$/')"
+test "$(echo "${controller_doc}" | grep -c 'secretKeyRef:')" -eq 1
+echo "${controller_doc}" | grep -q 'key: "room-database-url"'
+! echo "${controller_doc}" | grep -q 'key: "room-runtime-router-credential"'
+! echo "${controller_doc}" | grep -q 'key: "game-integrity-internal-credential"'
+echo "${controller_doc}" | grep -q 'ROOM_RUNTIME_CONTROLLER_CLAIM_BATCH'
+echo "${controller_doc}" | grep -q 'ROOM_RUNTIME_CONTROLLER_CONCURRENCY'
+echo "${controller_doc}" | grep -q '\\"ROOM_RUNTIME_ROUTER_CREDENTIAL\\"'
+echo "${controller_doc}" | grep -q '\\"IDENTITY_SERVICE_CREDENTIAL\\"'
+echo "${controller_doc}" | grep -q '\\"GAME_INTEGRITY_INTERNAL_CREDENTIAL\\"'
+echo "${controller_doc}" | grep -q '\\"GAME_INTEGRITY_AUDIT_CREDENTIAL\\"'
+echo "${controller_doc}" | grep -q '\\"ROOM_PGBOUNCER_URL\\"'
+! echo "${controller_doc}" | grep -q '\\"SERVICE_CREDENTIAL\\"'
+! echo "${controller_doc}" | grep -q '\\"ROOM_TIMER_SERVICE_CREDENTIAL\\"'
+! echo "${controller_doc}" | grep -q '\\"ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL\\"'
+! echo "${controller_doc}" | grep -q '\\"ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET\\"'
 
 echo "${kind_out}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
 echo "${kind_out}" | grep -q 'key: "analytics-room-credential"'
@@ -101,6 +129,11 @@ echo "${pin_staging_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL
 echo "${pin_staging_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
 echo "${pin_staging_full}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
 echo "${pin_staging_full}" | grep -q 'GAME_INTEGRITY_AUDIT_CREDENTIAL'
+echo "${pin_staging_full}" | grep -q 'auth_type = scram-sha-256'
+echo "${pin_staging_full}" | grep -q 'client_tls_sslmode = require'
+echo "${pin_staging_full}" | grep -q 'server_tls_sslmode = verify-full'
+echo "${pin_staging_full}" | grep -q 'kind: PeerAuthentication'
+echo "${pin_staging_full}" | grep -q 'mode: STRICT'
 
 pin_prod_full="$("${HELM}" template room-pin-prod-full "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.production.yaml" \
   --set image.digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
@@ -109,5 +142,25 @@ echo "${pin_prod_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
 echo "${pin_prod_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
 echo "${pin_prod_full}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
 echo "${pin_prod_full}" | grep -q 'GAME_INTEGRITY_AUDIT_CREDENTIAL'
+echo "${pin_prod_full}" | grep -q 'replicas: 6'
+echo "${pin_prod_full}" | grep -q 'max_client_conn = 50000'
+echo "${pin_prod_full}" | grep -q 'default_pool_size = 32'
+echo "${pin_prod_full}" | grep -q 'reserve_pool_size = 8'
+
+for insecure_override in \
+  'topology.pgbouncer.authType=plain' \
+  'topology.pgbouncer.tls.enabled=false' \
+  'topology.pgbouncer.tls.secretName=' \
+  'topology.pgbouncer.tls.clientMode=disable' \
+  'topology.pgbouncer.tls.serverMode=require' \
+  'topology.pgbouncer.mesh.enforceStrictMTLS=false'
+do
+  if "${HELM}" template room-insecure "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.production.yaml" \
+    --set image.digest=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+    --set "${insecure_override}" >/dev/null 2>&1; then
+    echo "production render accepted insecure override: ${insecure_override}" >&2
+    exit 1
+  fi
+done
 
 echo "ok room-gameplay-helm"

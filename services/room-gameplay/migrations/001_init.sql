@@ -100,6 +100,40 @@ CREATE INDEX IF NOT EXISTS rooms_public_list_idx
     WHERE visibility = 'public';
 
 -- ---------------------------------------------------------------------------
+-- Dedicated state-machine runtime assignment. This is durable controller
+-- intent, not a Kubernetes resource: one current generation per active Room.
+-- It is created/marked terminal inside the same Room transaction as the
+-- aggregate snapshot and outboxes. Controller replicas use lease columns with
+-- FOR UPDATE SKIP LOCKED; runtime pods fence through generation under rooms
+-- FOR UPDATE before any mutation.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS room_runtime_assignments (
+    room_id TEXT PRIMARY KEY REFERENCES rooms (room_id) ON DELETE CASCADE,
+    generation BIGINT NOT NULL DEFAULT 1 CHECK (generation >= 1),
+    desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'terminal')),
+    observed_state TEXT NOT NULL CHECK (observed_state IN ('pending', 'creating', 'ready', 'deleting', 'deleted')),
+    pod_name TEXT NOT NULL,
+    pod_ip INET,
+    lease_owner TEXT,
+    lease_until TIMESTAMPTZ,
+    attempts INT NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE room_runtime_assignments IS
+    'Room-owned desired/observed pod assignment. No CRD, Deployment, StatefulSet, or per-room Service.';
+
+CREATE INDEX IF NOT EXISTS room_runtime_assignments_claim_idx
+    ON room_runtime_assignments (next_attempt_at, room_id)
+    WHERE lease_until IS NULL;
+
+CREATE INDEX IF NOT EXISTS room_runtime_assignments_lease_idx
+    ON room_runtime_assignments (lease_until, room_id)
+    WHERE lease_until IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
 -- Roster / seats (lock order #2 after rooms).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS room_roster (

@@ -151,6 +151,44 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
 
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Authoritatively revoke the current UnoArena session
+      description: Revokes only the UnoArena session represented by the bearer; it does not log out of an external identity provider.
+      operationId: logoutPlayer
+      security:
+        - SessionBearer: []
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      responses:
+        "200":
+          description: Session revoked, already invalid, expired, or unknown (idempotent)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+        "401":
+          description: Missing bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "429":
+          $ref: "#/components/responses/Error"
+        "502":
+          description: Identity upstream failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
   /v1/commands:
     post:
       tags: [commands]

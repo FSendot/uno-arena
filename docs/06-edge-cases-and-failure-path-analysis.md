@@ -123,6 +123,13 @@ A tournament round kickoff emits provisioning batches, but one shard repeatedly 
 - `SessionInvalidated`
 - `PlayerDisconnected` if Room Gameplay terminates active room participation
 
+### Logout outcome is indeterminate
+
+**Behavior**
+
+- `POST /v1/auth/logout` is authoritative and idempotent: active sessions invalidate through the existing Identity outbox path, while already-invalid, expired, or unknown tokens succeed without revealing token existence.
+- The CLI removes its local session file only after authoritative success. Network errors, timeouts, or backend `5xx` return nonzero and retain the file for retry; absence of a local session remains local idempotent success.
+
 ### Spam and flooding
 
 **Behavior**

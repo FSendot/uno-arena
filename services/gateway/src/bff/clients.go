@@ -37,6 +37,7 @@ type LoginResult struct {
 type IdentityClient interface {
 	Register(ctx context.Context, username, password string, corr correlation.Headers) (RegisterResult, error)
 	Login(ctx context.Context, username, password string, corr correlation.Headers) (LoginResult, error)
+	Logout(ctx context.Context, token string, corr correlation.Headers) error
 	Whoami(ctx context.Context, token string, corr correlation.Headers) (Principal, error)
 	ValidateSession(ctx context.Context, token string, corr correlation.Headers) (Principal, error)
 }

@@ -17,3 +17,23 @@ timerWorker:
   enabled: false
 
 existingSecret: room-gameplay-secrets
+
+topology:
+  controller:
+    replicaCount: 4
+    claimBatch: 32
+    concurrency: 8
+    readinessTimeoutSeconds: 60
+  pgbouncer:
+    replicaCount: 2
+    maxClientConn: 5000
+    defaultPoolSize: 16
+    reservePoolSize: 4
+    authType: scram-sha-256
+    tls:
+      enabled: true
+      secretName: room-gameplay-pgbouncer-tls
+      clientMode: require
+      serverMode: verify-full
+    mesh:
+      enforceStrictMTLS: true

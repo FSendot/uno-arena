@@ -25,7 +25,7 @@ Gateway / BFF and must not introduce direct microservice access.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `UNOARENA_API_URL` | Yes (except `countdown`, `logout`) | Gateway/BFF base URL. The CLI never calls microservices directly. |
+| `UNOARENA_API_URL` | Yes (except `countdown`, or `logout` when no local session exists) | Gateway/BFF base URL. The CLI never calls microservices directly. |
 | `UNOARENA_TOKEN` | No | Default bearer token when `--token` is omitted (after `--token`, before session file) |
 | `UNOARENA_SESSION_FILE` | No | Session file path. Default: `${XDG_STATE_HOME:-$HOME/.local/state}/unoarena/session.json` |
 
@@ -64,7 +64,7 @@ unoarena analytics
 # Auth / session
 unoarena register --user <username> --pass <password>
 unoarena login --user <username> --pass <password>   # prints login JSON; also writes session file (0600)
-unoarena logout                                      # removes session file only; idempotent; never prints token
+unoarena logout                                      # authoritatively revokes current session, then removes local file
 unoarena whoami [--token <bearer-token>]
 unoarena seed --count <N> [--prefix <p>]             # JSONL credentials; does not write interactive session
 
@@ -112,7 +112,7 @@ unoarena bot --tournament <tournamentId> (--user <u> --pass <p> | --token <token
 | `health` | `GET /health` |
 | `register` | `POST /v1/auth/register` |
 | `login` | `POST /v1/auth/login` |
-| `logout` | local session file only |
+| `logout` | `POST /v1/auth/logout`; local file removed only after success |
 | `whoami` | `GET /v1/auth/whoami` (`Authorization: Bearer …`) |
 | `seed` | `POST /v1/auth/register` + `POST /v1/auth/login` per account |
 | `room list` | `GET /v1/rooms` (public; default `status=waiting`; no bearer) |
@@ -213,7 +213,11 @@ does not need them.
 `login` still prints the unchanged login JSON on stdout and atomically writes
 `token` / `playerId` / `sessionId` / `username` (mode `0600`). After accepted
 `room create` / `room join`, `roomId` is stored when a session file already exists;
-accepted `room leave` clears it. `logout` deletes only that file.
+accepted `room leave` clears it. `logout` calls the authoritative BFF endpoint and
+deletes the file only after success; network/timeouts/backend `5xx` return nonzero
+and retain it for retry. If no local session exists, logout is locally idempotent.
+This revokes only the UnoArena session; it does not sign the user out of the
+external identity provider or unrelated applications.
 
 ### Command envelope rules
 

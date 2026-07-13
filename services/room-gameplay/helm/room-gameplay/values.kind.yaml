@@ -27,6 +27,24 @@ env:
 timerWorker:
   enabled: true
 
+topology:
+  controller:
+    replicaCount: 2
+    dbPoolMaxConns: 4
+    claimBatch: 4
+    concurrency: 2
+    readinessTimeoutSeconds: 60
+  pgbouncer:
+    replicaCount: 1
+    maxClientConn: 100
+    defaultPoolSize: 4
+    reservePoolSize: 0
+    authType: plain
+    tls:
+      enabled: false
+    mesh:
+      enforceStrictMTLS: false
+
 existingSecret: uno-arena-local-credentials
 secretEnv:
   SERVICE_CREDENTIAL: room-service-credential
@@ -46,3 +64,15 @@ secretEnv:
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
   GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
   DATABASE_URL: room-database-url
+  ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
+  ROOM_PGBOUNCER_URL: room-pgbouncer-database-url
+  ROOM_PGBOUNCER_USERLIST: room-pgbouncer-userlist
+controllerSecretEnv:
+  DATABASE_URL: room-database-url
+runtimeSecretEnv:
+  SERVICE_CREDENTIAL: room-service-credential
+  ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
+  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
+  ROOM_PGBOUNCER_URL: room-pgbouncer-database-url

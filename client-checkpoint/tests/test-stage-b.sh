@@ -165,6 +165,46 @@ assert not mod.play_bot_room(
 PY
 echo 'ok - bot resolves penalties, enforces wild-draw-four legality, and fails cancelled rooms'
 
+python3 - "${ROOT}/lib/game_client.py" <<'PY'
+import importlib.util, pathlib, random, sys
+
+path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("unoarena_game_client", path)
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+penalty_game = {
+    "activeColor": "yellow",
+    "discardTop": {"face": "7"},
+    "penaltyAmount": 2,
+}
+ordinary = {"id": "y5", "color": "yellow", "face": "5"}
+legal_draw_two = {"id": "y2", "color": "yellow", "face": "draw_two"}
+illegal_draw_two = {"id": "g2", "color": "green", "face": "draw_two"}
+assert not mod.playable(ordinary, penalty_game, [ordinary])
+assert mod.playable(legal_draw_two, penalty_game, [legal_draw_two])
+assert not mod.playable(illegal_draw_two, penalty_game, [illegal_draw_two])
+matching_face_draw_two = {"id": "g2-face", "color": "green", "face": "draw_two"}
+assert mod.playable(matching_face_draw_two, {
+    "activeColor": "yellow", "discardTop": {"face": "draw_two"}, "penaltyAmount": 2,
+}, [matching_face_draw_two])
+
+legal_wild_draw_four = {"id": "w4-legal", "color": "", "face": "wild_draw_four"}
+assert mod.playable(legal_wild_draw_four, penalty_game, [
+    legal_wild_draw_four, {"id": "g1", "color": "green", "face": "1"},
+])
+illegal_wild_draw_four = {"id": "w4-illegal", "color": "", "face": "wild_draw_four"}
+assert not mod.playable(illegal_wild_draw_four, penalty_game, [
+    illegal_wild_draw_four, {"id": "y1", "color": "yellow", "face": "1"},
+])
+
+hand = [ordinary, illegal_draw_two, legal_draw_two, illegal_wild_draw_four]
+kind, payload, color = mod.bot_action(None, "room", {"game": penalty_game, "hand": hand}, "player", random.Random(1))
+assert (kind, payload, color) == ("PlayCard", {"cardId": "y2"}, None)
+PY
+echo 'ok - penalty legality unifies interactive playability and bot choices'
+
 printf 'play 1\nquit\n' | "$CLI" play --casual --token tok-wdf >"$TMP/wdf.out" 2>"$TMP/wdf.err"
 grep -q 'not playable' "$TMP/wdf.err"
 curl --silent --show-error "$UNOARENA_API_URL/__requests" | python3 -c '

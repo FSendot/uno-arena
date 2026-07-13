@@ -172,6 +172,10 @@ flowchart TB
 
 - `Room Gameplay Service`
   - owns Uno rules, turns, room lifecycle, and operational snapshots
+  - presents a stable Room router while a Room-owned runtime controller reconciles one exclusive state-machine pod per active `roomId`; no per-room Kubernetes Service is created
+  - uses controller-owned bare Pods named from a safe room hash and generation; kubelet restarts the container within a generation, while controller replacement after node loss advances the durable generation
+  - separates service accounts: router observes endpoints only, controller owns namespace-scoped pod lifecycle, and state-machine pods have no Kubernetes API permissions
+  - state-machine pods use a Room-owned PgBouncer transaction pool with lazy one-connection client pools; Room Postgres remains the single authoritative physical database
   - asks Game Integrity to append before broadcast
   - reassigns ad-hoc host before lock/start to the lowest occupied seat, or cancels immediately if empty; after lock/start host has no gameplay authority
   - publishes absolute UTC Uno `expiresAt` with opening room sequence; CLI countdown is advisory and server timing is exclusive
@@ -205,4 +209,4 @@ flowchart TB
 - **Offline capability adapters vs durable adapters:** capability mode uses real service HTTP paths (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `ANALYTICS_CAPABILITY_MODE`) with bounded in-memory edge/principal limiters and a memory session repository where Postgres is absent, plus explicit Game Integrity memory. Isolated-test fakes remain behind `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` only. Room Gameplay HTTP bridges carry the same event *names* and canonical domain fields as AsyncAPI, but each sink receives a destination-specific HTTP body (documented transform — not identical to the Kafka envelope). Identity/Room/Ranking/Tournament Postgres, GI KurrentDB, Analytics ClickHouse HTTP, Spectator/Ranking/Tournament Redis projections, Room Redis timers, Gateway Redis rate-limit + direct LiveFeed SSE, and declared franz-go consumers are implemented when configured. A clean ARM64 kind deployment proved the foundation, all eight services, Connect/Server CDC, and both recovery workers. Capability/fakes retain the in-process Hub; configured Gateway `/ready` pings every configured Redis client. Migrations under `services/*/migrations/` document the durable schemas.
 - KurrentDB, Postgres, Redis, Kafka, and ClickHouse should all be exercised as real local containers once their adapters exist.
 - External ingress TLS, ambient east-west mTLS, Game Integrity envelope encryption, and encrypted storage/backups are independent layers; none substitutes for another.
-- The logical topology stays the same across environments even when containers are collapsed for local speed.
+- All Helm/Kubernetes durable environments, including `kind`, retain the dedicated per-room pod topology. The explicitly non-Kubernetes Compose/capability harness may collapse Room into one process for semantic test speed and is not topology evidence.

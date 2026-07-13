@@ -114,7 +114,17 @@ func (s *Service) handleExistingDurable(ctx context.Context, in CommandInput) Co
 	}
 	in.RoomID = roomID
 
-	uow, err := s.deps.Commands.BeginExisting(ctx, domain.RoomID(roomID))
+	var uow SessionUnitOfWork
+	var err error
+	if in.RuntimeGeneration > 0 {
+		fenced, ok := s.deps.Commands.(RuntimeGenerationStore)
+		if !ok {
+			return CommandResult{Err: ErrRuntimeGenerationStale}
+		}
+		uow, err = fenced.BeginExistingGeneration(ctx, domain.RoomID(roomID), in.RuntimeGeneration)
+	} else {
+		uow, err = s.deps.Commands.BeginExisting(ctx, domain.RoomID(roomID))
+	}
 	if err != nil {
 		return CommandResult{Err: err}
 	}
