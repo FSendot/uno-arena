@@ -1235,7 +1235,7 @@ func (s *Service) createTournamentDifferential(ctx context.Context, req CommandR
 		Visibility:   domain.TournamentVisibility(stringField(payload, "visibility")),
 	}
 	decision := domain.DecideCreateTournament(createCmd)
-	return s.commitRegistrationOutcome(uow, req, decision, createCmd, string(tid), correlationID, true)
+	return s.commitRegistrationOutcome(uow, req, decision, createCmd, string(tid), correlationID, true, nil)
 }
 
 func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
@@ -1272,7 +1272,7 @@ func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandReq
 
 	decision := domain.DecideRegisterPlayer(uow.RegisterContext(), regCmd)
 	if decision.Kind != domain.RegistrationReserve {
-		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID)
+		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, nil)
 	}
 
 	_, autoClosed, err := uow.ReserveRegistration()
@@ -1280,14 +1280,14 @@ func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandReq
 		decision = domain.DecideRegisterPlayer(domain.RegistrationContext{
 			TournamentID: tid, Exists: true, Phase: domain.PhaseRegistration, PlayerRegistered: true,
 		}, regCmd)
-		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID)
+		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, nil)
 	}
 	if store.IsRegistrationCapacityExceeded(err) {
 		decision = domain.RegistrationDecision{
 			Kind:    domain.RegistrationReject,
 			Outcome: domain.CapacityExceededOutcome(regCmd.CommandID),
 		}
-		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID)
+		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, nil)
 	}
 	if err != nil {
 		return envelope.Result{}, err
@@ -1301,7 +1301,14 @@ func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandReq
 		Kind:    domain.RegistrationReserve,
 		Outcome: domain.AcceptedWithFacts(regCmd.CommandID, facts),
 	}
-	return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID)
+	var kickoff *RegistrationRound1Kickoff
+	if autoClosed {
+		kickoff, err = registrationRound1Kickoff(tid, uow.RegisterContext().Capacity, correlationID)
+		if err != nil {
+			return envelope.Result{}, err
+		}
+	}
+	return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, kickoff)
 }
 
 func (s *Service) closeRegistrationDifferential(ctx context.Context, req CommandRequest, tournamentID, correlationID string) (envelope.Result, error) {
@@ -1323,10 +1330,31 @@ func (s *Service) closeRegistrationDifferential(ctx context.Context, req Command
 	closeCmd := domain.CloseRegistrationCommand{CommandID: domain.CommandID(req.CommandID)}
 	decision := domain.DecideCloseRegistration(uow.CloseContext(), closeCmd)
 	bump := decision.Kind == domain.RegistrationClose
-	return s.commitRegistrationOutcome(uow, req, decision, domain.CreateTournamentCommand{}, tournamentID, correlationID, bump)
+	var kickoff *RegistrationRound1Kickoff
+	if bump {
+		kickoff, err = registrationRound1Kickoff(tid, uow.CloseContext().RegisteredCount, correlationID)
+		if err != nil {
+			return envelope.Result{}, err
+		}
+	}
+	return s.commitRegistrationOutcome(uow, req, decision, domain.CreateTournamentCommand{}, tournamentID, correlationID, bump, kickoff)
 }
 
-func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, tournamentID, correlationID string) (envelope.Result, error) {
+func registrationRound1Kickoff(tid domain.TournamentID, registeredCount int, correlationID string) (*RegistrationRound1Kickoff, error) {
+	commandID := domain.SeedRoundCommandID(tid, 1)
+	decision := domain.DecideSeedRoundKickoff(domain.SeedRoundKickoffContext{
+		TournamentID: tid, Exists: true, Phase: domain.PhaseSeeding,
+		RoundNumber: 1, RegisteredCount: registeredCount,
+	}, domain.SeedRoundCommand{CommandID: domain.CommandID(commandID), RoundNumber: 1})
+	if decision.Kind != domain.SeedKickoffSchedule {
+		return nil, fmt.Errorf("round-1 kickoff policy rejected registration close: %s", decision.Kind)
+	}
+	return &RegistrationRound1Kickoff{
+		CommandID: commandID, CorrelationID: correlationID, Decision: decision,
+	}, nil
+}
+
+func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, tournamentID, correlationID string, kickoff *RegistrationRound1Kickoff) (envelope.Result, error) {
 	out := decision.Outcome
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
@@ -1382,13 +1410,14 @@ func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req C
 	payload, _ := json.Marshal(map[string]any{"facts": factsPayload})
 	res := envelope.Accepted(req.CommandID, req.Type, nil, payload)
 	if err := uow.FinalizeRegister(RegistrationCommitRequest{
-		Op:           string(store.RegistrationOpRegister),
-		TournamentID: tournamentID,
-		CommandID:    req.CommandID,
-		CommandType:  req.Type,
-		Outcome:      res,
-		Events:       events,
-		Decision:     decision,
+		Op:            string(store.RegistrationOpRegister),
+		TournamentID:  tournamentID,
+		CommandID:     req.CommandID,
+		CommandType:   req.Type,
+		Outcome:       res,
+		Events:        events,
+		Decision:      decision,
+		Round1Kickoff: kickoff,
 	}); err != nil {
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
@@ -1401,7 +1430,7 @@ func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req C
 	return s.canonicalRegistrationOutcome(req.CommandID, res), nil
 }
 
-func (s *Service) commitRegistrationOutcome(uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, createCmd domain.CreateTournamentCommand, tournamentID, correlationID string, bumpBase bool) (envelope.Result, error) {
+func (s *Service) commitRegistrationOutcome(uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, createCmd domain.CreateTournamentCommand, tournamentID, correlationID string, bumpBase bool, kickoff *RegistrationRound1Kickoff) (envelope.Result, error) {
 	out := decision.Outcome
 	op := string(store.RegistrationOpCreate)
 	if req.Type == CmdCloseRegistration {
@@ -1462,6 +1491,7 @@ func (s *Service) commitRegistrationOutcome(uow RegistrationUnitOfWork, req Comm
 		Outcome: res, Events: events, Decision: decision, CreateCmd: createCmd,
 		RetryBudget: createCmd.RetryBudget, BatchSize: createCmd.BatchSize,
 		BumpBaseProjection: bumpBase && projectionChangedFromOutcome(out),
+		Round1Kickoff:      kickoff,
 	}); err != nil {
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil

@@ -16,6 +16,8 @@ echo "${kind_out}" | grep -q 'imagePullPolicy: IfNotPresent'
 echo "${kind_out}" | grep -q 'name: "uno-arena-local-credentials"'
 echo "${kind_out}" | grep -q 'DATABASE_URL'
 echo "${kind_out}" | grep -q 'room-database-url'
+echo "${kind_out}" | grep -q 'GAME_INTEGRITY_AUDIT_CREDENTIAL'
+echo "${kind_out}" | grep -q 'key: "game-integrity-audit-credential"'
 echo "${kind_out}" | grep -q 'DEPLOYMENT_ENV'
 echo "${kind_out}" | grep -q 'WORKER_ROLE'
 echo "${kind_out}" | grep -q 'room-timer'
@@ -98,6 +100,7 @@ pin_staging_full="$("${HELM}" template room-pin-staging-full "${CHART}" -f "${CH
 echo "${pin_staging_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
 echo "${pin_staging_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
 echo "${pin_staging_full}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
+echo "${pin_staging_full}" | grep -q 'GAME_INTEGRITY_AUDIT_CREDENTIAL'
 
 pin_prod_full="$("${HELM}" template room-pin-prod-full "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.production.yaml" \
   --set image.digest=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
@@ -105,5 +108,6 @@ pin_prod_full="$("${HELM}" template room-pin-prod-full "${CHART}" -f "${CHART}/v
 echo "${pin_prod_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
 echo "${pin_prod_full}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
 echo "${pin_prod_full}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
+echo "${pin_prod_full}" | grep -q 'GAME_INTEGRITY_AUDIT_CREDENTIAL'
 
 echo "ok room-gameplay-helm"

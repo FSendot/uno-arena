@@ -19,10 +19,36 @@ assert_kind_context
 # shellcheck source=port-forward-identity.sh
 # Parent owns cleanup of PF child.
 source "${SCRIPT_DIR}/port-forward-identity.sh"
+trap cleanup EXIT
 
 CRED="${IDENTITY_INTERNAL_CREDENTIAL:-local-gw-backend}"
-USER="${IDENTITY_TEST_USER:-test-player}"
-PASS="${IDENTITY_TEST_PASSWORD:-local-only-test-password}"
+USER="${IDENTITY_TEST_USER:-identity-live-$(date +%s)-$$}"
+PASS="${IDENTITY_TEST_PASSWORD:-${USER}-pass}"
+FIXTURE_OWNED=0
+[[ "${USER}" =~ ^[A-Za-z0-9._-]+$ ]] || die "IDENTITY_TEST_USER must contain only letters, digits, dot, underscore, or hyphen"
+
+cleanup_identity_probe() {
+  local rc=$?
+  cleanup
+  if [[ "${FIXTURE_OWNED}" != "1" ]]; then
+    return "${rc}"
+  fi
+  # This is an explicitly disposable kind acceptance fixture. Remove only the
+  # account owned by this run, including its append-only test outbox facts.
+  kubectl -n "${KIND_NAMESPACE}" exec deploy/postgres-identity -- \
+    psql -U identity_admin -d identity -v ON_ERROR_STOP=1 -c "
+      BEGIN;
+      DELETE FROM outbox_events WHERE player_id IN (SELECT player_id FROM players WHERE username='${USER}');
+      DELETE FROM command_idempotency WHERE player_id IN (SELECT player_id FROM players WHERE username='${USER}');
+      DELETE FROM sessions WHERE player_id IN (SELECT player_id FROM players WHERE username='${USER}');
+      DELETE FROM external_identities WHERE player_id IN (SELECT player_id FROM players WHERE username='${USER}');
+      DELETE FROM player_acls WHERE player_id IN (SELECT player_id FROM players WHERE username='${USER}');
+      DELETE FROM players WHERE username='${USER}';
+      COMMIT;
+    " >/dev/null 2>&1 || rc=1
+  return "${rc}"
+}
+trap cleanup_identity_probe EXIT
 
 echo "Identity base: ${IDENTITY_BASE_URL}"
 
@@ -36,6 +62,15 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [[ "${ready}" == "1" ]] || die "/ready never became 200 (last=$(cat /tmp/identity-ready.json 2>/dev/null || true))"
+
+# Kind deliberately exercises Identity's context-owned local provisioning store
+# rather than Keycloak direct grant. Create an isolated durable player before
+# testing takeover/session invalidation; production overlays keep this disabled.
+register="$(curl -sS -X POST "${IDENTITY_BASE_URL}/v1/auth/register" \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"${USER}\",\"password\":\"${PASS}\"}")"
+[[ "$(jq -r '.status // empty' <<<"${register}")" == "ok" ]] || die "test player registration failed: ${register}"
+FIXTURE_OWNED=1
 
 login1="$(curl -sS -X POST "${IDENTITY_BASE_URL}/v1/auth/login" \
   -H 'Content-Type: application/json' \

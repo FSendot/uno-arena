@@ -1,7 +1,7 @@
 # Declarative registration of the four Kafka-bound PostgreSQL Outbox Event Router
 # connectors. Idempotent PUT /connectors/{name}/config; fail-closed on config/status
 # errors. Uses the same exact quay.io Connect digest as the Deployment (curl/bash/python3;
-# sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada;
+# sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70;
 # imagePullPolicy Never — staged by load-debezium-connect.sh node-native crictl pull).
 # Debezium owns unique replication slots; publications come from postgres bootstrap Jobs.
 apiVersion: v1
@@ -288,7 +288,7 @@ spec:
       containers:
         - name: register
           # Same exact Connect digest as debezium-connect Deployment (Never = no runtime pull).
-          image: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+          image: quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
           imagePullPolicy: Never
           command: ["/bin/bash", "/scripts/register-connectors.sh"]
           env:

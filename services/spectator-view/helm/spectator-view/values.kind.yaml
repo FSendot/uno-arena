@@ -1,8 +1,8 @@
 # Local kind overlay for Spectator View durable Redis projection + SSE.
 # Kafka consumer for room.spectator-safe.events is wired via franz-go.
 # HTTP internal ingest remains a test/ops bridge only.
-# Projection rebuilder stays disabled in kind: only offline structure checks exist;
-# no live request→snapshot→fenced swap→quarantine release proof has run (ADR-0039).
+# Projection rebuilder is enabled only in kind after the live
+# request→snapshot→fenced swap→quarantine release proof passed (ADR-0039).
 kind: true
 
 replicaCount: 1
@@ -32,7 +32,7 @@ secretEnv:
   SPECTATOR_VIEW_INTERNAL_CREDENTIAL: spectator-view-internal-credential
 
 projectionRebuilder:
-  enabled: false
+  enabled: true
   replicaCount: 1
   env:
     ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080

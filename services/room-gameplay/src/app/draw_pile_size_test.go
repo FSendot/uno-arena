@@ -113,6 +113,11 @@ func TestDrawPileSize_SnapshotsIncludeCountOnly(t *testing.T) {
 	if _, ok := gameObj["drawPileSize"]; !ok {
 		t.Fatalf("player game missing drawPileSize: %+v", gameObj)
 	}
+	for _, field := range []string{"penaltyAmount", "penaltyTarget", "pendingColorChoice"} {
+		if _, ok := gameObj[field]; !ok {
+			t.Fatalf("player game missing %s: %+v", field, gameObj)
+		}
+	}
 	raw, _ := json.Marshal(snap)
 	for _, leak := range []string{"seedCommitment", "shuffledOrder", "deckOrder"} {
 		if strings.Contains(string(raw), leak) {

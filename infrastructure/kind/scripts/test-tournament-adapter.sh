@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Explicit live Tournament durable adapter acceptance against kind (structure + ready + create + outbox row).
-# CDC Kafka delivery remains later. Never applies/resets unrelated resources.
+# Explicit live Tournament durable adapter acceptance against kind (ready + create + idempotency).
+# CreateTournament is internal-only and intentionally emits no Kafka/outbox row.
 set -euo pipefail
 set -m
 
@@ -16,6 +16,7 @@ assert_kind_context
 
 # shellcheck source=port-forward-tournament-orchestration.sh
 source "${SCRIPT_DIR}/port-forward-tournament-orchestration.sh"
+trap cleanup EXIT
 
 CRED="${TOURNAMENT_INTERNAL_CREDENTIAL:-local-room-to-tournament}"
 TID="kind-adapter-$(date +%s)"
@@ -41,26 +42,29 @@ create="$(curl -sS -X POST "${TOURNAMENT_BASE_URL}/internal/v1/commands" \
 status="$(jq -r '.status // empty' <<<"${create}")"
 [[ "${status}" == "accepted" ]] || die "create tournament failed: ${create}"
 
-# Outbox committed for create (CDC delivery later).
+# Durable aggregate and command outcome committed atomically. The internal-only
+# create fact intentionally has no AsyncAPI topic and therefore no outbox row.
+tournament_count="$(kubectl -n "${KIND_NAMESPACE}" exec deploy/postgres-tournament -- \
+  psql -U tournament_admin -d tournament -tAc \
+  "SELECT count(*) FROM tournaments WHERE tournament_id='${TID}' AND phase='registration' AND capacity=4" 2>/dev/null || echo 0)"
+tournament_count="$(echo "${tournament_count}" | tr -d '[:space:]')"
+[[ "${tournament_count}" == "1" ]] || die "expected one durable tournament ${TID}, got ${tournament_count}"
 outbox_count="$(kubectl -n "${KIND_NAMESPACE}" exec deploy/postgres-tournament -- \
   psql -U tournament_admin -d tournament -tAc \
-  "SELECT count(*) FROM outbox_events WHERE tournament_id='${TID}'" 2>/dev/null || echo 0)"
+  "SELECT count(*) FROM outbox_events WHERE tournament_id='${TID}'" 2>/dev/null || echo 1)"
 outbox_count="$(echo "${outbox_count}" | tr -d '[:space:]')"
-[[ "${outbox_count}" =~ ^[0-9]+$ ]] || outbox_count=0
-if (( outbox_count < 1 )); then
-  die "expected >=1 outbox row for tournament ${TID}, got ${outbox_count}"
-fi
+[[ "${outbox_count}" == "0" ]] || die "CreateTournament must emit zero outbox rows, got ${outbox_count}"
 
-# Exact replay must stay accepted without duplicating outbox.
+# Exact replay must stay accepted without duplicating aggregate/idempotency rows.
 replay="$(curl -sS -X POST "${TOURNAMENT_BASE_URL}/internal/v1/commands" \
   -H "Content-Type: application/json" \
   -H "X-Service-Credential: ${CRED}" \
   -d "{\"commandId\":\"cmd-${TID}\",\"type\":\"CreateTournament\",\"schemaVersion\":1,\"payload\":{\"tournamentId\":\"${TID}\",\"capacity\":4},\"playerId\":\"op\",\"sessionId\":\"s\"}")"
 [[ "$(jq -r '.status // empty' <<<"${replay}")" == "accepted" ]] || die "replay failed: ${replay}"
-outbox_count2="$(kubectl -n "${KIND_NAMESPACE}" exec deploy/postgres-tournament -- \
+idempotency_count="$(kubectl -n "${KIND_NAMESPACE}" exec deploy/postgres-tournament -- \
   psql -U tournament_admin -d tournament -tAc \
-  "SELECT count(*) FROM outbox_events WHERE tournament_id='${TID}'" 2>/dev/null || echo 0)"
-outbox_count2="$(echo "${outbox_count2}" | tr -d '[:space:]')"
-[[ "${outbox_count2}" == "${outbox_count}" ]] || die "replay must not duplicate outbox (${outbox_count} -> ${outbox_count2})"
+  "SELECT count(*) FROM command_idempotency WHERE command_id='cmd-${TID}' AND tournament_id='${TID}'" 2>/dev/null || echo 0)"
+idempotency_count="$(echo "${idempotency_count}" | tr -d '[:space:]')"
+[[ "${idempotency_count}" == "1" ]] || die "replay must keep one idempotency row, got ${idempotency_count}"
 
-echo "ok kind-test-tournament-adapter tournament=${TID} outbox=${outbox_count}"
+echo "ok kind-test-tournament-adapter tournament=${TID} idempotency=1 outbox=0"

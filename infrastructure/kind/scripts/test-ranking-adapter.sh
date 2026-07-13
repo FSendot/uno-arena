@@ -16,6 +16,7 @@ assert_kind_context
 
 # shellcheck source=port-forward-ranking.sh
 source "${SCRIPT_DIR}/port-forward-ranking.sh"
+trap cleanup EXIT
 
 CRED="${RANKING_INTERNAL_CREDENTIAL:-local-room-to-ranking}"
 GID="kind-adapter-$(date +%s)"

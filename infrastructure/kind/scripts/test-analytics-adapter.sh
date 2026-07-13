@@ -16,6 +16,7 @@ assert_kind_context
 
 # shellcheck source=port-forward-analytics.sh
 source "${SCRIPT_DIR}/port-forward-analytics.sh"
+trap cleanup EXIT
 
 ROOM_CRED="${ANALYTICS_ROOM_CREDENTIAL:-local-analytics-room}"
 GID="kind-adapter-$(date +%s)"

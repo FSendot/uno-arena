@@ -41,6 +41,8 @@ Examples:
 - If tournament provisioning exhausts retries or detects conflicting room assignments, it emits `TournamentProvisioningBatchQuarantined` and blocks the affected round from starting until explicit reconciliation.
 - If Tournament Orchestration detects a conflicting room result, it emits `TournamentResultQuarantined` rather than overwriting the slot.
 - If Room Gameplay has an append confirmed by Game Integrity but fails before committing its operational snapshot, recovery emits `RoomStateReconciled` after rebuilding the missing state from the log offset.
+- A non-terminal best-of-three `GameCompleted` transaction persists a deterministic next-game continuation. Room-owned timer workers claim it with `FOR UPDATE SKIP LOCKED`; lease expiry recovers worker crashes and the successful `StartNextGame` commit removes it atomically.
+- For an uncertain Game Integrity append, Room replays first. It re-appends the exact persisted event only when replay is successful, contains no matching event, and reports exactly the original expected revision. Replay errors, identity mismatch, or an advanced revision remain fail-closed for operator reconciliation.
 - If a player was advanced incorrectly due to a validated but later-disputed result, the correction should occur through explicit adjudication events, not silent mutation of history.
 - If an Uno challenge deadline expires, the room emits `UnoWindowExpired` exactly once using `(roomId, gameId, playerId, triggeringGameEventId)`; retries cannot close a newer window or apply penalties twice. The published window includes absolute UTC `expiresAt` and the opening room sequence so clients can display an advisory countdown without owning timeliness.
 - If a 60-second reconnect deadline expires, the room emits `PlayerForfeited` exactly once using `(roomId, playerId, disconnectVersion)`; retries cannot duplicate the forfeit.
@@ -99,7 +101,7 @@ Examples:
 - rebuild projections from spectator-safe upstream events while Kafka history remains available
 - after retention expiry or quarantine requiring rebuild, emit `spectator.projection.rebuild_requested` and fetch Room `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` with `ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`; Redis Lua CAS/fence generation-swap so newer live apply wins, recording `(recoveryJobId, roomId, failedCheckpoint)` idempotency atomically with fenced quarantine release
 - replay bounded held post-gap quarantine/DLQ records in sequence for that `roomId` only (max 1000); release quarantine only after continuity is proven; never silently skip a gap
-- rebuilder Deployment remains disabled in default/staging/production/`kind` until live recovery tests pass
+- rebuilder Deployment is enabled only in kind after the live recovery proof; default/staging/production remain disabled
 - re-filter historical events if the visibility policy changes
 - restore admission rules so new connections are allowed only while the projected room is `waiting`, `locked`, or `in_progress`, and close streams for terminal rooms
 
@@ -109,7 +111,7 @@ Examples:
 - after retention expiry or quarantine requiring rebuild, emit `analytics.projection.rebuild_requested` and page Room/Tournament/Ranking `POST .../analytics-backfill` APIs (producer-owned HMAC cursor; paired range required; producer default 100 / hard max 1000; worker default page 1000; read-only append-only outbox)
 - apply under a durable ClickHouse rebuilding generation/lease (deterministic generation, lease readback, active/building dual-write, server-side clone) so concurrent live ingest joins the fence; claim continuity only after every requested page/checkpoint is reconciled
 - acknowledge ClickHouse non-transactional projection-before-marker check-then-act; same-generation redelivery is idempotent via FINAL processed markers
-- rebuilder Deployment remains disabled in default/staging/production/`kind` until live recovery tests pass
+- rebuilder Deployment is enabled only in kind after the live recovery proof; default/staging/production remain disabled
 - rebuild public reporting projections without changing source-of-truth contexts
 - drop or quarantine events that do not satisfy the analytics anonymization and public-data policy
 

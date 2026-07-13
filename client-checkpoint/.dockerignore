@@ -2,4 +2,6 @@
 *
 !bin/
 !bin/unoarena
+!lib/
+!lib/game_client.py
 !Dockerfile

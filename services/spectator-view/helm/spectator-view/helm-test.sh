@@ -27,15 +27,12 @@ echo "${kind_out}" | grep -q 'KAFKA_SPECTATOR_SAFE_DLQ_TOPIC'
 echo "${kind_out}" | grep -q 'type: ClusterIP'
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
 ! echo "${kind_out}" | grep -q 'SPECTATOR_CAPABILITY_MODE'
-# Kind keeps projectionRebuilder disabled (structure-only; no live recovery claim).
-! echo "${kind_out}" | grep -q 'spectator-projection-rebuilder' \
-  || { echo "kind must omit projection-rebuilder while disabled" >&2; exit 1; }
-! echo "${kind_out}" | grep -q 'WORKER_ROLE' \
-  || { echo "kind must omit WORKER_ROLE while rebuilder disabled" >&2; exit 1; }
+# Kind enables the live-proven projection rebuilder.
+echo "${kind_out}" | grep -q 'spectator-projection-rebuilder'
+echo "${kind_out}" | grep -q 'WORKER_ROLE'
 
-# Template privilege checks via explicit enable flip only.
-reb_out="$("${HELM}" template spectator-view-kind-rebuilder "${CHART}" -f "${CHART}/values.kind.yaml" \
-  --set projectionRebuilder.enabled=true)"
+# Template privilege checks on the kind render.
+reb_out="${kind_out}"
 echo "${reb_out}" | grep -q 'WORKER_ROLE'
 echo "${reb_out}" | grep -q 'spectator-projection-rebuilder'
 echo "${reb_out}" | grep -q 'ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL'

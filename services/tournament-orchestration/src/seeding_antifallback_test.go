@@ -127,3 +127,14 @@ func TestSubmitCommandSeedingBypassesMutex(t *testing.T) {
 		t.Fatal("non-differential commands must still take Service.mu")
 	}
 }
+
+func TestSeedingFinalizeOwnsProvisioningKickoffForEveryRound(t *testing.T) {
+	path := filepath.Join("store", "seeding.go")
+	finalize := extractFuncBody(t, path, "finalizeSeedingInTx")
+	if !strings.Contains(finalize, "finalizeRoundProvisioningInTx") {
+		t.Fatal("seeding finalize must atomically start provisioning")
+	}
+	if strings.Contains(finalize, "rn > 1") || strings.Contains(finalize, "rn == 1") {
+		t.Fatal("provisioning continuation must not special-case round 1")
+	}
+}

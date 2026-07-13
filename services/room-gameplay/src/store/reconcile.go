@@ -263,21 +263,50 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 			}
 		}
 		if found == nil {
-			return fmt.Errorf("gi replay fail-closed: no matching event command=%s room=%s (leave pending)", m.CommandID, m.RoomID)
+			// A strongly consistent replay proving that GI has not advanced closes
+			// the uncertain-response gap: re-append the exact persisted intent with
+			// its deterministic event ID. Any advanced revision remains ambiguous
+			// and must stay fail-closed.
+			if replay.Revision != m.ExpectedRevision {
+				return fmt.Errorf("gi replay fail-closed: no matching event and revision advanced command=%s room=%s expected=%d got=%d (leave pending)",
+					m.CommandID, m.RoomID, m.ExpectedRevision, replay.Revision)
+			}
+			gameID, err := reconciliationGameID(blob)
+			if err != nil {
+				return err
+			}
+			appendRes, err := integrity.Append(ctx, app.AppendRequest{
+				RoomID:           m.RoomID,
+				GameID:           gameID,
+				EventID:          m.CommandID,
+				ExpectedRevision: m.ExpectedRevision,
+				EventType:        blob.CommandType,
+				Payload:          blob.GIPayload,
+			})
+			if err != nil {
+				return fmt.Errorf("gi deterministic reappend command=%s room=%s: %w", m.CommandID, m.RoomID, err)
+			}
+			if err := s.FinalizeReconciliationIntent(ctx, m.CommandID, appendRes.LogOffset, appendRes.Revision); err != nil {
+				return err
+			}
+			m.LogOffset = appendRes.LogOffset
+			m.Revision = appendRes.Revision
+			m.HasLogOffset = true
+		} else {
+			if err := assertReplayIdentity(blob, *found); err != nil {
+				return err
+			}
+			rev, err := resolveRevision(m, *found, replay)
+			if err != nil {
+				return err
+			}
+			if err := s.FinalizeReconciliationIntent(ctx, m.CommandID, found.Offset, rev); err != nil {
+				return err
+			}
+			m.LogOffset = found.Offset
+			m.Revision = rev
+			m.HasLogOffset = true
 		}
-		if err := assertReplayIdentity(blob, *found); err != nil {
-			return err
-		}
-		rev, err := resolveRevision(m, *found, replay)
-		if err != nil {
-			return err
-		}
-		if err := s.FinalizeReconciliationIntent(ctx, m.CommandID, found.Offset, rev); err != nil {
-			return err
-		}
-		m.LogOffset = found.Offset
-		m.Revision = rev
-		m.HasLogOffset = true
 	}
 
 	processed, err := s.IsProcessedReconciliationOffset(ctx, m.RoomID, m.LogOffset)
@@ -461,6 +490,20 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 		_ = scheduleTimersFromSession(ctx, s.Timers, sess)
 	}
 	return nil
+}
+
+func reconciliationGameID(blob app.ReconciliationRepairBlob) (string, error) {
+	if blob.ReservationGameID != "" {
+		return blob.ReservationGameID, nil
+	}
+	sess, err := decodeSessionSnapshot(blob.SessionSnapshot)
+	if err != nil {
+		return "", fmt.Errorf("decode reconciliation game identity: %w", err)
+	}
+	if sess == nil {
+		return "", fmt.Errorf("decode reconciliation game identity: missing session")
+	}
+	return string(sess.GameID()), nil
 }
 
 func assertReplayIdentity(blob app.ReconciliationRepairBlob, e app.ReplayEntry) error {

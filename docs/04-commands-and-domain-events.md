@@ -30,7 +30,7 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | Command | Issuer | Primary Event(s) | Causality | Idempotency |
 | --- | --- | --- | --- | --- |
 | `CompleteGame` | Room Gameplay policy | `GameCompleted`, `MatchScoreUpdated` | Triggered when a player empties their hand or wins by rule; event payload includes `gameId`, `roomId`, `placementOrder`, authoritative `participants`, and `isAbandoned` | Same winning state must not be recorded twice |
-| `StartNextGame` | Room Gameplay policy | `GameStarted` | Triggered if no player has yet won the best-of-three match | Idempotent if next game already exists |
+| `StartNextGame` | Room Gameplay policy | `GameStarted` | Triggered if no player has yet won the best-of-three match. Durable mode commits a deterministic continuation with `GameCompleted`; Room timer workers claim it with bounded leases until the next game commits | Idempotent by deterministic completed-game command/game identity; terminal or already-started matches consume the continuation safely |
 | `CompleteMatch` | Room Gameplay policy | `MatchCompleted`, `RoomCompleted` | Triggered when a player reaches two game wins | Idempotent by `(roomId, matchNumber)` |
 
 ## Tournament Commands
@@ -39,12 +39,17 @@ This catalog lists the main commands, their primary emitted events, causality, a
 | --- | --- | --- | --- | --- |
 | `CreateTournament` | Organizer | `TournamentCreated` | Organizer defines tournament rules and capacity | Duplicate requests collapse by request key |
 | `RegisterPlayer` | Player or organizer | `PlayerRegisteredInTournament` | Validated through Identity and Session | Idempotent by `(tournamentId, playerId)` |
-| `CloseRegistration` | System or organizer | `TournamentRegistrationClosed` | Triggered at capacity or deadline | Duplicate close ignored |
-| `SeedRound` | Tournament policy | `TournamentRoundSeeded` | Triggered after registration closes | Idempotent by `(tournamentId, roundNumber)`. Durable path schedules ROUND-1 only (worker finalizes); `TournamentRoundSeeded` is internal-only (no Kafka channel). |
-| `ProvisionRoundMatches` | Tournament policy | `TournamentMatchAssigned` | Creates room assignments for bracket slots | Duplicate assignments ignored by slot identity |
+| `CloseRegistration` | System or organizer | `TournamentRegistrationClosed` | Triggered explicitly at deadline or automatically when capacity is reached; the durable transaction also creates the deterministic round-1 seeding job | Duplicate close ignored; close and kickoff are atomic |
+| `SeedRound` | Tournament policy | `TournamentRoundSeeded` | Round 1 follows registration close; each non-final `CompleteRound` creates the next deterministic seeding job, and the seeding worker finalizes every round | Idempotent by `(tournamentId, roundNumber)`; internal-only policy command and event (no public BFF command or Kafka channel) |
+| `ProvisionRoundMatches` | Tournament policy | `TournamentMatchAssigned` | Finalizing any seeded round schedules bounded provisioning batches; the provisioning worker creates Room-owned assignments | Duplicate assignments ignored by slot identity; internal-only policy command |
 | `RecordMatchResult` | Tournament policy | `TournamentMatchResultRecorded`, `PlayersAdvanced` | Consumes authoritative `MatchCompleted` containing ranked match facts such as match wins, card points, completion time, and forfeit/abandonment markers; Tournament Orchestration calculates the advancing players | Idempotent by `(roomId, completionVersion)` |
-| `CompleteRound` | Tournament policy | `TournamentRoundCompleted` | Triggered when all assigned matches are terminal | Idempotent by round status |
-| `CompleteTournament` | Tournament policy | `TournamentCompleted` | Triggered when the final room has an authoritative ranked result; publishes every final-room player in ordered `finalStandings`, whose first entry is the champion | Idempotent by tournament status |
+| `CompleteRound` | Tournament policy | `TournamentRoundCompleted`, and `TournamentCompleted` for the final round | Tournament-owned completion worker detects that all assigned matches are terminal; a non-final completion atomically creates the next-round seeding job, while final completion atomically marks the tournament completed | Idempotent by deterministic `(tournamentId, roundNumber)` command identity and round status; internal-only policy command |
+| `CompleteTournament` | Tournament policy | `TournamentCompleted` | Domain policy folded into final `CompleteRound`; publishes every final-room player in ordered `finalStandings`, whose first entry is the champion | Idempotent by tournament status; retained as internal domain language, not a public BFF command |
+
+The public BFF catalog remains closed. Tournament clients may submit only
+`CreateTournament`, `RegisterPlayer`, and `CloseRegistration`; `SeedRound`,
+`ProvisionRoundMatches`, `CompleteRound`, and `CompleteTournament` stay inside
+Tournament Orchestration.
 
 ## Ranking Commands
 

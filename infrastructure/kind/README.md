@@ -14,7 +14,7 @@ Not production. No HA, backup, PVC, or durability claim.
 - `generated/` — Kafka topics Job/plan rendered from `contracts/asyncapi/kafka-v1.yaml`
   (kind-short retention.ms, DLQ scaffolding, Connect compacted internals)
 - `scripts/` — render / validate / create / build-load / load-debezium-connect /
-  load-debezium-server / apply / wait / reset / connector status helpers
+  load-debezium-server / apply / deploy-services / probes / wait / reset helpers
 - `../bootstrap/` — repo-root-buildable image embedding `services/*/migrations` + generated fingerprints + CDC role/publication SQL
 
 ## Make targets
@@ -27,7 +27,7 @@ Not production. No HA, backup, PVC, or durability claim.
 | `make kind-test-redis-aof` | Explicit/networked: DB15 prefix survives Redis PID 1 restart |
 | `make kind-test-debezium-connect-structure` | Offline Connect config/wiring checks (no delivery claim) |
 | `make kind-test-debezium-connectors` | Explicit/networked: Connect REST status for 4 connectors (no delivery claim) |
-| `make kind-test-debezium-postgres-to-kafka-live` | Explicit: Identity outbox insert → Kafka observe (consumers still PENDING) |
+| `make kind-test-debezium-postgres-to-kafka-live` | Explicit: Identity outbox insert → Kafka observe (consumer behavior is verified by its own lane) |
 | `make kind-test-debezium-server-structure` | Offline Debezium Server config/wiring checks (no delivery claim) |
 | `make kind-test-debezium-postgres-to-redis-live` | Explicit: Room realtime outbox insert → Redis DB2 observe (SSE E2E not claimed) |
 | `make kind-create-cluster` | Explicit: create `kind` cluster `uno-arena` |
@@ -39,7 +39,38 @@ Not production. No HA, backup, PVC, or durability claim.
 | `make kind-wait` | Re-check Deployments + bootstrap Jobs + Connect/Server |
 | `make kind-reset` | Explicit: delete **only** cluster `uno-arena` (rejects name/context overrides) |
 
-Create / apply / reset are never implied by validate.
+The complete local lane is intentionally a script rather than an implicit Make
+dependency. Preview it offline first, then provide the literal destructive
+confirmation:
+
+```bash
+./infrastructure/kind/scripts/clean-deploy.sh --dry-run
+./infrastructure/kind/scripts/clean-deploy.sh --confirm-reset uno-arena
+```
+
+The live invocation validates offline, checks the required tools and Docker
+architecture before deletion, deletes and recreates only `uno-arena`, builds
+and loads the bootstrap plus all eight application images for `linux/arm64`, stages the exact
+Debezium Connect/Server ARM64 digests, applies and waits for the foundation,
+deploys all Helm releases, and runs the established CDC, adapter, integration,
+Redis, and Kafka-to-ClickHouse probes. Use `--skip-probes` only while diagnosing
+deployment startup. A non-ARM64 kind node fails closed because the selected
+local KurrentDB 26.0.3 experimental image is ARM64-only.
+
+The complete ARM64 lane has been exercised with the foundation and all eight
+services ready. Kafka Connect and Debezium Server CDC were live, and the full
+Spectator Kafka→Room→Redis and Analytics Kafka→producer-backfill→ClickHouse
+recovery-worker proofs passed. Consequently, `projectionRebuilder.enabled=true`
+is scoped to Spectator and Analytics `values.kind.yaml`; default, staging, and
+production values remain false. Stage B acceptance also completed a live casual
+best-of-three and a live tournament from registration through assignment, Room
+play, result consumption, advancement, and terminal `TournamentCompleted`.
+
+`clean-deploy.sh --dry-run` is offline and non-mutating. The live form requires
+Docker and registry/network access and must be started deliberately.
+
+Create / apply / reset are never implied by validate. `kind-validate` also
+checks the complete-lane structure and executes only its dry-run plan.
 
 ## Apply ordering
 
@@ -66,6 +97,13 @@ Connect registration Job reference those exact quay.io digests with
 fallback (workload never pulls).
 Connectors and Server use `snapshot.mode=no_data` (streaming only). Structure/status
 checks do not claim live CDC delivery.
+
+Debezium 3.6.0.Final is pinned to the current exact ARM64 manifests:
+Connect `sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70`
+and Server `sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08`.
+These digests were rotated after the upstream registry republished the tags;
+the node-native staging scripts validate the expected architecture and digest
+instead of trusting mutable tag or stale kind-import metadata.
 
 ## Discovery
 

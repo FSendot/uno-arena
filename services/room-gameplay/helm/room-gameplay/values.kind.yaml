@@ -44,4 +44,5 @@ secretEnv:
   ANALYTICS_SERVICE_CREDENTIAL: analytics-room-credential
   TOURNAMENT_SERVICE_CREDENTIAL: tournament-internal-credential
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
   DATABASE_URL: room-database-url

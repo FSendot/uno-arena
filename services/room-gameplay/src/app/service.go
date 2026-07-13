@@ -94,11 +94,25 @@ type CommandResult struct {
 // HandleCommand maps a catalog command onto Session/Room with GI append-before-commit.
 func (s *Service) HandleCommand(ctx context.Context, in CommandInput) CommandResult {
 	if s.durable() {
+		// Durable best-of-three continuation is persisted atomically with the
+		// completed game and claimed by the Room-owned timer worker. Never rely
+		// on this request surviving after its commit.
 		return s.handleCommandDurable(ctx, in)
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	result := func() CommandResult {
+		defer s.mu.Unlock()
+		return s.handleCommandMemoryLocked(ctx, in)
+	}()
+	s.startNextGameAfterCompletion(ctx, in, result)
+	return result
+}
+
+// handleCommandMemoryLocked handles one command while Service.mu is held.
+// Capability-mode match orchestration runs only after this returns so its deterministic
+// StartNextGame command can safely re-enter HandleCommand.
+func (s *Service) handleCommandMemoryLocked(ctx context.Context, in CommandInput) CommandResult {
 
 	if strings.TrimSpace(in.CommandID) == "" || strings.TrimSpace(in.Type) == "" {
 		return s.reject(ctx, in, "invalid_envelope", nil, nil)
@@ -123,6 +137,53 @@ func (s *Service) HandleCommand(ctx context.Context, in CommandInput) CommandRes
 	default:
 		return s.reject(ctx, in, "unknown_command_type", nil, nil)
 	}
+}
+
+// startNextGameAfterCompletion is the capability-mode best-of-three policy.
+// A successfully committed GameCompleted is followed immediately by a system
+// StartNextGame when the match is not terminal. The identifiers are derived from
+// the completed game, so a duplicate originating command safely retries a failed
+// follow-up without reserving different deal material.
+//
+// Durable mode instead persists a continuation atomically and lets the Room-owned
+// worker retry it independently of the originating request.
+func (s *Service) startNextGameAfterCompletion(ctx context.Context, in CommandInput, result CommandResult) {
+	if in.Type == CmdStartNextGame || result.Err != nil || result.Result.Status != envelope.StatusAccepted {
+		return
+	}
+	roomID := strings.TrimSpace(in.RoomID)
+	if roomID == "" {
+		var payload struct {
+			RoomID string `json:"roomId"`
+		}
+		_ = json.Unmarshal(in.Payload, &payload)
+		roomID = strings.TrimSpace(payload.RoomID)
+	}
+	if roomID == "" {
+		return
+	}
+	sess, ok := s.deps.Sessions.Get(ctx, domain.RoomID(roomID))
+	if !ok || sess == nil || sess.Room() == nil || !sess.Room().GameCompletedInMatch() {
+		return
+	}
+	if sess.Room().Status().IsTerminal() || sess.Match() == nil || sess.Match().Completed() || sess.Game() == nil || !sess.Game().Completed() {
+		return
+	}
+
+	completedGameID := string(sess.GameID())
+	commandID := "auto-next-" + roomID + "-after-" + completedGameID
+	gameID := "game-next-" + completedGameID
+	expected := int64(sess.Room().Sequence())
+	_ = s.HandleCommand(ctx, CommandInput{
+		CommandID:              commandID,
+		Type:                   CmdStartNextGame,
+		SchemaVersion:          envelope.CurrentSchemaVersion,
+		Payload:                MustJSON(map[string]string{"roomId": roomID, "gameId": gameID}),
+		RoomID:                 roomID,
+		ExpectedSequenceNumber: &expected,
+		CorrelationID:          in.CorrelationID,
+		AsSystem:               true,
+	})
 }
 
 // ProvisionInput is the tournament room provision request.
@@ -304,15 +365,18 @@ func (s *Service) PlayerSnapshot(ctx context.Context, roomID, playerID string) (
 	if g := sess.Game(); g != nil {
 		pub := g.PublicSnapshot()
 		snap["game"] = map[string]any{
-			"gameId":         string(sess.GameID()),
-			"sequenceNumber": int64(pub.Sequence),
-			"discardTop":     pub.DiscardTop,
-			"activeColor":    string(pub.ActiveColor),
-			"currentPlayer":  string(pub.CurrentPlayer),
-			"direction":      int(pub.Direction),
-			"handCounts":     pub.HandCounts,
-			"drawPileSize":   pub.DrawPileSize,
-			"completed":      pub.Completed,
+			"gameId":             string(sess.GameID()),
+			"sequenceNumber":     int64(pub.Sequence),
+			"discardTop":         pub.DiscardTop,
+			"activeColor":        string(pub.ActiveColor),
+			"currentPlayer":      string(pub.CurrentPlayer),
+			"direction":          int(pub.Direction),
+			"handCounts":         pub.HandCounts,
+			"drawPileSize":       pub.DrawPileSize,
+			"penaltyAmount":      pub.PenaltyAmount,
+			"penaltyTarget":      string(pub.PenaltyTarget),
+			"pendingColorChoice": pub.PendingColorChoice,
+			"completed":          pub.Completed,
 		}
 		snap["hand"] = g.Hand(game.PlayerID(playerID))
 	}

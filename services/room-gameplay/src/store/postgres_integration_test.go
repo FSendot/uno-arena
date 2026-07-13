@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"unoarena/services/room-gameplay/app"
 	"unoarena/services/room-gameplay/domain"
+	"unoarena/services/room-gameplay/game"
 	"unoarena/services/room-gameplay/store"
 )
 
@@ -71,7 +73,7 @@ func resetPublic(t *testing.T, pool *pgxpool.Pool) {
 			realtime_outbox_events, integration_outbox_events,
 			processed_reconciliation_offsets, pending_integrity_reconciliations,
 			pending_rejection_audits, player_stream_highwater, tournament_provisions,
-			player_session_bindings, reconnect_deadlines, uno_deadlines,
+			player_session_bindings, next_game_continuations, reconnect_deadlines, uno_deadlines,
 			command_idempotency, current_games, room_roster, rooms,
 			schema_migrations, schema_bootstrap_meta CASCADE
 	`)
@@ -273,6 +275,144 @@ func TestIntegration_DuplicateCommandNoSecondGI(t *testing.T) {
 	}
 	if len(gi.Appends) != n {
 		t.Fatalf("second GI append occurred: %d -> %d", n, len(gi.Appends))
+	}
+}
+
+func TestIntegration_AutoNextGamePersistsAndRecoversDurableContinuation(t *testing.T) {
+	pool := openPool(t)
+	sessions := store.NewSessionStore(pool)
+	ctx := context.Background()
+
+	room, out := domain.CreateRoom(domain.CreateRoomCommand{
+		CommandID: "auto_create", RoomID: "room_auto_next", HostID: "host", MaxSeats: 2,
+	})
+	if out.Rejection != nil {
+		t.Fatal(out.Rejection)
+	}
+	if joined := room.JoinRoom(domain.JoinRoomCommand{CommandID: "auto_join", PlayerID: "guest", ExpectedSequence: room.Sequence()}); joined.Rejection != nil {
+		t.Fatal(joined.Rejection)
+	}
+	if locked := room.LockRoom(domain.LockRoomCommand{CommandID: "auto_lock", ActorID: "host", ExpectedSequence: room.Sequence()}); locked.Rejection != nil {
+		t.Fatal(locked.Rejection)
+	}
+	sess := domain.OpenSession(room)
+	started := sess.StartMatch(domain.StartMatchCommand{
+		CommandID: "auto_start", ActorID: "host", GameID: "game-1", ExpectedSequence: room.Sequence(),
+	}, game.DealMaterial{
+		Hands: map[game.PlayerID][]game.Card{
+			"host":  {{ID: "winning-card", Color: game.ColorRed, Face: game.Face3}},
+			"guest": {{ID: "guest-card", Color: game.ColorBlue, Face: game.Face2}},
+		},
+		DiscardTop:  game.Card{ID: "discard", Color: game.ColorRed, Face: game.Face5},
+		ActiveColor: game.ColorRed, CurrentSeat: 0, Direction: game.DirectionClockwise,
+		DrawPileSize: 93, HasDrawPileSize: true,
+	})
+	if started.Rejection != nil {
+		t.Fatal(started.Rejection)
+	}
+	uow, err := sessions.BeginCreate(ctx, room.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uow.CommitAccepted(app.DurableAcceptedCommit{
+		Session: sess, CommandID: "seed_auto", CommandType: "Seed", Outcome: started,
+		CreatePath: true, IntegrityRevision: 0, SetIntegrityRevision: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gi := app.NewFakeGameIntegrity()
+	deals := app.NewFakeDealSource()
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: sessions, Commands: sessions, Integrity: gi,
+		Publisher: app.NewFakeEventPublisher(), Audit: app.NewFakeAuditSink(),
+		Deals: deals, Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	seq := int64(sess.Room().Sequence())
+	result := svc.HandleCommand(ctx, app.CommandInput{
+		CommandID: "auto_win", Type: app.CmdPlayCard, SchemaVersion: 1,
+		RoomID: "room_auto_next", PlayerID: "host", SessionID: "host-session",
+		ExpectedSequenceNumber: &seq,
+		Payload:                mustJSON(map[string]any{"roomId": "room_auto_next", "cardId": "winning-card"}),
+	})
+	if result.Err != nil || result.Result.Status != "accepted" {
+		t.Fatalf("play=%+v err=%v", result.Result, result.Err)
+	}
+	live, ok := sessions.Get(ctx, "room_auto_next")
+	if !ok || !live.Room().GameCompletedInMatch() || live.Game() == nil || !live.Game().Completed() {
+		t.Fatalf("completed game must commit before continuation: ok=%v session=%+v", ok, live)
+	}
+	if gi.Len() != 1 || deals.DealCalls != 0 {
+		t.Fatalf("origin must not synchronously continue: GI=%d deals=%d", gi.Len(), deals.DealCalls)
+	}
+
+	queue := store.NewNextGameContinuationQueue(pool).WithLeaseTTL(5 * time.Millisecond)
+	claimed, err := queue.ClaimDue(ctx, time.Now().UTC().Add(time.Second), 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim durable continuation: %v %#v", err, claimed)
+	}
+	item := claimed[0]
+	if item.CommandID != "auto-next-room_auto_next-after-game-1" || item.NextGameID != "game-next-game-1" {
+		t.Fatalf("continuation identities=%+v", item)
+	}
+	// Simulate worker death after claim: lease expiry must make the same identity reclaimable.
+	time.Sleep(10 * time.Millisecond)
+	reclaimed, err := queue.ClaimDue(ctx, time.Now().UTC().Add(time.Second), 1)
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].CommandID != item.CommandID {
+		t.Fatalf("reclaim after worker crash: %v %#v", err, reclaimed)
+	}
+
+	// A stale supplied token models concurrent Room commands after claim. The
+	// system continuation resolves sequence under the Room row lock.
+	stale := int64(0)
+	deals.DealFn = func(_, _ string, _ []string) (game.DealMaterial, error) {
+		return game.DealMaterial{}, nil
+	}
+	rejected := svc.HandleCommand(ctx, app.CommandInput{
+		CommandID: item.CommandID, Type: app.CmdStartNextGame, SchemaVersion: 1,
+		RoomID: item.RoomID, ExpectedSequenceNumber: &stale, AsSystem: true,
+		Payload: mustJSON(map[string]any{"roomId": item.RoomID, "gameId": item.NextGameID}),
+	})
+	if rejected.Err != nil || rejected.Result.Status != "rejected" {
+		t.Fatalf("retryable continuation rejection=%+v err=%v", rejected.Result, rejected.Err)
+	}
+	var poisoned int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM command_idempotency WHERE command_id = $1`, item.CommandID).Scan(&poisoned); err != nil || poisoned != 0 {
+		t.Fatalf("retryable rejection poisoned deterministic identity: count=%d err=%v", poisoned, err)
+	}
+	deals.DealFn = nil
+	continued := svc.HandleCommand(ctx, app.CommandInput{
+		CommandID: item.CommandID, Type: app.CmdStartNextGame, SchemaVersion: 1,
+		RoomID: item.RoomID, ExpectedSequenceNumber: &stale, AsSystem: true,
+		Payload: mustJSON(map[string]any{"roomId": item.RoomID, "gameId": item.NextGameID}),
+	})
+	if continued.Err != nil || continued.Result.Status != "accepted" {
+		t.Fatalf("continue=%+v err=%v", continued.Result, continued.Err)
+	}
+	live, ok = sessions.Get(ctx, "room_auto_next")
+	if !ok || live.Room().GameCompletedInMatch() || live.Game() == nil || live.Game().Completed() {
+		t.Fatalf("durable next game not active: ok=%v session=%+v", ok, live)
+	}
+	if got, want := string(live.GameID()), "game-next-game-1"; got != want {
+		t.Fatalf("game id=%q want %q", got, want)
+	}
+	if gi.Len() != 2 || deals.DealCalls != 2 || deals.ConfirmCalls != 1 {
+		t.Fatalf("GI=%d deals=%d confirms=%d", gi.Len(), deals.DealCalls, deals.ConfirmCalls)
+	}
+	remaining, err := queue.ClaimDue(ctx, time.Now().UTC().Add(time.Minute), 1)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("successful continuation must atomically remove queue row: %v %#v", err, remaining)
+	}
+
+	// Duplicate originating delivery must not append or reserve again.
+	dup := svc.HandleCommand(ctx, app.CommandInput{
+		CommandID: "auto_win", Type: app.CmdPlayCard, SchemaVersion: 1,
+		RoomID: "room_auto_next", PlayerID: "host", SessionID: "host-session",
+		ExpectedSequenceNumber: &seq,
+		Payload:                mustJSON(map[string]any{"roomId": "room_auto_next", "cardId": "winning-card"}),
+	})
+	if dup.Err != nil || gi.Len() != 2 || deals.DealCalls != 2 {
+		t.Fatalf("duplicate=%+v GI=%d deals=%d", dup, gi.Len(), deals.DealCalls)
 	}
 }
 
@@ -713,6 +853,210 @@ func TestIntegration_NoMatchingGIEventLeavesPending(t *testing.T) {
 	if err == nil {
 		t.Fatal("retry must still fail closed")
 	}
+}
+
+type transientNoWriteIntegrity struct {
+	mu        sync.Mutex
+	failed    bool
+	delegate  *app.FakeGameIntegrity
+	appendReq []app.AppendRequest
+}
+
+func newTransientNoWriteIntegrity() *transientNoWriteIntegrity {
+	return &transientNoWriteIntegrity{delegate: app.NewFakeGameIntegrity()}
+}
+
+func (g *transientNoWriteIntegrity) Append(ctx context.Context, req app.AppendRequest) (app.AppendResult, error) {
+	g.mu.Lock()
+	g.appendReq = append(g.appendReq, req)
+	if !g.failed {
+		g.failed = true
+		g.mu.Unlock()
+		return app.AppendResult{}, errors.New("transient GI 503 before write")
+	}
+	g.mu.Unlock()
+	return g.delegate.Append(ctx, req)
+}
+
+func (g *transientNoWriteIntegrity) Replay(ctx context.Context, roomID string, fromOffset int64) (app.ReplayResult, error) {
+	if g.delegate.Len() == 0 {
+		return app.ReplayResult{RoomID: roomID, Revision: fromOffset}, nil
+	}
+	return g.delegate.Replay(ctx, roomID, fromOffset)
+}
+
+func TestIntegration_AuthoritativeNoWriteReplayReappendsExactIntent(t *testing.T) {
+	pool := openPool(t)
+	sessions := store.NewSessionStore(pool)
+	gi := newTransientNoWriteIntegrity()
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: sessions, Commands: sessions, Integrity: gi,
+		Publisher: app.NewFakeEventPublisher(), Audit: app.NewFakeAuditSink(),
+		Deals: app.NewFakeDealSource(), Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	in := app.CommandInput{
+		CommandID: "transient_no_write", Type: app.CmdCreateRoom, SchemaVersion: 1,
+		PlayerID: "host", SessionID: "sess", RoomID: "room_transient_no_write",
+		Payload: mustJSON(map[string]any{"roomId": "room_transient_no_write", "maxSeats": 2}),
+	}
+	first := svc.HandleCommand(context.Background(), in)
+	if first.Err == nil {
+		t.Fatal("expected uncertain first append response")
+	}
+	if _, ok := sessions.Get(context.Background(), "room_transient_no_write"); ok {
+		t.Fatal("local Room snapshot must not commit before GI recovery")
+	}
+
+	n, err := sessions.ReconcilePending(context.Background(), gi, nil, 10)
+	if err != nil || n != 1 {
+		t.Fatalf("safe deterministic recovery: n=%d err=%v", n, err)
+	}
+	if _, ok := sessions.Get(context.Background(), "room_transient_no_write"); !ok {
+		t.Fatal("reconciler must commit snapshot after proven no-write reappend")
+	}
+	if len(gi.appendReq) != 2 {
+		t.Fatalf("append attempts=%d want initial + exact retry", len(gi.appendReq))
+	}
+	firstReq, retryReq := gi.appendReq[0], gi.appendReq[1]
+	if firstReq.RoomID != retryReq.RoomID || firstReq.GameID != retryReq.GameID ||
+		firstReq.EventID != retryReq.EventID || firstReq.ExpectedRevision != retryReq.ExpectedRevision ||
+		firstReq.EventType != retryReq.EventType || !sameJSON(firstReq.Payload, retryReq.Payload) {
+		t.Fatalf("reappend changed persisted intent:\nfirst=%+v\nretry=%+v", firstReq, retryReq)
+	}
+}
+
+func TestIntegration_HTTPGIStreamNotFoundRecoversUncertainFirstAppend(t *testing.T) {
+	pool := openPool(t)
+	sessions := store.NewSessionStore(pool)
+	var mu sync.Mutex
+	appendAttempts := 0
+	var committed struct {
+		EventID   string          `json:"eventId"`
+		EventType string          `json:"eventType"`
+		GameID    string          `json:"gameId"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/internal/v1/game-logs/{roomId}/append", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Service-Credential") != "room-cred" {
+			http.Error(w, `{"code":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var body struct {
+			EventID          string          `json:"eventId"`
+			ExpectedRevision int64           `json:"expectedRevision"`
+			EventType        string          `json:"eventType"`
+			GameID           string          `json:"gameId"`
+			Payload          json.RawMessage `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, `{"code":"bad_request"}`, http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		appendAttempts++
+		if appendAttempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"code":"store_unavailable","message":"transient before write"}`))
+			return
+		}
+		if body.ExpectedRevision != 0 {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"revision_mismatch"}`))
+			return
+		}
+		committed.EventID, committed.EventType, committed.GameID, committed.Payload = body.EventID, body.EventType, body.GameID, body.Payload
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"kind":"accepted","logOffset":0,"revision":1}`))
+	})
+	mux.HandleFunc("/internal/v1/game-logs/{roomId}/replay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Service-Credential") != "audit-cred" || r.Header.Get("X-Audit-Actor") == "" || r.Header.Get("X-Audit-Reason") == "" {
+			http.Error(w, `{"code":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if committed.EventID == "" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"invalid_command","message":"stream not found"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"roomId": r.PathValue("roomId"), "revision": 1,
+			"entries": []map[string]any{{
+				"offset": 0, "eventId": committed.EventID, "eventType": committed.EventType,
+				"gameId": committed.GameID, "payload": committed.Payload,
+			}},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	gi := app.NewHTTPGameIntegrity(server.URL, "room-cred", server.Client())
+	gi.AuditCredential = "audit-cred"
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: sessions, Commands: sessions, Integrity: gi,
+		Publisher: app.NewFakeEventPublisher(), Audit: app.NewFakeAuditSink(),
+		Deals: app.NewFakeDealSource(), Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	first := svc.HandleCommand(context.Background(), app.CommandInput{
+		CommandID: "http_transient", Type: app.CmdCreateRoom, SchemaVersion: 1,
+		PlayerID: "host", SessionID: "sess", RoomID: "room_http_transient",
+		Payload: mustJSON(map[string]any{"roomId": "room_http_transient", "maxSeats": 2}),
+	})
+	if first.Err == nil {
+		t.Fatal("expected uncertain first GI append")
+	}
+	n, err := sessions.ReconcilePending(context.Background(), gi, nil, 10)
+	if err != nil || n != 1 {
+		t.Fatalf("HTTP stream-not-found recovery: n=%d err=%v", n, err)
+	}
+	if _, ok := sessions.Get(context.Background(), "room_http_transient"); !ok {
+		t.Fatal("reconciler did not commit recovered Room snapshot")
+	}
+	if appendAttempts != 2 || committed.EventID != "http_transient" {
+		t.Fatalf("appendAttempts=%d committed=%+v", appendAttempts, committed)
+	}
+}
+
+type advancedNoMatchIntegrity struct{ appendCalls int }
+
+func (g *advancedNoMatchIntegrity) Append(context.Context, app.AppendRequest) (app.AppendResult, error) {
+	g.appendCalls++
+	return app.AppendResult{}, errors.New("must not append across advanced revision")
+}
+
+func (g *advancedNoMatchIntegrity) Replay(_ context.Context, roomID string, fromOffset int64) (app.ReplayResult, error) {
+	return app.ReplayResult{RoomID: roomID, Revision: fromOffset + 1}, nil
+}
+
+func TestIntegration_NoMatchWithAdvancedGIRevisionRemainsFailClosed(t *testing.T) {
+	pool := openPool(t)
+	sessions := store.NewSessionStore(pool)
+	err := sessions.BeginReconciliationIntent(context.Background(), "advanced_cmd", "room_advanced", 0,
+		[]byte(`{"commandId":"advanced_cmd"}`), app.DurableAcceptedCommit{
+			Session:   domain.OpenSession(mustCreateRoom(t, "advanced_cmd", "room_advanced")),
+			CommandID: "advanced_cmd", CommandType: app.CmdCreateRoom, CreatePath: true,
+			Outcome: domain.CommandOutcome{Kind: domain.OutcomeAccepted, CommandID: "advanced_cmd"},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gi := &advancedNoMatchIntegrity{}
+	_, err = sessions.ReconcilePending(context.Background(), gi, nil, 10)
+	if err == nil || gi.appendCalls != 0 {
+		t.Fatalf("advanced revision must stay fail-closed: err=%v appendCalls=%d", err, gi.appendCalls)
+	}
+	markers, listErr := sessions.ListPendingReconciliationMarkers(context.Background(), 10)
+	if listErr != nil || len(markers) != 1 || markers[0].CommandID != "advanced_cmd" {
+		t.Fatalf("advanced marker must remain pending: err=%v markers=%+v", listErr, markers)
+	}
+}
+
+func sameJSON(a, b []byte) bool {
+	var av, bv any
+	return json.Unmarshal(a, &av) == nil && json.Unmarshal(b, &bv) == nil && reflect.DeepEqual(av, bv)
 }
 
 func TestIntegration_NormalPathMarksIntentDone(t *testing.T) {

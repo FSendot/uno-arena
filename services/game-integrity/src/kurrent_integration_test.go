@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -527,8 +528,17 @@ func TestIntegration_PaginationAbovePageBoundary(t *testing.T) {
 func TestIntegration_FirstWriteDEKRaceTwoRepos(t *testing.T) {
 	keyring := integrationKeyring(t)
 	roomID := uniqueRoomID(t)
-	a := openIndependentRepo(t, keyring, 1, defaultReadPageSize)
-	b := openIndependentRepo(t, keyring, 1, defaultReadPageSize)
+	keys, err := ParseDevKeyring(keyring)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := NewDevKeyProviderFromKeyring(keys, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrier := newWrapBarrier(2)
+	a := openIndependentRepoWithProvider(t, &barrierKeyProvider{inner: base, barrier: barrier})
+	b := openIndependentRepoWithProvider(t, &barrierKeyProvider{inner: base, barrier: barrier, postBarrierDelay: 250 * time.Millisecond})
 	svcA := NewService(a)
 	svcB := NewService(b)
 	type out struct {
@@ -572,10 +582,154 @@ func TestIntegration_FirstWriteDEKRaceTwoRepos(t *testing.T) {
 			t.Fatalf("kind=%v", o.kind)
 		}
 	}
-	rep, rej, err := svcA.Replay(context.Background(), roomID, 0)
-	if err != nil || rej != nil || len(rep.Entries) != 1 {
-		t.Fatalf("replay after race: err=%v rej=%v entries=%d", err, rej, len(rep.Entries))
+	for name, svc := range map[string]*Service{"a": svcA, "b": svcB} {
+		rep, rej, err := svc.Replay(context.Background(), roomID, 0)
+		if err != nil || rej != nil || len(rep.Entries) != 1 {
+			t.Fatalf("replay on repo %s after race: err=%v rej=%v entries=%d", name, err, rej, len(rep.Entries))
+		}
 	}
+}
+
+func TestIntegration_FirstWriteSameEventIDConflictingPayloadRaceTwoRepos(t *testing.T) {
+	keys, err := ParseDevKeyring(integrationKeyring(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := NewDevKeyProviderFromKeyring(keys, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrier := newWrapBarrier(2)
+	repoA := openIndependentRepoWithProvider(t, &barrierKeyProvider{inner: base, barrier: barrier})
+	repoB := openIndependentRepoWithProvider(t, &barrierKeyProvider{inner: base, barrier: barrier, postBarrierDelay: 250 * time.Millisecond})
+	svcA, svcB := NewService(repoA), NewService(repoB)
+	roomID := uniqueRoomID(t)
+	eventID := uniqueEventID(t, "race-conflicting-first")
+	type outcome struct {
+		name    string
+		payload []byte
+		result  AppendResult
+		rej     *domain.Rejection
+		err     error
+	}
+	ch := make(chan outcome, 2)
+	appendCandidate := func(name string, svc *Service, payload []byte) {
+		res, rej, err := svc.Append(context.Background(), AppendRequest{
+			RoomID: roomID, EventID: eventID, ExpectedRevision: 0,
+			EventType: "CreateRoom", Payload: payload,
+		})
+		ch <- outcome{name: name, payload: payload, result: res, rej: rej, err: err}
+	}
+	go appendCandidate("a", svcA, []byte(`{"candidate":"a"}`))
+	go appendCandidate("b", svcB, []byte(`{"candidate":"b"}`))
+	o1, o2 := <-ch, <-ch
+	var winner, loser outcome
+	for _, got := range []outcome{o1, o2} {
+		switch {
+		case got.err == nil && got.rej == nil:
+			if winner.name != "" {
+				t.Fatalf("both conflicting candidates accepted: first=%+v second=%+v", winner, got)
+			}
+			winner = got
+		case got.err == nil && got.rej != nil && got.rej.Code == domain.RejectConflictingDuplicate:
+			loser = got
+		default:
+			t.Fatalf("unexpected race outcome: %+v", got)
+		}
+	}
+	if winner.name == "" || loser.name == "" {
+		t.Fatalf("want exactly one winner and conflicting duplicate: o1=%+v o2=%+v", o1, o2)
+	}
+
+	// The losing repository is now anchored to the committed DEK and must still
+	// recognize an exact retry as idempotent rather than conflicting.
+	loserSvc := svcA
+	if loser.name == "b" {
+		loserSvc = svcB
+	}
+	exact, rej, err := loserSvc.Append(context.Background(), AppendRequest{
+		RoomID: roomID, EventID: eventID, ExpectedRevision: 0,
+		EventType: "CreateRoom", Payload: winner.payload,
+	})
+	if err != nil || rej != nil || exact.Kind != domain.OutcomeDuplicate {
+		t.Fatalf("exact retry after race: result=%+v rej=%v err=%v", exact, rej, err)
+	}
+
+	replay, rej, err := svcA.Replay(context.Background(), roomID, 0)
+	if err != nil || rej != nil || len(replay.Entries) != 1 || !bytes.Equal(replay.Entries[0].Payload, winner.payload) {
+		t.Fatalf("committed winner mismatch: replay=%+v rej=%v err=%v winner=%s", replay, rej, err, winner.payload)
+	}
+}
+
+type wrapBarrier struct {
+	mu      sync.Mutex
+	want    int
+	arrived int
+	release chan struct{}
+}
+
+func newWrapBarrier(want int) *wrapBarrier {
+	return &wrapBarrier{want: want, release: make(chan struct{})}
+}
+
+func (b *wrapBarrier) arrive(ctx context.Context) error {
+	b.mu.Lock()
+	b.arrived++
+	if b.arrived == b.want {
+		close(b.release)
+	}
+	release := b.release
+	b.mu.Unlock()
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type barrierKeyProvider struct {
+	inner            KeyProvider
+	barrier          *wrapBarrier
+	postBarrierDelay time.Duration
+}
+
+func (p *barrierKeyProvider) KeyVersion() int { return p.inner.KeyVersion() }
+func (p *barrierKeyProvider) Ready(ctx context.Context) error {
+	return p.inner.Ready(ctx)
+}
+func (p *barrierKeyProvider) WrapDEK(ctx context.Context, dek []byte) ([]byte, []byte, error) {
+	wrapped, nonce, err := p.inner.WrapDEK(ctx, dek)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := p.barrier.arrive(ctx); err != nil {
+		return nil, nil, err
+	}
+	if p.postBarrierDelay > 0 {
+		timer := time.NewTimer(p.postBarrierDelay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+	return wrapped, nonce, nil
+}
+func (p *barrierKeyProvider) UnwrapDEK(ctx context.Context, keyVersion int, wrapNonce, wrapped []byte) ([]byte, error) {
+	return p.inner.UnwrapDEK(ctx, keyVersion, wrapNonce, wrapped)
+}
+
+func openIndependentRepoWithProvider(t *testing.T, provider KeyProvider) *KurrentStreamRepository {
+	t.Helper()
+	client, err := openKurrentClient(integrationURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewKurrentStreamRepositoryWithPageSize(client, provider, defaultReadPageSize)
+	t.Cleanup(func() { _ = repo.Close() })
+	return repo
 }
 
 func TestIntegration_BindingRepairAfterInjectedFailure(t *testing.T) {

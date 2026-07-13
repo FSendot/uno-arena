@@ -94,7 +94,13 @@ func TestDecideCompleteRound_Incomplete(t *testing.T) {
 	cases := []CompleteRoundContext{
 		func() CompleteRoundContext { c := readyCompleteCtx("t1", 1); c.ResolvedCount = 3; return c }(),
 		func() CompleteRoundContext { c := readyCompleteCtx("t1", 1); c.AssignedCount = 0; return c }(),
-		func() CompleteRoundContext { c := readyCompleteCtx("t1", 1); c.AdvancingCount = 0; c.AdvancementRecordsPlayers = 0; c.NormalizedAdvancingPlayers = 0; return c }(),
+		func() CompleteRoundContext {
+			c := readyCompleteCtx("t1", 1)
+			c.AdvancingCount = 0
+			c.AdvancementRecordsPlayers = 0
+			c.NormalizedAdvancingPlayers = 0
+			return c
+		}(),
 		func() CompleteRoundContext { c := readyCompleteCtx("t1", 1); c.RoundStatus = RoundSeeded; return c }(),
 	}
 	for i, ctx := range cases {
@@ -155,6 +161,7 @@ func TestDecideCompleteRound_SuccessFinal(t *testing.T) {
 	ctx.AdvancingCount = 8
 	ctx.AdvancementRecordsPlayers = 8
 	ctx.NormalizedAdvancingPlayers = 8
+	ctx.FinalStandings = []PlayerID{"champion", "runner-up", "third"}
 	d := DecideCompleteRound(ctx, CompleteRoundCommand{CommandID: "c", RoundNumber: 1})
 	if d.Kind != CompleteRoundSuccess || d.RemainingPlayers != 8 || d.IsFinal != true {
 		t.Fatalf("want final success remaining=8, got %+v", d)
@@ -164,6 +171,12 @@ func TestDecideCompleteRound_SuccessFinal(t *testing.T) {
 	}
 	if d.NextRound != nil {
 		t.Fatalf("final must not schedule next seeding, got %+v", d.NextRound)
+	}
+	if d.TournamentCompletion == nil || d.TournamentCompletion.ChampionID != "champion" {
+		t.Fatalf("final must carry tournament completion, got %+v", d.TournamentCompletion)
+	}
+	if !hasFact(d.Outcome.Facts, FactTournamentCompleted) {
+		t.Fatalf("final must publish TournamentCompleted, got %+v", d.Outcome.Facts)
 	}
 }
 

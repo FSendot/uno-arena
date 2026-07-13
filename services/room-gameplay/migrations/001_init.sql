@@ -10,14 +10,15 @@
 --   4. command_idempotency
 --   5. uno_deadlines
 --   6. reconnect_deadlines
---   7. player_session_bindings
---   8. tournament_provisions
---   9. player_stream_highwater
---  10. pending_rejection_audits
---  11. pending_integrity_reconciliations
---  12. integration_outbox_events
---  13. realtime_outbox_events
---  14. processed_reconciliation_offsets
+--   7. next_game_continuations
+--   8. player_session_bindings
+--   9. tournament_provisions
+--  10. player_stream_highwater
+--  11. pending_rejection_audits
+--  12. pending_integrity_reconciliations
+--  13. integration_outbox_events
+--  14. realtime_outbox_events
+--  15. processed_reconciliation_offsets
 -- schema_bootstrap_meta is bootstrap-owned and is NOT created by this migration.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -223,7 +224,36 @@ CREATE INDEX IF NOT EXISTS reconnect_deadlines_open_expires_idx
     WHERE status = 'open';
 
 -- ---------------------------------------------------------------------------
--- Player session bindings (lock order #7).
+-- Durable match continuations (lock order #7).
+-- The completed-game transaction inserts this row atomically. The Room-owned
+-- timer worker claims it with SKIP LOCKED and invokes the existing internal
+-- StartNextGame command. Successful/terminal handling deletes the row.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS next_game_continuations (
+    room_id TEXT PRIMARY KEY REFERENCES rooms (room_id) ON DELETE CASCADE,
+    completed_game_id TEXT NOT NULL,
+    command_id TEXT NOT NULL UNIQUE,
+    next_game_id TEXT NOT NULL,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_until TIMESTAMPTZ,
+    attempts INT NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE next_game_continuations IS
+    'Room-owned durable best-of-three continuation queue; bounded SKIP LOCKED claims by the timer worker.';
+
+CREATE INDEX IF NOT EXISTS next_game_continuations_due_idx
+    ON next_game_continuations (available_at, room_id)
+    WHERE lease_until IS NULL;
+
+CREATE INDEX IF NOT EXISTS next_game_continuations_lease_idx
+    ON next_game_continuations (lease_until, room_id)
+    WHERE lease_until IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Player session bindings (lock order #8).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS player_session_bindings (
     room_id TEXT NOT NULL REFERENCES rooms (room_id) ON DELETE CASCADE,
@@ -237,7 +267,7 @@ COMMENT ON TABLE player_session_bindings IS
     'Authoritative (room_id, player_id) -> session_id binding for player-feed audiences.';
 
 -- ---------------------------------------------------------------------------
--- Tournament provisions (lock order #8).
+-- Tournament provisions (lock order #9).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tournament_provisions (
     tournament_id TEXT NOT NULL,
@@ -252,7 +282,7 @@ COMMENT ON TABLE tournament_provisions IS
     'Idempotent tournament room provision key -> room_id.';
 
 -- ---------------------------------------------------------------------------
--- Player-feed stream high-water (lock order #9).
+-- Player-feed stream high-water (lock order #10).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS player_stream_highwater (
     room_id TEXT PRIMARY KEY REFERENCES rooms (room_id) ON DELETE CASCADE,
@@ -264,7 +294,7 @@ COMMENT ON TABLE player_stream_highwater IS
     'Last allocated player-feed sequence for the room (independent of room sequence).';
 
 -- ---------------------------------------------------------------------------
--- Pending rejection audits awaiting sink delivery (lock order #10).
+-- Pending rejection audits awaiting sink delivery (lock order #11).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pending_rejection_audits (
     command_id TEXT PRIMARY KEY,
@@ -276,7 +306,7 @@ COMMENT ON TABLE pending_rejection_audits IS
     'Rejection audit records awaiting sink delivery; cleared after successful Record.';
 
 -- ---------------------------------------------------------------------------
--- GI reconciliation intents (lock order #11).
+-- GI reconciliation intents (lock order #12).
 -- Persisted BEFORE GI append; finalized with log_offset after append success.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pending_integrity_reconciliations (
@@ -300,8 +330,8 @@ CREATE INDEX IF NOT EXISTS pending_integrity_reconciliations_pending_idx
     WHERE status = 'pending';
 
 -- ---------------------------------------------------------------------------
--- Integration outbox (Kafka via Debezium Outbox Event Router). NO published_at.
--- Append-only. Lock order #12.
+-- Integration outbox (lock order #13; Kafka via Debezium Outbox Event Router). NO published_at.
+-- Append-only. Lock order #13.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS integration_outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
@@ -334,8 +364,8 @@ CREATE INDEX IF NOT EXISTS integration_outbox_events_topic_outbox_idx
     ON integration_outbox_events (topic, outbox_id);
 
 -- ---------------------------------------------------------------------------
--- Realtime outbox (Redis Streams via Debezium Server). NO published_at.
--- Append-only. Lock order #13.
+-- Realtime outbox (lock order #14; Redis Streams via Debezium Server). NO published_at.
+-- Append-only. Lock order #14.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS realtime_outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
@@ -368,7 +398,7 @@ CREATE INDEX IF NOT EXISTS realtime_outbox_events_created_idx
     ON realtime_outbox_events (created_at);
 
 -- ---------------------------------------------------------------------------
--- Processed reconciliation offsets (lock order #14). Idempotent by (room, offset).
+-- Processed reconciliation offsets (lock order #15). Idempotent by (room, offset).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS processed_reconciliation_offsets (
     room_id TEXT NOT NULL,

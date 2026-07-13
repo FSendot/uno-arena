@@ -1885,6 +1885,16 @@ components:
               type: integer
               minimum: 0
               description: Authoritative remaining draw-pile count from Game Integrity (count only; never card identities or order)
+            penaltyAmount:
+              type: integer
+              minimum: 0
+              description: Pending accumulated draw penalty; zero when no stack is open
+            penaltyTarget:
+              type: string
+              description: Player that must stack or draw the pending penalty; empty when none
+            pendingColorChoice:
+              type: boolean
+              description: True while a played wild is awaiting its authoritative color choice
             completed:
               type: boolean
         hand:

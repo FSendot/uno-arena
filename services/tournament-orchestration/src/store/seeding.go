@@ -344,8 +344,12 @@ func (u *SeedingUnitOfWork) Commit(req SeedingCommitRequest) error {
 }
 
 func (u *SeedingUnitOfWork) insertPendingRoundAndJob(req SeedingCommitRequest, now time.Time) error {
+	return insertPendingRoundAndJobTx(u.ctx, u.tx, u.tid, u.roundNum, req, now)
+}
+
+func insertPendingRoundAndJobTx(ctx context.Context, tx pgx.Tx, tournamentID string, roundNum int, req SeedingCommitRequest, now time.Time) error {
 	plan := req.Decision.Plan
-	rn := u.roundNum
+	rn := roundNum
 	if rn < 1 {
 		rn = 1
 	}
@@ -358,21 +362,21 @@ func (u *SeedingUnitOfWork) insertPendingRoundAndJob(req SeedingCommitRequest, n
 		srcRound = req.Decision.SourceRoundNumber
 	}
 
-	tag, err := u.tx.Exec(u.ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO tournament_rounds (tournament_id, round_number, status, is_final, seeded_at, completed_at)
 		VALUES ($1, $2, 'pending', $3, NULL, NULL)
 		ON CONFLICT (tournament_id, round_number) DO NOTHING
-	`, u.tid, rn, plan.IsFinal)
+	`, tournamentID, rn, plan.IsFinal)
 	if err != nil {
 		return wrapUnavailable(err)
 	}
 	if tag.RowsAffected() == 0 {
 		var status string
 		var isFinal bool
-		if err := u.tx.QueryRow(u.ctx, `
+		if err := tx.QueryRow(ctx, `
 			SELECT status, is_final FROM tournament_rounds
 			WHERE tournament_id = $1 AND round_number = $2
-		`, u.tid, rn).Scan(&status, &isFinal); err != nil {
+		`, tournamentID, rn).Scan(&status, &isFinal); err != nil {
 			return wrapUnavailable(err)
 		}
 		if status != string(domain.RoundPending) || isFinal != plan.IsFinal {
@@ -380,7 +384,7 @@ func (u *SeedingUnitOfWork) insertPendingRoundAndJob(req SeedingCommitRequest, n
 		}
 	}
 
-	tag, err = u.tx.Exec(u.ctx, `
+	tag, err = tx.Exec(ctx, `
 		INSERT INTO round_seeding_jobs (
 			tournament_id, round_number, source, source_round_number, status,
 			player_count, slot_count, base_size, remainder,
@@ -393,7 +397,7 @@ func (u *SeedingUnitOfWork) insertPendingRoundAndJob(req SeedingCommitRequest, n
 			$9, $10, $11, $11
 		)
 		ON CONFLICT (tournament_id, round_number) DO NOTHING
-	`, u.tid, rn, source, srcRound,
+	`, tournamentID, rn, source, srcRound,
 		plan.PlayerCount, plan.SlotCount, plan.BaseSize, plan.Remainder,
 		req.CommandID, nullIfEmpty(req.CorrelationID), now)
 	if err != nil {
@@ -403,11 +407,11 @@ func (u *SeedingUnitOfWork) insertPendingRoundAndJob(req SeedingCommitRequest, n
 		var pc, sc, base, rem int
 		var status, cmdID, existingSource string
 		var existingSrcRound *int
-		if err := u.tx.QueryRow(u.ctx, `
+		if err := tx.QueryRow(ctx, `
 			SELECT status, source, source_round_number, player_count, slot_count, base_size, remainder, command_id
 			FROM round_seeding_jobs
 			WHERE tournament_id = $1 AND round_number = $2
-		`, u.tid, rn).Scan(&status, &existingSource, &existingSrcRound, &pc, &sc, &base, &rem, &cmdID); err != nil {
+		`, tournamentID, rn).Scan(&status, &existingSource, &existingSrcRound, &pc, &sc, &base, &rem, &cmdID); err != nil {
 			return wrapUnavailable(err)
 		}
 		if pc != plan.PlayerCount || sc != plan.SlotCount || base != plan.BaseSize || rem != plan.Remainder {
@@ -1203,8 +1207,9 @@ func (s *TournamentStore) finalizeSeedingJob(ctx context.Context, job ClaimedSee
 	return done, nil
 }
 
-// finalizeSeedingInTx applies terminal cancel or pending→seeded (+ later-round provisioning) + projection bump.
-// Round 1 stays seeded for manual ProvisionRoundMatches. Round>1 transitions to provisioning with batches+shards.
+// finalizeSeedingInTx applies terminal cancel or pending→seeded→provisioning + projection bump.
+// Provisioning kickoff is Tournament policy for every round and is committed in
+// the same transaction as seeding finalization, so no public command or crash-gap exists.
 // Returns done=true only when the successful finalize path ran (caller must commit).
 // Stale lease fence returns errSeedingStaleFence so the caller rolls back without committing.
 func finalizeSeedingInTx(ctx context.Context, tx pgx.Tx, job ClaimedSeedingJob, owner string, plan domain.RoundSlotPlan, processed int, lastPlayer string, now time.Time) (bool, error) {
@@ -1264,20 +1269,16 @@ func finalizeSeedingInTx(ctx context.Context, tx pgx.Tx, job ClaimedSeedingJob, 
 
 	var rules tournamentRules
 	jsonUnmarshalRules(rulesRaw, &rules)
-	var laterProv *domain.ProvisionBatchPlan
-	if rn > 1 {
-		batchSize := rules.BatchSize
-		if batchSize <= 0 {
-			batchSize = domain.DefaultBatchSize
-		}
-		if batchSize > domain.MaxProvisioningBatchSize {
-			batchSize = domain.MaxProvisioningBatchSize
-		}
-		provPlan, err := domain.ComputeProvisionBatchPlan(plan.SlotCount, batchSize)
-		if err != nil {
-			return false, quarantineSeedingTx(ctx, tx, job, owner, now, "provision_plan_invalid")
-		}
-		laterProv = &provPlan
+	batchSize := rules.BatchSize
+	if batchSize <= 0 {
+		batchSize = domain.DefaultBatchSize
+	}
+	if batchSize > domain.MaxProvisioningBatchSize {
+		batchSize = domain.MaxProvisioningBatchSize
+	}
+	provPlan, err := domain.ComputeProvisionBatchPlan(plan.SlotCount, batchSize)
+	if err != nil {
+		return false, quarantineSeedingTx(ctx, tx, job, owner, now, "provision_plan_invalid")
 	}
 
 	// Mutations below must succeed as one unit; RowsAffected failures return so caller rolls back.
@@ -1335,10 +1336,8 @@ func finalizeSeedingInTx(ctx context.Context, tx pgx.Tx, job ClaimedSeedingJob, 
 		return false, fmt.Errorf("seeding finalize: tournament transition rows_affected=%d", tag.RowsAffected())
 	}
 
-	if laterProv != nil {
-		if err := finalizeLaterRoundProvisioningInTx(ctx, tx, tid, rn, *laterProv, now); err != nil {
-			return false, err
-		}
+	if err := finalizeRoundProvisioningInTx(ctx, tx, tid, rn, provPlan, now); err != nil {
+		return false, err
 	}
 
 	if err := bumpProjectionVersionTx(ctx, tx, tid, now); err != nil {
@@ -1347,9 +1346,9 @@ func finalizeSeedingInTx(ctx context.Context, tx pgx.Tx, job ClaimedSeedingJob, 
 	return true, nil
 }
 
-// finalizeLaterRoundProvisioningInTx creates provisioning batches + 64 shards and moves round to provisioning.
+// finalizeRoundProvisioningInTx creates provisioning batches + 64 shards and moves round to provisioning.
 // Does not assign rooms or emit MatchAssigned (same generate_series pattern as provisioning.applySchedule).
-func finalizeLaterRoundProvisioningInTx(ctx context.Context, tx pgx.Tx, tid string, rn int, provPlan domain.ProvisionBatchPlan, now time.Time) error {
+func finalizeRoundProvisioningInTx(ctx context.Context, tx pgx.Tx, tid string, rn int, provPlan domain.ProvisionBatchPlan, now time.Time) error {
 	tag, err := tx.Exec(ctx, `
 		UPDATE tournament_rounds
 		SET status = 'provisioning'
@@ -1359,7 +1358,7 @@ func finalizeLaterRoundProvisioningInTx(ctx context.Context, tx pgx.Tx, tid stri
 		return wrapUnavailable(err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("seeding finalize: later-round provisioning transition rows_affected=%d", tag.RowsAffected())
+		return fmt.Errorf("seeding finalize: provisioning transition rows_affected=%d", tag.RowsAffected())
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -1469,22 +1468,22 @@ func cancelSeedingTx(ctx context.Context, tx pgx.Tx, job ClaimedSeedingJob, owne
 
 // seedingQuarantineReasons is the closed set of operational codes persistable on quarantine_reason.
 var seedingQuarantineReasons = map[string]struct{}{
-	"tournament_missing":        {},
-	"phase_drift":               {},
-	"immutable_plan_drift":      {},
-	"source_count_shortfall":    {},
-	"immutable_slot_conflict":            {},
-	"immutable_player_mapping_conflict":  {},
-	"immutable_batch_conflict":           {},
-	"final_counter_mismatch":    {},
-	"extra_source_advancement":  {},
-	"extra_source_registration": {},
-	"source_count_drift":        {},
-	"finalize_counter_mismatch": {},
-	"round_missing":             {},
-	"round_not_pending":         {},
-	"provision_plan_invalid":    {},
-	"unknown":                   {},
+	"tournament_missing":                {},
+	"phase_drift":                       {},
+	"immutable_plan_drift":              {},
+	"source_count_shortfall":            {},
+	"immutable_slot_conflict":           {},
+	"immutable_player_mapping_conflict": {},
+	"immutable_batch_conflict":          {},
+	"final_counter_mismatch":            {},
+	"extra_source_advancement":          {},
+	"extra_source_registration":         {},
+	"source_count_drift":                {},
+	"finalize_counter_mismatch":         {},
+	"round_missing":                     {},
+	"round_not_pending":                 {},
+	"provision_plan_invalid":            {},
+	"unknown":                           {},
 }
 
 func sanitizeSeedingReason(reason string) string {

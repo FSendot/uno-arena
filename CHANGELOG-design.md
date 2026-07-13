@@ -2,6 +2,21 @@
 
 This changelog records design-package updates made while shaping the architecture checkpoint. It is limited to changes that affect traceability between the original design deliverables and the architecture.
 
+## Clean ARM64 Kind Deployment and Recovery Acceptance (2026-07-12)
+
+- The clean-deploy aggregate lane now validates, rebuilds the disposable cluster, builds/loads the bootstrap plus all eight service images, applies the foundation, deploys services in dependency order, and runs the live probe suite. The ARM64 foundation and all eight services have deployed successfully.
+- Debezium Kafka Connect and Debezium Server CDC ran live. The current 3.6.0.Final exact ARM64 digests were rotated after the upstream registry republished its tags; node-native staging validates architecture and digest instead of trusting mutable tags or stale kind-import metadata.
+- Removed the invalid Outbox Event Router `occurred_at` timestamp override. Canonical `occurredAt` is carried inside the JSON event payload; the standardized relational outbox has no separate timestamp column to map.
+- `CreateTournament` intentionally creates authoritative tournament state without an integration-outbox event. Lifecycle publication begins at the contracted integration facts; no synthetic create topic/event was introduced.
+- Spectator Kafka→Room recovery snapshot→Redis generation-swap and Analytics Kafka→producer-owned backfill→ClickHouse generation/lease recovery passed as live worker processes. Their `projectionRebuilder` Deployments are now enabled only in `values.kind.yaml`; default, staging, and production remain disabled.
+- Local kind Identity deliberately enables a context-owned password test-account stub for dynamic CLI `register`/`seed`. Staging and production remain OIDC-only.
+- Game Integrity fixed the first-write per-game DEK race across replicas. After Kurrent acknowledges an initial append, the repository anchors to the committed wrapper, decrypts the committed event, and compares its complete logical identity and exact plaintext with the candidate; exact retries remain idempotent while same-event-ID conflicts return `conflicting_duplicate`.
+- Client Checkpoint Stage B interactive play, headless casual/room/tournament bot, JSONL, and Docker packaging are implemented; the fake-BFF suite passes 174+ checks. Live kind acceptance completed both a casual best-of-three and a tournament from registration through assignment, Room play, result consumption, lifecycle advancement, and terminal `TournamentCompleted`.
+- Tournament lifecycle closure is now context-owned end to end: explicit `CloseRegistration` and capacity auto-close atomically create round 1; every seeding finalization schedules bounded provisioning; every non-final `CompleteRound` creates the next-round seeding job; final `CompleteRound` atomically completes the tournament and emits `TournamentCompleted`. The public client catalog remains closed to `CreateTournament`, `RegisterPlayer`, and `CloseRegistration`; internal seeding/provisioning/completion commands were not exposed.
+- Room's Helm chart now injects the scoped Game Integrity audit credential required by its replay/reconciliation path, distinct from its ordinary append credential.
+- Room best-of-three advancement is crash-safe: non-terminal `GameCompleted` commits a deterministic Postgres continuation, the existing Room timer worker claims bounded `FOR UPDATE SKIP LOCKED` batches with expiring leases/backoff, and accepted `StartNextGame` deletes the continuation atomically. A live kind proof paused the worker, observed the queued row, restarted the worker, and completed the match.
+- Game Integrity uncertain no-write recovery now re-appends only when authoritative replay proves no matching event at exactly the persisted expected revision; replay failure, identity mismatch, or advanced revision remains fail-closed.
+
 ## Authoritative Draw-Pile Size for Client Checkpoint Interactive Board (2026-07-12)
 
 - Game Integrity — `ReserveDeal` / `ReserveDraw` responses include authoritative `remaining` (draw-pile size after that reservation confirms). Exact duplicate reserves return the same value; never derived from client input. Stored on pending/confirmed reservation state for durable replay.
@@ -9,7 +24,7 @@ This changelog records design-package updates made while shaping the architectur
 - Spectator View — allowlist + projection/export carry `drawPileSize` so public spectator snapshots match OpenAPI.
 - `contracts/openapi/bff-v1.yaml` — `PlayerRoomSnapshot.game.drawPileSize` and `SpectatorRoomSnapshot.drawPileSize`.
 - Client Checkpoint — Interactive turn board (§5.C) can render draw-pile size from BFF snapshots/feeds without deck order/seed/card identities.
-- Status: **implemented** in GI + Room + Spectator projection; CLI interactive board consumption remains stage-B.
+- Status: **implemented** end-to-end in GI + Room + Spectator projection and the Stage B interactive CLI.
 
 ## Bounded Public Room Listing for Client Checkpoint (2026-07-12)
 
@@ -17,7 +32,7 @@ This changelog records design-package updates made while shaping the architectur
 - Room Gameplay — Internal `GET /internal/v1/rooms/public-list` authenticated with Gateway↔Room scoped credential; producer-owned HMAC cursor (`ROOM_PUBLIC_LIST_CURSOR_SECRET`, API-only, excluded from timer worker); durable Postgres keyset on `(status, room_id)` via `rooms_public_list_idx` (visibility=public partial); capability memory repository parity; one-row lookahead for `nextCursor`.
 - Gateway — Proxies safe query/response, validates upstream shape/bounds, preserves Room 400/401, maps network/decode/malformed to 502; no player bearer required.
 - Architecture docs (`02`, `03`, `04`), `client-checkpoint/README.md`, Helm/kind local secret wiring.
-- Status: public room-list seam **implemented** for CLI `room list` / `play --casual` (CLI subcommand wiring may still map onto this BFF resource).
+- Status: public room-list seam and CLI `room list` / `play --casual` wiring **implemented**.
 
 ## Context-Owned Snapshot/Backfill APIs and Kafka Rebuild-Request Topics (2026-07-12)
 
@@ -25,16 +40,16 @@ This changelog records design-package updates made while shaping the architectur
 - Room/Tournament/Ranking — Implemented `POST .../analytics-backfill` (producer-owned HMAC cursor; paired bounded range; page default 100 / hard max 1000; read-only append-only outbox pages). Room also serves `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` for Spectator recovery.
 - Spectator — Implemented projection-rebuilder path: consume `spectator.projection.rebuild_requested`, fetch Room snapshot with scoped recovery credential, Redis Lua CAS/fenced generation-swap with atomic `(recoveryJobId, roomId, failedCheckpoint)` idempotency and fenced quarantine release after held-record continuity (max 1000).
 - Analytics — Implemented durable ClickHouse recovery worker: consume `analytics.projection.rebuild_requested` with `(recoveryJobId, sourceTopic, pageCursor)` idempotency, page producer backfills (worker default page 1000), deterministic generation/lease readback, active/building dual-write, server-side clone; acknowledges non-transactional projection-before-marker check-then-act with same-generation FINAL idempotency.
-- Helm — `projectionRebuilder.enabled=false` in default/staging/production/`kind` until real end-to-end worker live recovery tests; offline structure checks only for the rebuilder lane.
+- Helm — Live kind worker proofs passed; `projectionRebuilder.enabled=true` only in kind, while default/staging/production remain false.
 - `contracts/asyncapi/kafka-v1.yaml` — Rebuild-request channels/schemas + worker-owned DLQ naming; `PlayerRatingUpdated.projectionVersion` required; Analytics rebuild requests document paired-range and pageCursor idempotency requirements.
-- Architecture/consistency docs and ADR-0013 — Reconciled endpoints, credentials ownership, generation/lease/page chain, and implemented-but-disabled status.
-- Status: context-owned backfill/snapshot APIs and Spectator/Analytics rebuilder workers **implemented**; Deployments remain **disabled** pending live recovery tests; **final clean-cluster live proof has not yet run**.
+- Architecture/consistency docs and ADR-0013 — Reconciled endpoints, credentials ownership, generation/lease/page chain, and kind-only enabled status.
+- Status: context-owned backfill/snapshot APIs and Spectator/Analytics rebuilder workers **implemented and live-proven in kind**; default/staging/production Deployments remain disabled.
 
-## Tournament T3 Durable ROUND-1 Seeding (2026-07-11)
+## Tournament Durable All-Round Lifecycle (2026-07-11, completed 2026-07-12)
 
-- `services/tournament-orchestration/**` — Durable `SeedRound(1)` kickoff schedules a bounded `round_seeding_jobs` row (immutable N/S/base/rem plan) without whole-aggregate rewrite; `WORKER_ROLE=tournament-seeding` chunks keyset registrations (`player_id ASC`), inserts pending bracket slots, and finalizes once (`round` seeded, `currentRound=1`, phase `seeding→in_progress`, single base projection bump). Partial pending rounds/slots stay invisible on public BracketPage. `TournamentRoundSeeded` remains internal-only (no Kafka channel). Capability/memory keeps synchronous `SeedRound`.
-- Helm: `seedingWorker` disabled by default/staging/production; kind enables 2 replicas (DB credential only). ADR-0013 updated.
-- Status: ROUND-1 durable seeding **implemented**; later-round seeding remains out of scope (T3).
+- `services/tournament-orchestration/**` — Explicit close and capacity auto-close atomically schedule round 1. Durable seeding jobs use an immutable N/S/base/rem plan; `WORKER_ROLE=tournament-seeding` chunks players, inserts pending bracket slots, and finalizes each round exactly once. Finalization schedules bounded provisioning; non-final completion schedules the next round; final completion atomically marks the tournament completed and emits `TournamentCompleted`. Partial pending rounds/slots stay invisible on public BracketPage. `TournamentRoundSeeded` remains internal-only (no Kafka channel).
+- Helm: Tournament seeding, provisioning, and completion workers are disabled by default/staging/production; kind enables 2 replicas of each. ADR-0013 updated.
+- Status: durable registration closure, all-round seeding/provisioning, round completion, and tournament completion are **implemented**; the terminal tournament lifecycle is additionally **live-proven in kind** through the Stage B tournament bot flow.
 
 ## Bounded Leaderboard and Bracket Projections (2026-07-11)
 
@@ -52,8 +67,8 @@ This changelog records design-package updates made while shaping the architectur
 - `services/analytics/**` — Kafka parser accepts `tournament.completed.finalStandings` and the nine configured AsyncAPI source topics; durable multi-topic franz-go ingestion is kind-wired when `KAFKA_BROKERS` is set.
 - `services/ranking/**` — ADR-0037 award policy (`+10` advancement; top-heavy final-placement table) is enforced in domain; durable multi-topic franz-go consumers ingest `room.game.completed`, `tournament.players.advanced`, and `tournament.completed` with per-source Ranking DLQs; tournament facts apply event-wide atomically with event-local failure isolation (no tournament-wide quarantine). HTTP tournament-placement paths reject caller-supplied `delta`.
 - `services/gateway/**`, `services/spectator-view/**` — Durable franz-go consumers for `identity.session.invalidated` and `room.spectator-safe.events` are kind-wired when `KAFKA_BROKERS` is set; Gateway Redis SI admission supports cross-replica rejection after durable apply.
-- `contracts/asyncapi/kafka-v1.yaml`, `docs/architecture/**` — Removed the stale AsyncAPI “Kafka remains unwired” claim; architecture status now records implemented Kafka consumers and Debezium Connect/Server wiring while preserving unwired Redis leaderboard/bracket projections and unrun clean-cluster live proofs.
-- Status: Tournament `finalStandings` producer, Analytics parsers, Ranking policy + multi-topic durable ingestion, HTTP `delta` rejection, and declared Gateway/Tournament/Spectator/Analytics Kafka consumers **implemented** in kind wiring; Redis leaderboard/bracket projections remain **PENDING**; **final clean-cluster live proof has not yet run**.
+- `contracts/asyncapi/kafka-v1.yaml`, `docs/architecture/**` — Removed the stale AsyncAPI “Kafka remains unwired” claim; architecture status records implemented Kafka consumers and Debezium Connect/Server wiring. Ranking/Tournament Redis projections and the clean live lane landed later.
+- Status: Tournament `finalStandings` producer, Analytics parsers, Ranking policy + multi-topic durable ingestion, HTTP `delta` rejection, declared Kafka consumers, and subsequent Redis projections are **implemented**; the clean kind lane passed.
 
 ## Tournament Rating Is Cumulative Achievement (2026-07-11)
 
@@ -84,15 +99,15 @@ This changelog records design-package updates made while shaping the architectur
 - `infrastructure/kind/manifests/80-debezium/**` — Debezium Kafka Connect **3.6.0.Final** (ARM64 digest-pinned) Deployment/Service + idempotent register Job for exactly four PostgreSQL Outbox Event Router connectors (identity, room integration, tournament, ranking). Existing publications/CDC users; Debezium-owned unique slots; pgoutput; publication autocreate disabled; snapshot never; schema-disabled JSON; no Heartbeat SMT.
 - `infrastructure/kind/manifests/80-debezium-server/**` — Separate Debezium Server **3.6.0.Final** for Room realtime only (`room_cdc_realtime` / `realtime_outbox_events` → Redis DB2 extended format with unique offset key and `target_stream` routing).
 - `services/gateway/src/bff/streams_redis.go` — RedisLiveFeed dual-decode: flat test form + Debezium Redis extended value JSON; unwraps outbox envelope into SSE data; retains opaque Redis IDs, audience isolation, sequence/dedupe, bounded replay, malformed fail-safe.
-- Kind apply/wait/validate, image-load scripts, structure/status scripts, and explicit live Postgres→Kafka / Postgres→Redis probes (Makefile targets). **Live delivery is not claimed until those probes are executed.** Franz-go consumers were out of Phase 1 scope and landed in a later slice (see top changelog entry).
-- Status: Debezium Connect + Server **infrastructure implemented**; wire values stabilized to AsyncAPI; declared franz-go Kafka consumers are **implemented** separately; **final clean-cluster live proof has not yet run** (live CDC delivery proofs remain explicit optional targets, not asserted by structure/status alone).
+- Kind apply/wait/validate, image-load scripts, structure/status scripts, and explicit live Postgres→Kafka / Postgres→Redis probes (Makefile targets). Franz-go consumers were out of Phase 1 scope and landed in a later slice.
+- Status: Debezium Connect + Server infrastructure, wire values, declared Kafka consumers, and live clean-cluster CDC proofs are **implemented**. Structure/status checks alone remain non-delivery evidence.
 
 ## Gateway Durable Redis Rate-Limit + LiveFeed SSE (2026-07-11)
 
 - `services/gateway/**` — Implemented distributed Redis rate limiting (fail-closed 503 on adapter failure; 429 only on quota exhaustion) and direct Redis Streams LiveFeed consumption for player (`room:{roomId}:player`) and spectator (`spectator:v1:room:{roomId}:stream:{generation}`) SSE. Deep `LiveFeed`/`LiveSession` seam with Hub adapter for fakes/capability; Hub remains process-local control-state until durable Redis SI + Kafka `identity.session.invalidated` apply (cross-replica admission rejection after durable SI apply). Physical Redis stream IDs are opaque SSE resume markers; player resume markers must belong to the same `playerId`/`sessionId`. Per-subscription `eventId`/`sequence` dedupe and positive monotonically increasing sequence (gaps allowed); bounded `XRangeN` replay aligned with Redis stream history (overflow → `409 snapshot_required`). Empty `Last-Event-ID` live-tails only; unknown/trimmed/wrong-audience markers return `409 snapshot_required`. Redis failures during `BeginSession` map to `503 live_feed_unavailable`. `/ready` pings every configured Redis client. Gateway now dual-decodes flat and Debezium extended Redis entries (Phase 1). Kafka `identity.session.invalidated` consumer is kind-wired when `KAFKA_BROKERS` is set.
 - `services/gateway/helm/gateway/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `values.schema.json`, `helm-test.sh`), kind deploy/port-forward/integration/adapter scripts, Makefile targets — Helm-only Gateway deploy for kind (ClusterIP; Redis DB 6 rate-limit, DB 2 player feeds, DB 5 spectator; `uno-arena-local-credentials`; no capability/fakes flags). Integration suite uses isolated Redis DBs 11/12/13.
 - `docs/architecture/00-overview-and-traceability.md`, `01-context-and-container-view.md`, `04-persistence-by-context.md`, `06-cross-cutting-concerns.md` — Recorded Gateway Redis durable slice; Kafka SessionInvalidated status updated with later consumer slice.
-- Status: Gateway durable Redis rate-limit + LiveFeed SSE **implemented** (incl. Debezium extended decode); Kafka SessionInvalidated consumer **implemented**; Redis SI admission live probe is explicit and is not a Kafka→SSE E2E claim; **final clean-cluster live proof has not yet run**.
+- Status: Gateway durable Redis rate-limit + LiveFeed SSE **implemented** (including Debezium extended decode); Kafka SessionInvalidated consumer **implemented**; clean kind deployment passed.
 
 ## Kind Redis local AOF (same-pod restart) (2026-07-11)
 
@@ -107,22 +122,21 @@ This changelog records design-package updates made while shaping the architectur
   wording clarifies pod-replacement survival ≠ Redis process durability.
 - Status: same-pod Redis container restart durability via AOF **implemented**
   for kind; Redis remains disposable / rebuild-from-Kafka; Spectator Kafka
-  consumer for `room.spectator-safe.events` is **implemented** separately;
-  **final clean-cluster live proof has not yet run**.
+  consumer and live recovery lane are **implemented**.
 
 ## Spectator Durable Redis Projection + SSE (2026-07-11)
 
 - `services/spectator-view/**` — Implemented durable Redis projection store (go-redis v9.14.1) with deep `SpectatorApplication` seam; capability memory retained behind explicit non-prod `SPECTATOR_CAPABILITY_MODE`. Exact domain export/restore (no fake-event rebuild), SHA-256 invite digests, Lua CAS apply (revision/sequence, outcome idempotency, single XADD per accepted sequence, terminal close signal) and generation-swap rebuild. Durable SSE reads Redis spectator streams (capability retains StreamHub). `/ready` pings Redis and requires scoped internal credential. HTTP internal ingest remains a test/ops bridge; Kafka consumer for `room.spectator-safe.events` is kind-wired when `KAFKA_BROKERS` is set.
 - `services/spectator-view/helm/spectator-view/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `values.schema.json`, `helm-test.sh`), kind deploy/port-forward/integration/adapter scripts, Makefile targets — Helm-only Spectator deploy for kind (ClusterIP, Redis DB 5). Integration suite uses Redis DB 14 with per-run random prefix cleanup.
 - `docs/architecture/04-persistence-by-context.md`, changelog/runbook/README status wording — Recorded durable Redis projection + SSE implemented; Kafka consumer status updated with later slice.
-- Status: Spectator durable Redis projection + SSE **implemented**; Kafka consumer for `room.spectator-safe.events` **implemented**; **final clean-cluster live proof has not yet run**.
+- Status: Spectator durable Redis projection + SSE and Kafka consumer **implemented**; full worker recovery proof passed in kind.
 
 ## Analytics Durable ClickHouse HTTP Adapter (2026-07-11)
 
 - `services/analytics/**` — Implemented durable stdlib-HTTP ClickHouse store (no driver). Deep `AnalyticsApplication` seam returns store errors for 503; capability memory retained behind explicit non-prod `ANALYTICS_CAPABILITY_MODE`. Domain validate/sanitize before durable write; projection rows before `processed_events` outcome marker; queries use `FINAL`; generation-based rebuild activates only after complete generation; `/ready` verifies ClickHouse schema. Safe `unoarena_analytics_test_<hex>` integration harness.
 - `services/analytics/helm/analytics/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `values.schema.json`, `helm-test.sh`), kind secrets for scoped Analytics credentials, deploy/port-forward/integration/adapter scripts, Makefile targets — Helm-only Analytics deploy for kind (ClusterIP). Existing ClickHouse bootstrap Job remains context-owned.
 - `docs/architecture/04-persistence-by-context.md`, changelog/runbook/README status wording — Recorded durable ClickHouse HTTP/store implemented; Kafka ingestion status updated with later slice.
-- Status: Analytics durable ClickHouse adapter **implemented**; Kafka ingestion for the nine configured topics **implemented**; **final clean-cluster live proof has not yet run**.
+- Status: Analytics durable ClickHouse adapter and nine-topic Kafka ingestion **implemented**; full worker recovery proof passed in kind.
 
 ## Offline-Verifiable CDC Prerequisites + Kafka Retention/DLQ Policy (2026-07-11)
 
@@ -131,34 +145,34 @@ This changelog records design-package updates made while shaping the architectur
 - `infrastructure/kind/scripts/render-kafka-topics.rb` — Kind-short `retention.ms` by ADR-0032 class; ADR-0017 consumer-owned DLQ topic scaffolding; Connect internal topics remain compacted; partition immutability checks preserved.
 - `services/room-gameplay/src/store/postgres_persist.go`, `app/player_feed_stream.go` — `realtime_outbox_events.target_stream` is the deterministic per-room key `room:{roomId}:player` (validated/injective); Redis timer keys unchanged.
 - `services/ranking/src/store/postgres.go` — `topicCasualIngest` corrected to AsyncAPI `room.game.completed`.
-- Status: **CDC prerequisites and Kafka retention/DLQ policy implemented**; **Debezium Connect/Server infrastructure implemented in Phase 1**; declared franz-go consumers are **implemented** separately; live outbox→Kafka/Redis proofs remain explicit Makefile targets and are not claimed by structure/status alone; **final clean-cluster live proof has not yet run**.
+- Status: **CDC prerequisites, Kafka retention/DLQ policy, Debezium Connect/Server, and declared consumers implemented**; live clean-cluster delivery proofs passed. Structure/status targets alone still make no delivery claim.
 
 ## Ranking Durable Postgres Adapter (2026-07-11)
 
 - `services/ranking/**` — Implemented durable pgxpool Ranking store (exact schema/bootstrap readiness, multi-participant casual Elo under stable `FOR UPDATE` player-id order, tournament placement biz-key + eventId dedupe, stable response persistence, append-only CDC outbox). Migration outbox is append-only (no `published_at` / unpublished index / app polling). Handlers use a deep `RatingApplication` seam; memory capability path retained behind explicit non-prod `RANKING_CAPABILITY_MODE`.
 - `services/ranking/helm/ranking/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `values.schema.json`, `helm-test.sh`), kind secret `ranking-database-url`, deploy/port-forward/integration/adapter scripts, Makefile targets — Helm-only Ranking deploy for kind (ClusterIP).
-- `docs/architecture/04-persistence-by-context.md` — Recorded durable adapter status; Postgres authoritative reads; Redis leaderboard projection remains unwired.
-- Status: Ranking durable adapter **implemented**; Debezium Connect ranking connector is kind-wired (Phase 1); multi-topic franz-go consumers (`room.game.completed`, `tournament.players.advanced`, `tournament.completed`) are **implemented**; **Redis leaderboard projection remains PENDING**; **final clean-cluster live proof has not yet run**.
+- `docs/architecture/04-persistence-by-context.md` — Recorded durable adapter status and authoritative Postgres reads; the Redis leaderboard projection landed in a later slice.
+- Status: Ranking durable adapter, connector, multi-topic Kafka consumers, and Redis leaderboard projection are **implemented**; clean kind deployment passed.
 
 ## Tournament Orchestration Durable Postgres Adapter (2026-07-11)
 
 - `services/tournament-orchestration/**` — Implemented durable pgxpool TournamentRepository (exact schema/bootstrap readiness, complete aggregate hydrate/restore, transactional commit of authoritative rows + command idempotency + append-only CDC outbox under tournament `FOR UPDATE` / create advisory lock). Migration outbox is append-only (no `published_at` / unpublished index / app polling). Real HTTP `RoomProvisioner` for `POST /internal/v1/rooms/provision`. Fail-closed production wiring; provisioning worker stays disabled (no safe `WORKER_ROLE` loop); synchronous `ProcessProvisioningBatch` remains the provision path.
 - `services/tournament-orchestration/helm/tournament-orchestration/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `values.schema.json`, `helm-test.sh`), kind secret `tournament-database-url`, deploy/port-forward/integration/adapter scripts, Makefile targets — Helm-only Tournament deploy for kind (ClusterIP); worker disabled.
-- `docs/architecture/04-persistence-by-context.md` — Recorded durable adapter status; Redis bracket projection remains unwired; Debezium Connect kind-wired separately.
-- Status: Tournament durable adapter **implemented**; Debezium Connect tournament connector is kind-wired (Phase 1); franz-go `room.match.completed` consumer is **implemented**; **Redis bracket projection remains PENDING**; **final clean-cluster live proof has not yet run**.
+- `docs/architecture/04-persistence-by-context.md` — Recorded durable adapter status; the Redis bracket projection landed in a later slice; Debezium Connect is kind-wired.
+- Status: Tournament durable adapter, connector, `room.match.completed` consumer, and Redis bracket projection are **implemented**; clean kind deployment passed.
 
 ## Room Gameplay Durable Postgres + Redis Timer Slice (2026-07-11)
 
 - `services/room-gameplay/**` — Implemented durable pgx SessionRepository + SessionUnitOfWork (ADR-0019 FOR UPDATE across Identity validate → domain apply → GI append → atomic dual outboxes). Migration rewritten with `integration_outbox_events` / `realtime_outbox_events` (no `published_at`), deadlines, bindings, provisions, stream highwater, pending audits, and GI reconciliation markers. Autonomous reconciliation marker (separate TX after confirmed GI append) + durable-API ReconciliationWorker; Redis sorted-set timer index (claim/ack/reaper/rebuild) + `WORKER_ROLE=room-timer` worker. `/ready` verifies schema fingerprint + Redis in durable mode. Capability keeps MemorySessionRepository + OutboxRetryWorker + MultiDestinationPublisher.
 - `services/room-gameplay/helm/room-gameplay/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `helm-test.sh`), kind secrets `room-database-url`, deploy/integration scripts, Makefile targets — Helm-only Room deploy for kind (ClusterIP); timer worker enabled in kind.
-- Status: Room durable adapter + timer index + GI reconciliation worker **implemented**; Debezium Connect (integration) + Server (realtime→Redis) are kind-wired (Phase 1); Spectator/Analytics Kafka consumers are **implemented** separately; live CDC proofs remain explicit optional targets; **final clean-cluster live proof has not yet run**.
+- Status: Room durable adapter + timer index + GI reconciliation worker, Connect/Server CDC, and downstream consumers are **implemented**; live clean-cluster delivery passed.
 
 ## Identity Durable Postgres + OIDC Slice (2026-07-11)
 
 - `services/identity/**` — Implemented durable pgxpool adapters (`DATABASE_URL`) for players/ACLs/`external_identities`/sessions and append-only Debezium-compatible `outbox_events` (no `published_at` / app polling). OIDC anti-corruption layer (stdlib discovery/JWKS/RS256) maps `(issuer, subject)` without persisting provider tokens. `/ready` verifies writer DB + schema fingerprint in durable mode; checkpoint HTTP invalidation worker remains capability-only (`IDENTITY_CAPABILITY_MODE`).
 - `services/identity/migrations/001_init.sql`, `infrastructure/bootstrap/fingerprints/identity.*` — Baseline schema adds `external_identities` and outbox router columns; fingerprints regenerated.
 - `services/identity/helm/identity/**` (`values.kind.yaml`, digest-strict `_helpers.tpl`, `helm-test.sh`), kind secrets/OIDC ConfigMap, `infrastructure/kind/scripts/deploy-identity.sh` / `test-identity-adapter.sh`, Makefile targets — Helm-only Identity deploy for kind (no static Deployment); ClusterIP only.
-- Status: Identity durable adapter implemented; Debezium Connect identity connector is kind-wired (Phase 1); Gateway Kafka SessionInvalidated consumer is **implemented**; **final clean-cluster live proof has not yet run**.
+- Status: Identity durable adapter, Debezium connector, and Gateway SessionInvalidated consumer are **implemented**; live clean-cluster delivery passed.
 
 ## Game Integrity KurrentDB Adapter + Envelope Encryption (Slice 1) (2026-07-11)
 
@@ -373,12 +387,12 @@ No Design Checkpoint non-negotiable guarantee was weakened or dropped. The 5-sec
 | Spectator admission `waiting`/`locked`/`in_progress`; terminal close on `RoomCompleted`/`RoomCancelled` | Implemented and documented |
 | Absolute UTC Uno `expiresAt` + `openingSequence` | Implemented and documented |
 | Room completion event names + canonical fields (`GameCompleted`, `MatchCompleted`, spectator-safe) | Kafka envelope authoritative in AsyncAPI; offline HTTP bridge is a documented transform (not identical body); durable Kafka adapters are **implemented** when `KAFKA_BROKERS` is set |
-| Production Postgres adapters | **Partial:** Identity + Room + Ranking + Tournament durable pgx adapters implemented (`DATABASE_URL`, schema-gated `/ready`). Room also requires `REDIS_URL` for timer index. Kind Debezium Connect/Server wiring **implemented**; live outbox→Kafka/Redis proofs remain explicit optional targets |
-| Production Kafka adapters | **Implemented** for declared consumers when `KAFKA_BROKERS` is set: Gateway `identity.session.invalidated`; Tournament `room.match.completed`; Ranking `room.game.completed` / `tournament.players.advanced` / `tournament.completed` (per-source Ranking DLQs); Spectator `room.spectator-safe.events`; Analytics nine configured topics. Offline capability path retains HTTP bridges. **Final clean-cluster live proof has not yet run** |
-| Production Redis adapters | **Implemented:** Spectator projection + SSE/recovery fencing, Ranking leaderboard projection/pagination/rebuild, Tournament bracket projection/pagination/rebuild, Room timer index, and Gateway rate-limit + LiveFeed/session-invalidation admission. Ranking/Tournament/Spectator Redis adapters pass real kind Redis integration lanes. Debezium Server player-feed delivery remains a separate live proof gate |
+| Production Postgres adapters | **Implemented:** Identity + Room + Ranking + Tournament durable pgx adapters (`DATABASE_URL`, schema-gated `/ready`); Room also requires `REDIS_URL` for timer indexing. Kind Connect/Server CDC has live delivery proof |
+| Production Kafka adapters | **Implemented** for declared consumers when `KAFKA_BROKERS` is set: Gateway `identity.session.invalidated`; Tournament `room.match.completed`; Ranking `room.game.completed` / `tournament.players.advanced` / `tournament.completed`; Spectator `room.spectator-safe.events`; Analytics nine configured topics. Clean kind CDC and recovery-worker lanes passed |
+| Production Redis adapters | **Implemented:** Spectator projection + SSE/recovery fencing, Ranking leaderboard projection/pagination/rebuild, Tournament bracket projection/pagination/rebuild, Room timer index, and Gateway rate-limit + LiveFeed/session-invalidation admission. Kind Redis and Debezium Server delivery lanes pass |
 | Production KurrentDB adapter | **Implemented** for Game Integrity (KurrentDB 26 + AES-256-GCM envelope encryption, ADR-0024/0035). Capability overlay still uses explicit memory. Staging/production stay fail-closed without managed KMS provider config |
 | Production ClickHouse adapter | **Implemented** for Analytics (stdlib HTTP, generation-based rebuild, schema-gated `/ready`). Capability memory retained behind `ANALYTICS_CAPABILITY_MODE`. Kafka ingestion of nine configured topics **implemented** when `KAFKA_BROKERS` is set |
-| Helm worker Deployments | Room timer, Tournament provisioning/seeding/completion, Ranking snapshotter, and Spectator/Analytics projection-rebuilder binaries/templates are **implemented**. Spectator/Analytics rebuild Deployments remain disabled in every overlay pending full Kafka→HTTP→Redis/ClickHouse live recovery tests |
+| Helm worker Deployments | Room timer, Tournament provisioning/seeding/completion, Ranking snapshotter, and Spectator/Analytics projection-rebuilder binaries/templates are **implemented**. Spectator/Analytics rebuilders are enabled only in kind after full live proofs; default/staging/production remain disabled |
 
 No Design Checkpoint non-negotiable guarantee was weakened or dropped. `/ready` is not weakened to fake production readiness.
 

@@ -18,6 +18,8 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	test-capability-stack test-client-checkpoint test-client-dockerfile \
 	check build-shared \
 	kind-render kind-validate kind-create-cluster kind-build-load-bootstrap \
+	kind-build-load-services kind-deploy-game-integrity kind-deploy-services \
+	kind-run-live-probes kind-clean-deploy kind-test-clean-deployment-structure \
 	kind-load-debezium-server kind-status-debezium-server kind-test-debezium-server-structure \
 	kind-load-debezium-connect kind-test-debezium-connectors kind-test-debezium-connect-structure \
 	kind-test-debezium-postgres-to-kafka-live kind-test-debezium-postgres-to-redis-live \
@@ -36,9 +38,10 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	kind-deploy-analytics kind-test-analytics-adapter kind-test-analytics-adapter-structure \
 	kind-test-analytics-integration test-analytics-helm test-analytics-integration \
 	kind-test-analytics-kafka-consumer-structure kind-test-analytics-kafka-to-clickhouse-live \
-	kind-test-analytics-projection-rebuilder-structure \
+	kind-test-analytics-projection-rebuilder-structure kind-test-analytics-projection-rebuilder-live \
 	kind-deploy-spectator-view kind-test-spectator-adapter kind-test-spectator-adapter-structure \
 	kind-test-spectator-integration kind-test-spectator-projection-rebuilder-structure \
+	kind-test-spectator-projection-rebuilder-live \
 	test-spectator-helm test-spectator-integration \
 	kind-deploy-gateway kind-test-gateway-adapter kind-test-gateway-adapter-structure \
 	kind-test-gateway-si-redis-admission-live kind-test-gateway-session-invalidation-live \
@@ -66,7 +69,7 @@ help:
 	@echo "  test-room-helm               offline Room helm lint/template checks"
 	@echo "  test-room-integration        live Postgres integration (safe unoarena_room_gameplay_test_* DSN only)"
 	@echo "  kind-deploy-tournament-orchestration EXPLICIT: helm upgrade --install Tournament (kind values)"
-	@echo "  kind-test-tournament-adapter EXPLICIT/NETWORKED: Tournament durable create/outbox (no CDC claim)"
+	@echo "  kind-test-tournament-adapter EXPLICIT/NETWORKED: Tournament durable create/idempotency (internal create has no outbox)"
 	@echo "  kind-test-tournament-adapter-structure offline Tournament deploy/adapter/PF structure checks"
 	@echo "  kind-test-tournament-integration EXPLICIT/NETWORKED: ephemeral test DB + Tournament store + service integration"
 	@echo "  kind-test-tournament-redis-integration EXPLICIT/NETWORKED: Tournament Redis bracket projection (DB 14)"
@@ -83,6 +86,7 @@ help:
 	@echo "  kind-test-analytics-adapter-structure offline Analytics deploy/adapter/PF structure checks"
 	@echo "  kind-test-analytics-kafka-consumer-structure offline Analytics Kafka consumer structure"
 	@echo "  kind-test-analytics-kafka-to-clickhouse-live EXPLICIT: Kafka→ClickHouse Analytics ingest proof"
+	@echo "  kind-test-analytics-projection-rebuilder-live EXPLICIT: Kafka→backfill HTTP→ClickHouse recovery proof"
 	@echo "  kind-test-analytics-integration EXPLICIT/NETWORKED: ephemeral test DB + Analytics store integration"
 	@echo "  test-analytics-helm          offline Analytics helm lint/template checks"
 	@echo "  test-analytics-integration   live ClickHouse integration (safe unoarena_analytics_test_* DB only)"
@@ -90,6 +94,7 @@ help:
 	@echo "  kind-test-spectator-adapter  EXPLICIT/NETWORKED: Spectator durable Redis ingest (Kafka consumer wired; live probe may still use HTTP bridge)"
 	@echo "  kind-test-spectator-adapter-structure offline Spectator deploy/adapter/PF structure checks"
 	@echo "  kind-test-spectator-projection-rebuilder-structure offline ADR-0039 rebuilder/worker/topic structure checks"
+	@echo "  kind-test-spectator-projection-rebuilder-live EXPLICIT: Kafka→Room snapshot→Redis recovery proof"
 	@echo "  kind-test-spectator-integration EXPLICIT/NETWORKED: Redis DB 14 + tagged store suite"
 	@echo "  kind-deploy-gateway          EXPLICIT: helm upgrade --install Gateway (kind values)"
 	@echo "  kind-test-gateway-adapter    EXPLICIT/NETWORKED: Gateway durable Redis ready (SessionInvalidated Kafka wired)"
@@ -115,6 +120,12 @@ help:
 	@echo "  kind-validate          offline kind foundation checks incl. CDC/retention (no pull / no cluster)"
 	@echo "  kind-create-cluster    EXPLICIT: create disposable kind cluster uno-arena"
 	@echo "  kind-build-load-bootstrap  EXPLICIT: docker build + kind load bootstrap image"
+	@echo "  kind-build-load-services   EXPLICIT/NETWORKED: build + load all 8 ARM64 service images"
+	@echo "  kind-deploy-game-integrity EXPLICIT: helm upgrade --install Game Integrity (kind values)"
+	@echo "  kind-deploy-services       EXPLICIT: deploy all 8 services in dependency order"
+	@echo "  kind-run-live-probes       EXPLICIT/NETWORKED: run the complete kind acceptance probe lane"
+	@echo "  kind-clean-deploy          DESTRUCTIVE/NETWORKED: reset uno-arena, rebuild, deploy, and probe"
+	@echo "  kind-test-clean-deployment-structure offline clean-deployment orchestration checks"
 	@echo "  kind-load-debezium-connect EXPLICIT/NETWORKED: node-native crictl pull Debezium Connect 3.6 (Kafka outbox)"
 	@echo "  kind-test-debezium-connect-structure  offline Connect config/wiring structure checks"
 	@echo "  kind-test-debezium-connectors  EXPLICIT/NETWORKED: Connect REST status for 4 connectors (no delivery claim)"
@@ -290,6 +301,9 @@ kind-test-analytics-kafka-consumer-structure:
 kind-test-analytics-projection-rebuilder-structure:
 	./infrastructure/kind/scripts/test-analytics-projection-rebuilder-structure.sh
 
+kind-test-analytics-projection-rebuilder-live:
+	./infrastructure/kind/scripts/test-analytics-projection-rebuilder-live.sh
+
 kind-test-analytics-kafka-to-clickhouse-live:
 	./infrastructure/kind/scripts/test-analytics-kafka-consumer-structure.sh
 	./infrastructure/kind/scripts/test-analytics-kafka-to-clickhouse-live.sh
@@ -384,6 +398,9 @@ kind-test-spectator-adapter-structure:
 kind-test-spectator-projection-rebuilder-structure:
 	./infrastructure/kind/scripts/test-spectator-projection-rebuilder-structure.sh
 
+kind-test-spectator-projection-rebuilder-live:
+	./infrastructure/kind/scripts/test-spectator-projection-rebuilder-live.sh
+
 kind-test-spectator-adapter:
 	./infrastructure/kind/scripts/test-spectator-adapter-structure.sh
 	./infrastructure/kind/scripts/test-spectator-adapter.sh
@@ -459,6 +476,24 @@ kind-create-cluster:
 
 kind-build-load-bootstrap:
 	./infrastructure/kind/scripts/build-load-bootstrap.sh
+
+kind-build-load-services:
+	./infrastructure/kind/scripts/build-load-services.sh
+
+kind-deploy-game-integrity:
+	./infrastructure/kind/scripts/deploy-game-integrity.sh
+
+kind-deploy-services:
+	./infrastructure/kind/scripts/deploy-services.sh
+
+kind-run-live-probes:
+	./infrastructure/kind/scripts/run-live-probes.sh
+
+kind-clean-deploy:
+	./infrastructure/kind/scripts/clean-deploy.sh --confirm-reset uno-arena
+
+kind-test-clean-deployment-structure:
+	./infrastructure/kind/scripts/test-clean-deployment-structure.sh
 
 kind-load-debezium-connect:
 	./infrastructure/kind/scripts/load-debezium-connect.sh

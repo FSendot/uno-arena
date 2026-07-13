@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"unoarena/services/room-gameplay/app"
+	"unoarena/services/room-gameplay/store"
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
 	"unoarena/shared/httpx"
@@ -28,6 +29,7 @@ var timerCommandAllowlist = map[string]struct{}{
 	app.CmdExpireUnoWindow:      {},
 	app.CmdForfeitPlayer:        {},
 	app.CmdSkipDisconnectedTurn: {},
+	app.CmdStartNextGame:        {},
 }
 
 // Server wires HTTP handlers to the Room Gameplay application service.
@@ -660,7 +662,8 @@ func main() {
 		if wired.Mode != "durable" || wired.Timers == nil {
 			log.Fatal("WORKER_ROLE=room-timer requires durable mode with Redis timers")
 		}
-		tw := NewTimerWorker(wired.Timers, cfg.RoomGameplayURL, cfg.TimerCredential)
+		continuations := store.NewNextGameContinuationQueue(wired.Pool.Main)
+		tw := NewTimerWorkerWithContinuations(wired.Timers, continuations, cfg.RoomGameplayURL, cfg.TimerCredential)
 		tw.Start()
 		defer tw.Stop()
 		log.Printf(`{"level":"info","service":"%s","event":"timer_worker_startup","mode":%q}`, cfg.ServiceName, wired.Mode)

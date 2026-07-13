@@ -221,7 +221,7 @@ func toStoreRegistrationCommit(req RegistrationCommitRequest) store.Registration
 			CreatedAt:     e.CreatedAt,
 		})
 	}
-	return store.RegistrationCommitRequest{
+	storeReq := store.RegistrationCommitRequest{
 		Op:                 store.RegistrationOp(req.Op),
 		TournamentID:       req.TournamentID,
 		CommandID:          req.CommandID,
@@ -234,6 +234,14 @@ func toStoreRegistrationCommit(req RegistrationCommitRequest) store.Registration
 		BatchSize:          req.BatchSize,
 		BumpBaseProjection: req.BumpBaseProjection,
 	}
+	if req.Round1Kickoff != nil {
+		storeReq.Round1Kickoff = &store.RegistrationRound1Kickoff{
+			CommandID:     req.Round1Kickoff.CommandID,
+			CorrelationID: req.Round1Kickoff.CorrelationID,
+			Decision:      req.Round1Kickoff.Decision,
+		}
+	}
+	return storeReq
 }
 
 // durableSeedingRepo adapts store seeding UoW to SeedingRepository.

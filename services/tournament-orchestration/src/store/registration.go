@@ -68,6 +68,15 @@ type RegistrationCommitRequest struct {
 	RetryBudget        int
 	BatchSize          int
 	BumpBaseProjection bool
+	Round1Kickoff      *RegistrationRound1Kickoff
+}
+
+// RegistrationRound1Kickoff is persisted atomically with the transition to
+// phase=seeding, closing the crash gap between registration and round-1 work.
+type RegistrationRound1Kickoff struct {
+	CommandID     string
+	CorrelationID string
+	Decision      domain.SeedRoundKickoffDecision
 }
 
 // RegistrationUnitOfWork holds one READ COMMITTED tx for bounded create/register/close.
@@ -412,6 +421,9 @@ func (u *RegistrationUnitOfWork) Commit(req RegistrationCommitRequest) error {
 	default:
 		return fmt.Errorf("unknown registration op %q", req.Op)
 	}
+	if err := u.persistRound1Kickoff(req); err != nil {
+		return wrapUnavailable(err)
+	}
 
 	if req.BumpBaseProjection {
 		if err := bumpProjectionVersionTx(u.ctx, u.tx, u.tid, time.Now().UTC()); err != nil {
@@ -495,6 +507,25 @@ func (u *RegistrationUnitOfWork) applyClose(req RegistrationCommitRequest) error
 		WHERE tournament_id = $1 AND phase = $5
 	`, u.tid, string(domain.PhaseSeeding), count, now, string(domain.PhaseRegistration))
 	return err
+}
+
+func (u *RegistrationUnitOfWork) persistRound1Kickoff(req RegistrationCommitRequest) error {
+	if req.Round1Kickoff == nil {
+		return nil
+	}
+	if req.Round1Kickoff.CommandID != domain.SeedRoundCommandID(domain.TournamentID(u.tid), 1) {
+		return fmt.Errorf("round-1 kickoff command id must be deterministic")
+	}
+	if req.Round1Kickoff.Decision.Kind != domain.SeedKickoffSchedule {
+		return fmt.Errorf("round-1 kickoff must schedule, got %q", req.Round1Kickoff.Decision.Kind)
+	}
+	return insertPendingRoundAndJobTx(u.ctx, u.tx, u.tid, 1, SeedingCommitRequest{
+		TournamentID:  u.tid,
+		CommandID:     req.Round1Kickoff.CommandID,
+		CommandType:   seedingCommandType,
+		CorrelationID: req.Round1Kickoff.CorrelationID,
+		Decision:      req.Round1Kickoff.Decision,
+	}, time.Now().UTC())
 }
 
 // ReserveRegistration attempts shard reservation without finalizing outcome.
@@ -618,6 +649,9 @@ func (u *RegistrationUnitOfWork) FinalizeRegister(req RegistrationCommitRequest)
 		return u.finishWithPrior(existingBody)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		return wrapUnavailable(err)
+	}
+	if err := u.persistRound1Kickoff(req); err != nil {
 		return wrapUnavailable(err)
 	}
 	if err := insertCommandOutcomeWithTournament(u.ctx, u.tx, req.CommandID, u.tid, req.CommandType, req.Outcome); err != nil {

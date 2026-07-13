@@ -38,6 +38,9 @@ Usage:
   unoarena analytics
   unoarena countdown --expires-at <RFC3339> --opening-sequence <n>
                    [--now <RFC3339>] [--json]
+  unoarena play --casual [--user <u> --pass <p> | --token <bearer-token>] [--json]
+  unoarena bot [--casual | --room <roomId> | --tournament <tournamentId>]
+                   [--user <u> --pass <p> | --token <bearer-token>] [--seed <rng>]
 
 Environment:
   UNOARENA_API_URL       Gateway/BFF base URL (required except for countdown/logout)
@@ -47,8 +50,8 @@ Environment:
 Notes:
   - All HTTP calls target UNOARENA_API_URL only (OpenAPI BFF paths).
   - Token resolution for one-shot utilities: --token, then UNOARENA_TOKEN, then session file.
-  - HTTP responses are always JSON; --json is only meaningful for countdown
-    (structured JSON vs text line).
+  - Interactive play is line-oriented; --json emits JSON Lines for events/actions.
+  - Bot mode always emits JSON Lines and a final summary.
   - schemaVersion must equal 1.
   - The public command catalog is closed (15 OpenAPI types). Unknown --type
     values are rejected locally before send.
@@ -57,7 +60,6 @@ Notes:
     tournament types; passing --expected-sequence for those is rejected locally.
   - seed passwords are deterministic: password = "<username>-pass"
     (usernames = "<prefix><NNNN>" with 1-based zero-padded index).
-  - Interactive play (`play`) and headless bot (`bot`) are stage B (not implemented).
   - Countdown is advisory; server expiresAt + openingSequence remain authoritative.
     SSE advisory accepts canonical openingSequence and legacy openingRoomSequence.
   - Graphical UI is deferred; this CLI is the sole current client interface.
@@ -841,7 +843,6 @@ cmd_seed() {
         string password "$password" \
         string result "error" \
         string error "register HTTP ${reg_code}"
-      printf '\n'
       continue
     fi
 
@@ -855,7 +856,6 @@ cmd_seed() {
         string password "$password" \
         string result "error" \
         string error "login HTTP ${HTTP_CODE}"
-      printf '\n'
       continue
     fi
     login_body="$HTTP_BODY"
@@ -869,7 +869,6 @@ cmd_seed() {
         string password "$password" \
         string result "error" \
         string error "login response missing token/playerId/sessionId"
-      printf '\n'
       continue
     fi
 
@@ -885,7 +884,6 @@ cmd_seed() {
       string playerId "$player_id" \
       string sessionId "$session_id" \
       string result "$line_status"
-    printf '\n'
   done
 
   if [ "$any_fail" -ne 0 ]; then
@@ -1408,6 +1406,15 @@ if [ -z "$command_name" ]; then
   usage
 fi
 shift
+
+# Stage B lives in a stdlib Python runtime while preserving this Bash executable
+# as the sole stable entrypoint and keeping all traffic at the Gateway/BFF edge.
+case "$command_name" in
+  play|bot)
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec python3 "${SCRIPT_DIR}/../lib/game_client.py" "$command_name" "$@"
+    ;;
+esac
 
 # Nested tournament / stream / room verbs.
 subcommand=""

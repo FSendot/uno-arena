@@ -57,8 +57,9 @@ This repository contains the current UnoArena design package and the architectur
 - The design package defines domain language, bounded contexts, aggregates, commands, events, edge cases, consistency, and assumptions.
 - The architecture package translates those design decisions into deployable services, interfaces, persistence, communication patterns, capacity reasoning, and operational constraints.
 - Architectural adapters such as REST, SSE, Kafka, Redis, KurrentDB, ClickHouse, and service deployment choices are documented where they affect assignment invariants or scaling constraints.
-- **Capability status:** capability mode (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `IDENTITY_CAPABILITY_MODE` via `docker-compose.capability.yml`; `SPECTATOR_CAPABILITY_MODE` when explicitly set on non-prod Spectator) uses real service HTTP paths with bounded in-memory limiters / memory session repos, plus explicit Game Integrity memory. `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` remain isolated-test fakes only. Identity durable Postgres + OIDC are implemented when `DATABASE_URL` is set (schema-gated `/ready`; Debezium CDC delivery still pending). Room durable Postgres + Redis timer index are implemented when `DATABASE_URL` + `REDIS_URL` are set (Debezium Kafka/Redis-sink CDC still pending). Spectator durable Redis projection + Redis-backed SSE are implemented when `REDIS_URL` plus scoped credentials are set (Kafka consumer for `room.spectator-safe.events` still pending; HTTP internal ingest is a test/ops bridge). Gateway Redis rate-limit and Kafka connectors are **not** claimed as implemented. Analytics durable ClickHouse HTTP/store is implemented when `CLICKHOUSE_URL` plus scoped credentials are set (Kafka ingestion still pending). Game Integrity’s durable KurrentDB 26 adapter with AES-256-GCM envelope encryption is implemented when `KURRENTDB_URL` and versioned envelope keyring config are set (`mode=durable`, `DEPLOYMENT_ENV=local|test|development` for `dev` provider); staging/production remain fail-closed without managed KMS. Offline unit tests use `make test-game-integrity` after an explicit networked `make deps-game-integrity` module-cache bootstrap; live Kurrent coverage is `make test-game-integrity-integration`. Those other stores remain required architecture targets (see ADRs and `docs/architecture/04-persistence-by-context.md`); migrations under `services/*/migrations/` describe intended schemas for contexts without a durable adapter yet. Room **configured mode** `/ready` is always blocked with `postgres_adapter_blocked` until a durable Room Postgres session adapter exists (setting `DATABASE_URL` does not unblock Room). Gateway Redis readiness likewise blocks non-capability rollout until a durable adapter exists — do not weaken `/ready`.
-- Helm charts expose Service port **8080** (matching container/targetPort and peer URLs). Worker Deployments (timer / provisioning / projection-rebuilder) default to `enabled: false` because binaries do not implement `WORKER_ROLE` loops and production worker adapters are absent.
+- **Capability status:** capability mode remains an explicit non-production lane with bounded memory adapters; it must not be confused with the durable path. The context-owned durable adapters are implemented for Identity/Room/Ranking/Tournament Postgres, Game Integrity KurrentDB, Analytics ClickHouse, Spectator/Ranking/Tournament Redis projections, Room Redis timers, and Gateway Redis admission/LiveFeed. The declared Gateway, Tournament, Ranking, Spectator, and Analytics Kafka consumers and the Spectator/Analytics recovery workers are implemented. Debezium Kafka Connect owns the four Kafka-bound transactional outboxes and Debezium Server owns Room realtime-to-Redis delivery; applications never poll outboxes. A clean ARM64 kind deployment has brought up the foundation, CDC, and all eight services and has passed both full Analytics and Spectator worker recovery proofs. See `docs/architecture/04-persistence-by-context.md` for the authoritative boundary-by-boundary status.
+- Local kind Identity deliberately enables a context-owned password test-account stub so `register`, `login`, and `seed` can create dynamic exercise users. Staging and production remain OIDC-only and cannot enable that stub.
+- Helm charts expose Service port **8080** (matching container/targetPort and peer URLs). Durable worker loops are implemented. Spectator and Analytics projection rebuilders are enabled only by `values.kind.yaml` after their live recovery proofs; default, staging, and production values keep them disabled pending environment-specific operational enablement.
 - Cross-chart credential equality and producer-scope matrix (secret *values* must match across producer/consumer charts; never commit secret material): see the table under Local foundation below and matching comments in `services/*/helm/*/values.yaml`. Each row is a required equality of secret *values*; chart-local key names differ.
 - The modeling assumes Uno rooms support ad-hoc play and tournament-assigned play, and that tournament matches are best-of-three series.
 - Settled product decisions cover rejected-command operational/security audit records (no domain events or Game Integrity entries), spectator admission through `waiting`/`locked`/`in_progress` with terminal room/match closure on `RoomCompleted`/`RoomCancelled` (not individual `GameCompleted`), deterministic ad-hoc host reassignment before lock/start, and server-authoritative Uno `expiresAt` plus `openingSequence` with advisory client countdown.
@@ -67,10 +68,13 @@ This repository contains the current UnoArena design package and the architectur
 
 ## Client Checkpoint
 
-Stage **A** (canonical CLI foundation: auth/session/seed, room + tournament utilities,
-`spectate`, Docker packaging, offline tests) is implemented under
-[`client-checkpoint/`](./client-checkpoint/README.md). Stage **B** interactive `play` and
-headless `bot` are **not** implemented yet.
+Stages **A** and **B** are implemented under [`client-checkpoint/`](./client-checkpoint/README.md):
+auth/session/seed, room and tournament utilities, `spectate`, interactive `play`,
+headless casual/room/tournament `bot`, Docker packaging, and the fake-BFF test suite.
+The implementation suite passes 174+ checks. Live kind acceptance has also
+completed a casual best-of-three and a tournament from registration through
+room play and terminal `TournamentCompleted`, using only the public BFF/CLI
+surface.
 
 ```bash
 export UNOARENA_API_URL=http://127.0.0.1:8080
@@ -80,6 +84,45 @@ make test-client-dockerfile          # Dockerfile structure (no build/pull)
 # docker build -f client-checkpoint/Dockerfile -t uno-arena/client:local ./client-checkpoint
 # docker run --rm -e UNOARENA_API_URL=… uno-arena/client:local <subcommand> …
 ```
+
+Every native invocation below can instead be prefixed with
+`docker run --rm -e UNOARENA_API_URL=… uno-arena/client:local`. This is the
+submission-level canonical command map; the linked client guide documents all
+flags and response examples.
+
+| Canonical invocation | BFF endpoint / operation |
+| --- | --- |
+| `unoarena health` | `GET /health` |
+| `unoarena register --user U --pass P` | `POST /v1/auth/register` |
+| `unoarena login --user U --pass P` | `POST /v1/auth/login` |
+| `unoarena logout` | Local session-file removal |
+| `unoarena whoami [--token T]` | `GET /v1/auth/whoami` |
+| `unoarena seed --count N [--prefix P]` | Register + login once per generated account; JSONL output |
+| `unoarena room list` | `GET /v1/rooms` |
+| `unoarena room create` | `POST /v1/commands` (`CreateRoom`) |
+| `unoarena room join ROOM` | Spectator snapshot, then room command `JoinRoom` |
+| `unoarena room leave [ROOM]` | Player snapshot, then room command `LeaveRoom` |
+| `unoarena command --type TYPE …` | `POST /v1/commands` or `/v1/rooms/{roomId}/commands` |
+| `unoarena tournament create …` | `POST /v1/commands` (`CreateTournament`) |
+| `unoarena tournament register ID` | `POST /v1/commands` (`RegisterPlayer`) |
+| `unoarena tournament close-registration …` | `POST /v1/commands` (`CloseRegistration`) |
+| `unoarena tournament status ID` | `GET /v1/tournaments/{id}/standings` + `/bracket` |
+| `unoarena play --casual …` | Room discovery/create/join, player snapshot + SSE, room gameplay commands |
+| `unoarena spectate ROOM` | `GET /v1/streams/spectator?roomId=…` |
+| `unoarena stream player …` | `GET /v1/streams/player?roomId=…` |
+| `unoarena stream spectator …` | `GET /v1/streams/spectator?roomId=…` |
+| `unoarena stream control …` | `GET /v1/streams/control` |
+| `unoarena bot --casual …` / `--room ROOM …` | Same room snapshot/command surface as interactive play |
+| `unoarena bot --tournament ID …` | RegisterPlayer, authenticated assignment reads, then each assigned room through terminal tournament completion |
+| `unoarena leaderboard` | `GET /v1/rankings/leaderboards` |
+| `unoarena analytics` | `GET /v1/analytics/public` |
+| `unoarena countdown …` | Local advisory display; no HTTP |
+
+For test accounts, run `seed`; usernames are `<prefix><NNNN>` and passwords are
+`<username>-pass`. Kind alone enables the external-IdP test stub described above.
+For a bounded faculty tournament, create it with `"capacity": 2`; capacity
+auto-close starts the context-owned seeding/provisioning policy without exposing
+internal tournament commands.
 
 - [Client Checkpoint CLI](./client-checkpoint/README.md)
 
@@ -140,7 +183,8 @@ Helm uses `existingSecret` + `secretKeyRef` only (no hardcoded secrets). Operato
 | Room timer only | `room-timer-service-credential` | (Room timer audience only; not Gateway) | Never reused as Gateway producer credential |
 | Ranking → Analytics | `analytics-ranking-credential` | analytics chart only | Ranking producer scope |
 | Tournament → Analytics | `analytics-tournament-credential` | analytics chart only | Tournament producer scope |
-| GI audit / Analytics ops | `game-integrity-audit-credential` / `analytics-ops-credential` | operator/compliance scope; not gameplay producers | Not interchangeable with room/ranking/tournament producer credentials |
+| Room recovery → GI replay | `game-integrity-audit-credential` (Room chart) | `game-integrity-audit-credential` (GI chart) | Scoped replay/reconciliation path; Room supplies required audit actor/reason metadata and does not use it for gameplay appends |
+| GI audit / Analytics ops | `game-integrity-audit-credential` / `analytics-ops-credential` | operator/compliance scope; not gameplay producers | Not interchangeable with ordinary room/ranking/tournament producer credentials |
 
 Kubernetes Services and peer URLs use port **8080** consistently.
 

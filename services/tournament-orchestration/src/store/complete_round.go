@@ -322,6 +322,39 @@ func (s *TournamentStore) BeginCompleteRound(ctx context.Context, tournamentID s
 	uow.loaded.QuarantinedBatches = quarantinedBatches
 	uow.loaded.AdvancementRecordsPlayers = advRecordsPlayers
 	uow.loaded.NormalizedAdvancingPlayers = normalizedAdvancing
+	if isFinal {
+		var standings []string
+		err = tx.QueryRow(ctx, `
+			SELECT ar.advancing_player_ids
+			FROM bracket_slots bs
+			INNER JOIN advancement_records ar
+				ON ar.tournament_id = bs.tournament_id
+				AND ar.round_number = bs.round_number
+				AND ar.slot_id = bs.slot_id
+			INNER JOIN match_results mr
+				ON mr.tournament_id = ar.tournament_id
+				AND mr.round_number = ar.round_number
+				AND mr.slot_id = ar.slot_id
+				AND mr.room_id = ar.source_room_id
+				AND mr.completion_version = ar.source_completion_version
+			WHERE bs.tournament_id = $1 AND bs.round_number = $2
+				AND bs.slot_index = 0
+				AND mr.disposition = 'recorded'
+				AND (SELECT count(*) FROM bracket_slots
+					 WHERE tournament_id=$1 AND round_number=$2) = 1
+			FOR UPDATE OF bs, ar, mr
+		`, tournamentID, roundNumber).Scan(&standings)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			_ = tx.Rollback(ctx)
+			return nil, wrapUnavailable(err)
+		}
+		if err == nil {
+			uow.loaded.FinalStandings = make([]domain.PlayerID, len(standings))
+			for i, playerID := range standings {
+				uow.loaded.FinalStandings[i] = domain.PlayerID(playerID)
+			}
+		}
+	}
 	return uow, nil
 }
 
@@ -383,6 +416,29 @@ func (u *CompleteRoundUnitOfWork) Commit(req CompleteRoundCommitRequest) error {
 		if req.Decision.NextRound != nil {
 			if err := u.insertNextRoundSeeding(req.Decision.NextRound, now); err != nil {
 				return err
+			}
+		}
+		if req.Decision.TournamentCompletion != nil {
+			if !req.Decision.IsFinal || req.Decision.NextRound != nil {
+				return fmt.Errorf("tournament completion requires final round without next round")
+			}
+			championID := string(req.Decision.TournamentCompletion.ChampionID)
+			if championID == "" {
+				return fmt.Errorf("tournament completion requires champion")
+			}
+			tag, err := u.tx.Exec(u.ctx, `
+				UPDATE tournaments
+				SET phase = $2,
+				    completed_at = $3,
+				    updated_at = $3,
+				    rules = jsonb_set(COALESCE(rules, '{}'::jsonb), '{championId}', to_jsonb($4::text), true)
+				WHERE tournament_id = $1 AND phase = $5
+			`, u.tid, string(domain.PhaseCompleted), now, championID, string(domain.PhaseInProgress))
+			if err != nil {
+				return wrapUnavailable(err)
+			}
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("tournament phase not in_progress at final round complete commit")
 			}
 		}
 		if err := insertOutboxEvents(u.ctx, u.tx, req.Events); err != nil {

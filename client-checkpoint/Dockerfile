@@ -11,7 +11,8 @@ RUN apk add --no-cache bash curl python3 \
   && adduser -D -H -u 10001 unoarena
 
 COPY bin/unoarena /usr/local/bin/unoarena
-RUN chmod 755 /usr/local/bin/unoarena
+COPY lib/game_client.py /usr/local/lib/game_client.py
+RUN chmod 755 /usr/local/bin/unoarena /usr/local/lib/game_client.py
 
 USER unoarena
 WORKDIR /home/unoarena

@@ -193,12 +193,11 @@ func TestFinding_GameAndMatchCompleted_AsyncAPIPlusFeeds(t *testing.T) {
 	if g1.Status != envelope.StatusAccepted {
 		t.Fatalf("play1=%+v", g1)
 	}
-	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("n1", "StartNextGame", seq(*g1.Sequence), "host", "s", "room_mc", map[string]any{"gameId": "g2"}), h)
-	n1 := decodeResult(t, w)
-	if n1.Status != envelope.StatusAccepted {
-		t.Fatalf("StartNextGame=%+v", n1)
+	live, ok := e.sessions.Get(context.Background(), domain.RoomID("room_mc"))
+	if !ok || live.Game() == nil || live.Game().Completed() || live.Room().GameCompletedInMatch() {
+		t.Fatalf("Room policy did not automatically start game two: ok=%v live=%+v", ok, live)
 	}
-	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("p2", "PlayCard", seq(*n1.Sequence), "host", "s", "room_mc", map[string]any{"cardId": "host-w"}), h)
+	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("p2", "PlayCard", seq(int64(live.Room().Sequence())), "host", "s", "room_mc", map[string]any{"cardId": "host-w"}), h)
 	done := decodeResult(t, w)
 	if done.Status != envelope.StatusAccepted {
 		t.Fatalf("play2=%+v", done)
@@ -254,10 +253,9 @@ func TestFinding_StartNextGame_RuntimeMapping(t *testing.T) {
 	if g1.Status != envelope.StatusAccepted {
 		t.Fatalf("g1=%+v", g1)
 	}
-	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("n1", "StartNextGame", seq(*g1.Sequence), "host", "s", "room_ng", map[string]any{"gameId": "g2"}), h)
-	n1 := decodeResult(t, w)
-	if n1.Status != envelope.StatusAccepted {
-		t.Fatalf("StartNextGame not mapped: %+v", n1)
+	live, ok := e.sessions.Get(context.Background(), domain.RoomID("room_ng"))
+	if !ok || live.Game() == nil || live.Game().Completed() || live.Room().GameCompletedInMatch() {
+		t.Fatalf("automatic StartNextGame not mapped: ok=%v live=%+v", ok, live)
 	}
 }
 

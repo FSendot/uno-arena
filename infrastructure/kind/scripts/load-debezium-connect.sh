@@ -18,11 +18,11 @@ assert_kind_context
 # Approved local ARM64 source digest (Apple Silicon kind). Multiarch index for non-ARM notes:
 # quay.io/debezium/connect@sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
 DEBEZIUM_CONNECT_VERSION="${DEBEZIUM_CONNECT_VERSION:-3.6.0.Final}"
-DEBEZIUM_CONNECT_ARM64_DIGEST="${DEBEZIUM_CONNECT_ARM64_DIGEST:-sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada}"
-DEBEZIUM_CONNECT_SOURCE_IMAGE="${DEBEZIUM_CONNECT_SOURCE_IMAGE:-quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada}"
+DEBEZIUM_CONNECT_ARM64_DIGEST="${DEBEZIUM_CONNECT_ARM64_DIGEST:-sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70}"
+DEBEZIUM_CONNECT_SOURCE_IMAGE="${DEBEZIUM_CONNECT_SOURCE_IMAGE:-quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70}"
 
 # Prior broken local runtime tag from kind-load staging (remove so crictl cannot reuse bad metadata).
-DEBEZIUM_CONNECT_STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
+DEBEZIUM_CONNECT_STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 
 if [[ "${DEBEZIUM_CONNECT_SOURCE_IMAGE}" != *"@sha256:"* ]]; then
   echo "error: source image must be digest-qualified (got ${DEBEZIUM_CONNECT_SOURCE_IMAGE})" >&2

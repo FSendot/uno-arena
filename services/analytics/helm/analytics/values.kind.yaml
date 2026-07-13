@@ -31,7 +31,9 @@ secretEnv:
   CLICKHOUSE_PASSWORD: analytics-runtime-password
 
 projectionRebuilder:
-  enabled: false
+  # Enabled only in kind after the live Kafka -> producer backfill -> ClickHouse
+  # idempotency/lease/generation proof passed. Other overlays remain disabled.
+  enabled: true
   env:
     ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
     TOURNAMENT_ORCHESTRATION_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080

@@ -165,6 +165,27 @@ func TestIntegration_SeedRound1_P1P10P2OrderAndPartialInvisible(t *testing.T) {
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("seeded order=%v want %v", got, want)
 	}
+	var roundStatus string
+	var batchCount, progressShards int
+	if err := pool.QueryRow(ctx, `
+		SELECT status FROM tournament_rounds WHERE tournament_id=$1 AND round_number=1
+	`, tid).Scan(&roundStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)::int FROM provisioning_batches WHERE tournament_id=$1 AND round_number=1
+	`, tid).Scan(&batchCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)::int FROM round_progress_shards WHERE tournament_id=$1 AND round_number=1
+	`, tid).Scan(&progressShards); err != nil {
+		t.Fatal(err)
+	}
+	if roundStatus != string(domain.RoundProvisioning) || batchCount != 1 || progressShards != domain.ProgressShardCount {
+		t.Fatalf("round-1 policy continuation missing: status=%s batches=%d shards=%d",
+			roundStatus, batchCount, progressShards)
+	}
 }
 
 func TestIntegration_SeedRound1_SameAndDifferentCommandConcurrency(t *testing.T) {

@@ -94,6 +94,16 @@ type RegistrationCommitRequest struct {
 	RetryBudget        int
 	BatchSize          int
 	BumpBaseProjection bool
+	Round1Kickoff      *RegistrationRound1Kickoff
+}
+
+// RegistrationRound1Kickoff is the Tournament-owned policy continuation that
+// must be persisted in the same transaction that closes registration. It is
+// internal application data, never a public SeedRound command.
+type RegistrationRound1Kickoff struct {
+	CommandID     string
+	CorrelationID string
+	Decision      domain.SeedRoundKickoffDecision
 }
 
 // RegistrationUnitOfWork is the bounded registration differential transaction.

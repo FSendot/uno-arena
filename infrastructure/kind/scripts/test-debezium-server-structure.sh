@@ -27,11 +27,11 @@ grep -qEi 'SSE E2E not claimed|Gateway SSE E2E not claimed|not claim' "${LIVE_RE
   || die "live Redis script must disclaim Gateway SSE E2E"
 
 # --- Image: exact quay digest + Never; node-native crictl pull (no kind load / no local runtime tags) ---
-ARM64_DIGEST="sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b"
+ARM64_DIGEST="sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08"
 MULTIARCH_DIGEST="sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984"
 SOURCE_IMAGE="quay.io/debezium/server:3.6.0.Final@${ARM64_DIGEST}"
-STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-server:3.6.0.Final-65ba00e8de90"
-SHORT_STALE_TAG="uno-arena/debezium-server:3.6.0.Final-65ba00e8de90"
+STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
+SHORT_STALE_TAG="uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 
 grep -qF "${SOURCE_IMAGE}" "${MANIFEST}" || die "Deployment must use exact source ${SOURCE_IMAGE}"
 grep -qF "${SOURCE_IMAGE}" "${LOAD}" || die "load script must stage exact source ${SOURCE_IMAGE}"
@@ -72,7 +72,7 @@ if grep -E '^[[:space:]]*docker[[:space:]]+tag\b' "${LOAD}" >/dev/null 2>&1; the
   die "load script must not retag to local runtime tags"
 fi
 grep -qF 'crictl rmi' "${LOAD}" || die "load script must crictl rmi prior known refs before pull"
-grep -qF '65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b' "${LOAD}" \
+grep -qF '3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08' "${LOAD}" \
   || die "load script must use ARM64 source digest"
 # Fail-closed: reject kind-import aliases in repoDigests; do not encode containerd surgery.
 grep -qF 'docker.io/library/import-' "${LOAD}" \

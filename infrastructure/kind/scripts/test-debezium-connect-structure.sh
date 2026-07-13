@@ -17,10 +17,10 @@ LOAD_SCRIPT="${SCRIPT_DIR}/load-debezium-connect.sh"
 STATUS_SCRIPT="${SCRIPT_DIR}/test-debezium-connectors.sh"
 STRUCT_SCRIPT="${SCRIPT_DIR}/test-debezium-connect-structure.sh"
 LIVE_KAFKA_SCRIPT="${SCRIPT_DIR}/test-debezium-postgres-to-kafka-live.sh"
-ARM64_DIGEST="sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada"
+ARM64_DIGEST="sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70"
 MULTIARCH_DIGEST="sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7"
-STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
-SHORT_STALE_TAG="uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
+STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
+SHORT_STALE_TAG="uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 SOURCE_IMAGE="quay.io/debezium/connect:3.6.0.Final@${ARM64_DIGEST}"
 
 [[ -f "${CONNECT_MANIFEST}" ]] || die "missing ${CONNECT_MANIFEST}"
@@ -129,7 +129,7 @@ do
   matches="$(grep -cF "${field}" "${CONNECT_MANIFEST}" || true)"
   [[ "${matches}" -ge 4 ]] || die "outbox router mapping ${field} must appear in all 4 connectors (got ${matches})"
 done
-grep -qF 'table.field.event.timestamp": "occurred_at"' "${CONNECT_MANIFEST}" || die "room connector must map occurred_at timestamp"
+grep -qF 'table.field.event.timestamp' "${CONNECT_MANIFEST}" && die "outbox timestamp override is invalid for Postgres timestamptz; occurredAt stays in payload"
 # Identity/tournament/ranking must not invent occurred_at when absent from schema.
 identity_block="$(awk '/connector-identity-outbox.json:/,/connector-room-integration-outbox.json:/' "${CONNECT_MANIFEST}")"
 echo "${identity_block}" | grep -qF 'occurred_at' && die "identity connector must not map occurred_at (column absent)"

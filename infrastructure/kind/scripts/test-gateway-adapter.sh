@@ -17,6 +17,7 @@ assert_kind_context
 
 # shellcheck source=port-forward-gateway.sh
 source "${SCRIPT_DIR}/port-forward-gateway.sh"
+trap cleanup EXIT
 
 echo "Gateway base: ${GATEWAY_BASE_URL}"
 echo "note: SessionInvalidated Kafka consumer wired; /ready proves durable Redis + worker health"

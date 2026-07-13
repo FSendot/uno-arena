@@ -25,9 +25,14 @@ func prepareFinalCompletedTournament(t *testing.T, pool *store.Pool, ts *store.T
 	if !ok || !round.IsFinal {
 		t.Fatal("expected final round 1")
 	}
-	d := completeRoundDifferential(t, ts, tid, 1, "cr-"+tid)
-	if d.Kind != domain.CompleteRoundSuccess && d.Kind != domain.CompleteRoundAlreadyDone {
-		t.Fatalf("complete round: %+v", d)
+	// Model a pre-autonomous-policy / recovery state: the final round is durable
+	// and complete while tournament lifecycle still needs CompleteTournament.
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE tournament_rounds
+		SET status='completed', completed_at=now()
+		WHERE tournament_id=$1 AND round_number=1 AND status='in_progress'
+	`, tid); err != nil {
+		t.Fatal(err)
 	}
 	got, ok := ts.Get(context.Background(), domain.TournamentID(tid))
 	if !ok {

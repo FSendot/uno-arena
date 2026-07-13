@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
 	"unoarena/services/room-gameplay/app"
+	"unoarena/services/room-gameplay/domain"
 	svdomain "unoarena/services/spectator-view/domain"
 	"unoarena/shared/envelope"
 )
@@ -130,13 +132,12 @@ func TestReadBridge_CanonicalSpectatorSnapshot_TwoAudiences(t *testing.T) {
 		t.Fatal("expected SnapshotSanitized with gameCompleted after quick-win play")
 	}
 
-	// Drive match to terminal via second game win.
-	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("n1", "StartNextGame", seq(*play.Sequence), "host", "s", roomID, map[string]any{"gameId": "g2"}), h)
-	n1 := decodeResult(t, w)
-	if n1.Status != envelope.StatusAccepted {
-		t.Fatalf("next: %+v", n1)
+	// Room policy has already started game two; drive it to terminal.
+	live, ok := e.sessions.Get(context.Background(), domain.RoomID(roomID))
+	if !ok || live.Game() == nil || live.Game().Completed() || live.Room().GameCompletedInMatch() {
+		t.Fatalf("automatic next game not active: ok=%v live=%+v", ok, live)
 	}
-	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("p2", "PlayCard", seq(*n1.Sequence), "host", "s", roomID, map[string]any{"cardId": "host-w"}), h)
+	w = e.do(t, http.MethodPost, "/internal/v1/commands", cmdBody("p2", "PlayCard", seq(int64(live.Room().Sequence())), "host", "s", roomID, map[string]any{"cardId": "host-w"}), h)
 	done := decodeResult(t, w)
 	if done.Status != envelope.StatusAccepted {
 		t.Fatalf("play2: %+v", done)

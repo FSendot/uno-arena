@@ -134,8 +134,20 @@ func (s *Service) handleExistingDurable(ctx context.Context, in CommandInput) Co
 		_ = uow.Rollback()
 		return s.replayPrior(ctx, in, prior)
 	}
+	// The Room-owned continuation worker is serialized by the aggregate lock.
+	// Resolve its optimistic token from the locked snapshot so unrelated commands
+	// between claim and dispatch cannot permanently poison the deterministic ID.
+	if in.AsSystem && in.Type == CmdStartNextGame {
+		expected := int64(live.Room().Sequence())
+		in.ExpectedSequenceNumber = &expected
+	}
 
 	if rej := s.prevalidate(live, in); rej != nil {
+		if in.AsSystem && in.Type == CmdStartNextGame {
+			_ = uow.Rollback()
+			seq := int64(live.Room().Sequence())
+			return CommandResult{Result: envelope.Rejected(in.CommandID, in.Type, string(rej.Code), &seq)}
+		}
 		return s.rejectDurable(ctx, uow, in, string(rej.Code), rej, live)
 	}
 
@@ -152,6 +164,15 @@ func (s *Service) handleExistingDurable(ctx context.Context, in CommandInput) Co
 	if out.Rejection != nil {
 		if reservation.ID != "" {
 			_ = s.deps.Deals.Cancel(ctx, reservation.ID)
+		}
+		// Worker-owned continuations must not persist a deterministic rejected
+		// outcome: transient deal/material/precondition failures need to retry the
+		// same command identity. The worker decides whether this reason is a safe
+		// terminal no-op or should be released.
+		if in.AsSystem && in.Type == CmdStartNextGame {
+			_ = uow.Rollback()
+			seq := int64(live.Room().Sequence())
+			return CommandResult{Result: envelope.Rejected(in.CommandID, in.Type, string(out.Rejection.Code), &seq)}
 		}
 		return s.rejectDurable(ctx, uow, in, string(out.Rejection.Code), out.Rejection, live)
 	}

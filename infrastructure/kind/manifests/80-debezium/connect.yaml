@@ -37,9 +37,9 @@ metadata:
 data:
   # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
   # Multiarch index (non-ARM notes): quay.io/debezium/connect@sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
-  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
   IMAGE_VERSION: 3.6.0.Final
-  ARM64_DIGEST: sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+  ARM64_DIGEST: sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
   MULTIARCH_INDEX_DIGEST: sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
   # Shared Outbox Event Router field contract (column names match migrations).
   OUTBOX_ROUTER_NOTES: |
@@ -50,7 +50,8 @@ data:
     table.field.event.payload=payload
     table.fields.additional.placement=event_type:header:type
     table.expand.json.payload=true (schema-disabled canonical payload objects)
-    timestamp=occurred_at only when the outbox table has that column (room integration)
+    Kafka record timestamp uses the connector source time. Canonical occurredAt
+    remains inside each JSON payload; Postgres timestamptz is not an INT64 SMT field.
   connector-identity-outbox.json: |
     {
       "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
@@ -109,7 +110,6 @@ data:
       "transforms.outbox.table.field.event.id": "event_id",
       "transforms.outbox.table.field.event.key": "partition_key",
       "transforms.outbox.table.field.event.payload": "payload",
-      "transforms.outbox.table.field.event.timestamp": "occurred_at",
       "transforms.outbox.table.expand.json.payload": "true",
       "transforms.outbox.route.by.field": "topic",
       "transforms.outbox.route.topic.replacement": "${routedByValue}",
@@ -208,7 +208,7 @@ spec:
       containers:
         - name: connect
           # Exact quay ARM64 digest; Never = node must already hold it (node-native loader).
-          image: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+          image: quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
           imagePullPolicy: Never
           ports:
             - containerPort: 8083

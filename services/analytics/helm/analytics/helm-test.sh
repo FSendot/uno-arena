@@ -27,9 +27,9 @@ echo "${kind_out}" | grep -q 'room.gameplay.metrics'
 echo "${kind_out}" | grep -q 'type: ClusterIP'
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
 
-# Projection-rebuilder stays disabled by default; enabled render is least-privilege.
-! echo "${kind_out}" | grep -q 'analytics-projection-rebuilder'
-reb_out="$("${HELM}" template analytics-kind-reb "${CHART}" -f "${CHART}/values.kind.yaml" --set projectionRebuilder.enabled=true)"
+# Kind enables the live-proven rebuilder; default/staging/production remain disabled.
+echo "${kind_out}" | grep -q 'analytics-projection-rebuilder'
+reb_out="${kind_out}"
 echo "${reb_out}" | grep -q 'WORKER_ROLE'
 echo "${reb_out}" | grep -q 'analytics-projection-rebuilder'
 echo "${reb_out}" | grep -q 'ANALYTICS_ROOM_CREDENTIAL'

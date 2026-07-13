@@ -96,7 +96,7 @@ The BFF validates the external session first, then forwards the internal request
 | `GET /internal/v1/rooms/public-list` | Gateway↔Room scoped service credential (`SERVICE_CREDENTIAL` / `ROOM_SERVICE_CREDENTIAL`); bounded public-only keyset page for BFF `GET /v1/rooms`; producer-owned opaque HMAC cursor (`ROOM_PUBLIC_LIST_CURSOR_SECRET`, API-only); default 50 / max 100; one-row lookahead for `nextCursor`. |
 | `POST /internal/v1/rooms/{roomId}/timer-commands` | Room Timer Worker service credential; Room Gameplay rechecks timer keys before applying outcomes. `ExpireUnoWindow` rechecks absolute UTC `expiresAt` plus the opening room sequence; `ForfeitPlayer` rechecks the persisted reconnect deadline keyed by `(roomId, playerId, disconnectVersion)` and does not gain an Uno opening-sequence field. |
 | `POST /internal/v1/rooms/provision` | Tournament Orchestration/provisioning-worker service credential; idempotent by `(tournamentId, roundNumber, slotId)`. |
-| `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` | Spectator projection-rebuilder credential (`ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`); query requires `failedCheckpoint`, `recoveryJobId`, `schemaVersion=1`; returns `SnapshotSanitized`-compatible public state plus authoritative room sequence and `resumeCheckpoint`. Never includes private hands, deck order, player-feed, or Game Integrity data. Implemented; rebuilder Deployment remains disabled pending live recovery tests. |
+| `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot` | Spectator projection-rebuilder credential (`ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL`); query requires `failedCheckpoint`, `recoveryJobId`, `schemaVersion=1`; returns `SnapshotSanitized`-compatible public state plus authoritative room sequence and `resumeCheckpoint`. Never includes private hands, deck order, player-feed, or Game Integrity data. Implemented; live kind worker proof passed and kind-only deployment is enabled. |
 | `POST /internal/v1/rooms/analytics-backfill` | Analytics projection-rebuilder credential (`ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL`); producer-owned HMAC opaque keyset cursor (`ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET`); paired bounded range required; page default 100 / hard max 1000; read-only append-only outbox source; returns canonical AsyncAPI facts for `room.gameplay.metrics` and `room.match.completed` only. |
 
 **Dependencies**
@@ -144,7 +144,7 @@ Game Integrity is internal-only; no client, spectator, or public reporting role 
 | --- | --- |
 | `POST /internal/v1/game-logs/{roomId}/append` | Room Gameplay service credential and expected-revision guard. |
 | `POST /internal/v1/game-logs/{roomId}/deck-operations` | Room Gameplay service credential; confirms draw/order facts before gameplay publication. |
-| `GET /internal/v1/game-logs/{roomId}/replay` | Internal replay/reconciliation service credential or operator/compliance role with audit scope; requires human `X-Audit-Actor` and `X-Audit-Reason` (credential alone is not an actor). Every attempt records a durable decrypt/export audit event. |
+| `GET /internal/v1/game-logs/{roomId}/replay` | Internal replay/reconciliation service credential or operator/compliance role with audit scope; requires human or service `X-Audit-Actor` and an explicit `X-Audit-Reason` (credential alone is not an actor). Room's chart receives the scoped Game Integrity audit credential for its reconciliation path, separate from the normal append credential. Every attempt records a durable decrypt/export audit event. |
 | `GET /internal/v1/audit/exports/{gameId}` | Operator/compliance audit credential plus the same required actor/reason headers; distinguish export from replay in the durable audit record. |
 | `GET /internal/v1/audit/exports/{gameId}` | Compliance/operator role plus internal network access; never exposed to players or spectators. |
 
@@ -176,16 +176,19 @@ Own tournament lifecycle, registration, provisioning, room assignment, round clo
 - Tournament calculates `PlayersAdvanced`; Room Gameplay does not.
 - `PlayersAdvanced.roundNumber` is the achieved advancement depth for its listed players. `TournamentCompleted.finalStandings` is the complete final-room order from first to last, and its first entry is the champion; no redundant `championId` is published.
 - `PlayersAdvanced` carries 1–3 unique player IDs: normally the top three, with fewer allowed only for an authoritative undersized/forfeit outcome.
-- Redis can hold a bracket projection for fast read access (not wired in the local durable slice yet).
+- Redis holds the implemented bracket projection for bounded fast reads.
 - Public bracket reads return compact tournament/round summary metadata plus an opaque-cursor slot page: 100 slots by default and at most 1,000. A response never serializes the complete million-player bracket.
 - Public standings reads return a compact projection (`phase`, `registeredCount`, `currentRound`, ordered `finalStandings` ≤10) without whole-aggregate hydration or registered-player lists.
 - Bracket cursors are live keysets over stable `(roundNumber, slotIndex)` identity. Pages expose projection version/time; slot state may advance between requests without invalidating the cursor.
 - The current bounded Gateway/Tournament standings and bracket proxy does not yet close private-tournament visibility enforcement (architecture still requires participant or operator role for private tournaments); that remains an architecture gap.
 - Durable franz-go consumer for `room.match.completed` is implemented when `KAFKA_BROKERS` is set.
+- Registration closure is Tournament-owned: an explicit close or capacity-triggered auto-close commits the closed state and deterministic round-1 seeding job atomically.
+- Seeding is durable for every round. Seeding finalization schedules bounded provisioning batches; completed non-final rounds atomically schedule the next seeding job; final `CompleteRound` atomically completes the tournament and emits `TournamentCompleted` with ordered final standings.
+- The public BFF command catalog remains closed to `CreateTournament`, `RegisterPlayer`, and `CloseRegistration`. `SeedRound`, `ProvisionRoundMatches`, `CompleteRound`, and `CompleteTournament` are internal policy language and are never client commands.
 
 **Interfaces**
 
-- Synchronous through BFF: tournament creation, registration, compact tournament command envelopes, bracket/standings read APIs.
+- Synchronous through BFF: tournament creation, registration, registration close, bracket/standings read APIs. Seeding, provisioning, round completion, and tournament completion remain internal.
 - Internal synchronous: provisioning workers call Room Gameplay idempotently to create tournament rooms using `(tournamentId, roundNumber, slotId)`.
 - Asynchronous input: `room.match.completed`.
 - Asynchronous output: `tournament.match.assigned`, `tournament.match.result_recorded`, `tournament.players.advanced`, `tournament.round.completed`, `tournament.completed` (AsyncAPI Kafka channels; offline HTTP bridges remain destination-specific transforms).
@@ -227,7 +230,7 @@ Maintain persistent ranking state and rating history.
 **Notes**
 
 - Postgres is authoritative.
-- Redis is a cache for leaderboard reads (not wired in the local durable slice yet).
+- Redis holds the implemented leaderboard projection for bounded reads and rebuild.
 - Public leaderboard reads use opaque cursor pagination with 100 entries by default and a hard maximum of 500. The complete board remains page-queryable; `LeaderboardSnapshotPublished` is a separate bounded top-100 public view.
 - Leaderboard cursors are live keysets over the last `(rating, playerId)` boundary. Pages expose projection version/time and guarantee page-local consistency, not a frozen million-player generation across requests.
 - Score-changing Ranking transactions durably mark their board dirty. A Ranking-owned worker coalesces changes and publishes at most one top-100 snapshot per board every 15 seconds under durable version/checkpoint locking; zero-delta results do not dirty the board.
@@ -280,7 +283,7 @@ Serve privacy-filtered room projections to anonymous observers and read-only con
 - It is rebuilt from committed safe events and sanitized snapshots.
 - It never becomes the source of truth for private gameplay data.
 - Durable Redis projection + Redis-backed spectator SSE are implemented when `REDIS_URL` and scoped credentials are set; capability memory remains behind explicit non-prod `SPECTATOR_CAPABILITY_MODE`. Durable Kafka consumer for `room.spectator-safe.events` is implemented when `KAFKA_BROKERS` is set (HTTP internal ingest remains a test/ops bridge only).
-- Post-retention and quarantine recovery (ADR-0039) is implemented: consume `spectator.projection.rebuild_requested` (`roomId` key; idempotency `(recoveryJobId, roomId, failedCheckpoint)`; DLQ `spectator.projection.rebuild_requested.spectator-view.dlq`), call Room `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot`, CAS/fence Redis generation-swap against live room sequence/generation (atomic idempotency marker + fenced quarantine release in the same Lua transaction), replay bounded held post-gap records (max 1000), and release quarantine only after continuity is proven. `projectionRebuilder.enabled=false` in default/staging/production/`kind` until live recovery tests pass.
+- Post-retention and quarantine recovery (ADR-0039) is implemented: consume `spectator.projection.rebuild_requested` (`roomId` key; idempotency `(recoveryJobId, roomId, failedCheckpoint)`; DLQ `spectator.projection.rebuild_requested.spectator-view.dlq`), call Room `GET /internal/v1/rooms/{roomId}/spectator-recovery-snapshot`, CAS/fence Redis generation-swap against live room sequence/generation (atomic idempotency marker + fenced quarantine release in the same Lua transaction), replay bounded held post-gap records (max 1000), and release quarantine only after continuity is proven. The live kind proof passed; `projectionRebuilder.enabled=true` only in kind and false in default/staging/production.
 - New spectator connections are allowed while the room is `waiting`, `locked`, or `in_progress`, subject to public/private authorization. Admission is denied in `completed`/`cancelled` after `RoomCompleted` or `RoomCancelled`, and existing spectator streams close at that terminal room/match state (not at individual game end in a best-of-three).
 
 **Interfaces**
@@ -324,7 +327,7 @@ Provide non-authoritative analytics, public aggregates, and derived reporting vi
 - This is a narrow bounded context, not a generic reporting bucket.
 - It consumes sanitized/public events, including `room.gameplay.metrics`.
 - Durable multi-topic franz-go ingestion of the nine configured AsyncAPI topics is implemented when `KAFKA_BROKERS` is set.
-- Post-retention and quarantine recovery (ADR-0039) is implemented: consume `analytics.projection.rebuild_requested` (`recoveryJobId` key; idempotency `(recoveryJobId, sourceTopic, pageCursor)`; DLQ `analytics.projection.rebuild_requested.analytics.dlq`), page Room/Tournament/Ranking `POST .../analytics-backfill` APIs (paired range; producer default page 100 / hard max 1000; Analytics worker default page 1000), apply under a durable ClickHouse rebuilding generation/lease (deterministic generation, lease readback, active/building dual-write, server-side clone) so live dual-write joins the fence, and claim continuity only after every requested page/checkpoint is reconciled. ClickHouse remains non-transactional (projection-before-marker check-then-act; same-generation redelivery idempotent via FINAL). `projectionRebuilder.enabled=false` in default/staging/production/`kind` until live recovery tests pass.
+- Post-retention and quarantine recovery (ADR-0039) is implemented: consume `analytics.projection.rebuild_requested` (`recoveryJobId` key; idempotency `(recoveryJobId, sourceTopic, pageCursor)`; DLQ `analytics.projection.rebuild_requested.analytics.dlq`), page Room/Tournament/Ranking `POST .../analytics-backfill` APIs (paired range; producer default page 100 / hard max 1000; Analytics worker default page 1000), apply under a durable ClickHouse rebuilding generation/lease (deterministic generation, lease readback, active/building dual-write, server-side clone) so live dual-write joins the fence, and claim continuity only after every requested page/checkpoint is reconciled. ClickHouse remains non-transactional (projection-before-marker check-then-act; same-generation redelivery idempotent via FINAL). The live kind proof passed; `projectionRebuilder.enabled=true` only in kind and false in default/staging/production.
 - Its outputs are derived and non-authoritative.
 
 **Interfaces**

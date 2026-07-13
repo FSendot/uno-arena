@@ -4,13 +4,12 @@ This runbook covers two local lanes:
 
 1. **Kind foundation (Slice 0)** — disposable datastores + bootstrap Jobs under
    namespace `uno-arena`. Foundation datastores + bootstrap Jobs; service
-   durable adapters (Identity Postgres/OIDC, Room Postgres/timer, GI Kurrent,
-   Analytics ClickHouse HTTP) are separate explicit targets. CDC prerequisites
+   durable adapters for every context are deployed by the complete lane. CDC prerequisites
    (logical WAL, CDC roles/publications, kind-short retention + DLQ topic
    scaffolding) plus Debezium Kafka Connect (four outbox routers) and Debezium
    Server (Room realtime → Redis) manifests are in place; live outbox→topic /
-   outbox→Redis delivery proofs and Analytics/Spectator Kafka consumers remain
-   separate explicit checks (status scripts do not alone claim delivery).
+   outbox→Redis delivery proofs and Analytics/Spectator Kafka consumers have
+   separate explicit live checks (status scripts alone still do not claim delivery).
 2. **Identity staging smoke** — existing GitLab runner + Helm deploy of Identity
    into `staging` (unchanged checkpoint path).
 
@@ -81,7 +80,51 @@ Authority: `docs/architecture/*`, ADR-0027/0028/0030/0031/0035, and
 ```bash
 make kind-render
 make kind-validate
+./infrastructure/kind/scripts/clean-deploy.sh --dry-run
 ```
+
+The dry-run prints the reset/create/build/load/apply/deploy/probe sequence and
+does not contact Docker, a registry, or Kubernetes.
+
+### Complete clean-cluster lane
+
+This is the acceptance lane for the disposable local environment. It is pinned
+to cluster `uno-arena` / context `kind-uno-arena` and refuses to start without
+the literal reset confirmation:
+
+```bash
+./infrastructure/kind/scripts/clean-deploy.sh --confirm-reset uno-arena
+```
+
+It performs, in order:
+
+1. validate offline and preflight all required tools plus Docker ARM64 before deletion;
+2. delete and recreate only kind cluster `uno-arena`;
+3. build/load the bootstrap and all eight `uno-arena/*:local` service images;
+4. fail closed unless the kind node is ARM64, matching the selected digest-pinned
+   KurrentDB 26.0.3 experimental ARM64 image;
+5. stage the exact Debezium Connect and Server ARM64 images inside the node;
+6. apply/wait for datastores, schema/topic bootstrap, Connect, and Server;
+7. deploy Identity, Game Integrity, Ranking, Tournament, Analytics, Spectator,
+   Room, and finally Gateway with their kind Helm overlays; and
+8. run the existing CDC delivery, durable adapter, ephemeral-store integration,
+   Kafka-to-ClickHouse, Redis projection, gateway admission, and AOF probes.
+
+This command is destructive to the disposable cluster and requires networked
+image access. `--skip-probes` may be used for startup diagnosis, but is not a
+successful acceptance run.
+
+Observed acceptance status: the clean ARM64 foundation and all eight services
+have deployed successfully; Connect and Server CDC ran live; the Analytics and
+Spectator end-to-end projection-rebuilder proofs passed. The kind overlays now
+enable those two rebuilders, while default/staging/production overlays do not.
+The Stage B CLI then completed a live casual best-of-three and a live tournament
+end to end, including assignment, Room play, asynchronous result consumption,
+lifecycle advancement, and terminal `TournamentCompleted`.
+
+For local CLI seeding, kind Identity uses an explicitly environment-gated,
+context-owned password test-account stub. This is a disposable exercise seam,
+not the production authentication model: staging and production are OIDC-only.
 
 ### Explicit cluster lifecycle
 
@@ -90,10 +133,12 @@ Create, apply, and reset are **never** implied by validate:
 ```bash
 make kind-create-cluster
 make kind-build-load-bootstrap
+./infrastructure/kind/scripts/build-load-services.sh
 make kind-load-debezium-connect
 make kind-load-debezium-server
 make kind-apply
 make kind-wait
+./infrastructure/kind/scripts/deploy-services.sh
 # ... local experiments ...
 make kind-reset
 ```
@@ -114,10 +159,9 @@ dedicated DDL credentials and Postgres advisory locks (ADR-0027).
 
 ### Out of scope for this slice
 
-- End-to-end live Postgres→Kafka / Postgres→Redis delivery proofs (Connect/Server
-  status checks are not delivery claims); Analytics Kafka ingestion and Spectator
-  Kafka consumers.
-- Istio, PVC/HA/backup.
+- Production mesh policy, PVC/HA/backup, and production capacity planning.
+- A green offline validation is not a live delivery claim; use the complete
+  clean-cluster lane for CDC, Kafka-consumer, and datastore acceptance evidence.
 
 ### Explicit Room / Identity durable adapter targets (after kind-wait)
 

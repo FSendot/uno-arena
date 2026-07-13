@@ -305,6 +305,59 @@ func TestHTTPGameIntegrityAppendCompatibility(t *testing.T) {
 	}
 }
 
+func TestHTTPGameIntegrityReplay_MissingStreamIsEmptyOnlyAtInitialRevision(t *testing.T) {
+	const cred = "audit-cred"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Service-Credential") != cred || r.Header.Get("X-Audit-Actor") == "" || r.Header.Get("X-Audit-Reason") == "" {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid audit credential")
+			return
+		}
+		// Exact Game Integrity replayHandler response for ErrStreamNotFound.
+		writeErr(w, http.StatusNotFound, "invalid_command", "stream not found")
+	}))
+	defer srv.Close()
+
+	gi := app.NewHTTPGameIntegrity(srv.URL, "room-cred", srv.Client())
+	gi.AuditCredential = cred
+	initial, err := gi.Replay(context.Background(), "new-room", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.RoomID != "new-room" || initial.Revision != 0 || len(initial.Entries) != 0 {
+		t.Fatalf("initial missing stream=%+v", initial)
+	}
+	if _, err := gi.Replay(context.Background(), "new-room", 1); err == nil {
+		t.Fatal("missing stream at non-initial revision must remain fail-closed")
+	}
+}
+
+func TestHTTPGameIntegrityReplay_GenericOrMalformed404RemainsFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body any
+	}{
+		{name: "generic not found", body: map[string]string{"code": "not_found", "message": "stream not found"}},
+		{name: "wrong message", body: map[string]string{"code": "invalid_command", "message": "room not found"}},
+		{name: "malformed", body: "not-json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				if s, ok := tc.body.(string); ok {
+					_, _ = w.Write([]byte(s))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(tc.body)
+			}))
+			defer srv.Close()
+			gi := app.NewHTTPGameIntegrity(srv.URL, "cred", srv.Client())
+			if _, err := gi.Replay(context.Background(), "room", 0); err == nil {
+				t.Fatal("untyped 404 must remain fail-closed")
+			}
+		})
+	}
+}
+
 func TestHTTPDealSourceReservationCompatibility(t *testing.T) {
 	const cred = "room-cred"
 	dbl := newGIDouble(cred)

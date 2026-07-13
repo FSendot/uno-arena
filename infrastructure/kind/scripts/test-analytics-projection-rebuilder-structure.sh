@@ -53,8 +53,8 @@ check "${CHART}/templates/projection-rebuilder-deployment.yaml" "RANKING_URL"
 check "${CHART}/values.yaml" "enabled: false"
 check "${CHART}/values.staging.yaml" "enabled: false"
 check "${CHART}/values.production.yaml" "enabled: false"
-if ! grep -A2 '^projectionRebuilder:' "${CHART}/values.kind.yaml" | grep -q 'enabled: false'; then
-  echo "FAIL: values.kind.yaml must keep projectionRebuilder.enabled=false" >&2
+if ! grep -A6 '^projectionRebuilder:' "${CHART}/values.kind.yaml" | grep -q 'enabled: true'; then
+  echo "FAIL: values.kind.yaml must enable projectionRebuilder after live recovery proof" >&2
   fail=1
 fi
 check "${CHART}/values.kind.yaml" "analytics.projection.rebuild_requested"

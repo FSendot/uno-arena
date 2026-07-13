@@ -17,9 +17,9 @@ metadata:
 data:
   # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
   # Multiarch index: sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984
-  SOURCE_IMAGE_REF: quay.io/debezium/server:3.6.0.Final@sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b
+  SOURCE_IMAGE_REF: quay.io/debezium/server:3.6.0.Final@sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08
   IMAGE_VERSION: 3.6.0.Final
-  ARM64_DIGEST: sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b
+  ARM64_DIGEST: sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08
   MULTIARCH_INDEX_DIGEST: sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984
   application.properties: |
     # Quarkus / health
@@ -132,7 +132,7 @@ spec:
       containers:
         - name: debezium-server
           # Exact quay ARM64 digest; Never = node must already hold it (node-native loader).
-          image: quay.io/debezium/server:3.6.0.Final@sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b
+          image: quay.io/debezium/server:3.6.0.Final@sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08
           imagePullPolicy: Never
           ports:
             - containerPort: 8080

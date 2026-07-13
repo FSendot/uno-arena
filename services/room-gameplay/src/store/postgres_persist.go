@@ -195,6 +195,9 @@ func persistSessionTx(ctx context.Context, tx pgx.Tx, sess *domain.Session, req 
 	if err := syncDeadlines(ctx, tx, sess); err != nil {
 		return err
 	}
+	if err := syncNextGameContinuation(ctx, tx, sess, now); err != nil {
+		return err
+	}
 
 	if req.BindPlayerSession && req.PlayerID != "" && req.PlayerSessionID != "" {
 		_, err := tx.Exec(ctx, `
@@ -234,6 +237,37 @@ func persistSessionTx(ctx context.Context, tx pgx.Tx, sess *domain.Session, req 
 		}
 	}
 	return nil
+}
+
+func syncNextGameContinuation(ctx context.Context, tx pgx.Tx, sess *domain.Session, now time.Time) error {
+	room := sess.Room()
+	roomID := string(room.ID())
+	game := sess.Game()
+	awaitingNext := room.GameCompletedInMatch() && !room.Status().IsTerminal() &&
+		sess.Match() != nil && !sess.Match().Completed() && game != nil && game.Completed()
+	if !awaitingNext {
+		_, err := tx.Exec(ctx, `DELETE FROM next_game_continuations WHERE room_id = $1`, roomID)
+		return err
+	}
+
+	completedGameID := string(sess.GameID())
+	commandID := "auto-next-" + roomID + "-after-" + completedGameID
+	nextGameID := "game-next-" + completedGameID
+	_, err := tx.Exec(ctx, `
+		INSERT INTO next_game_continuations (
+			room_id, completed_game_id, command_id, next_game_id, available_at, lease_until, attempts, updated_at
+		) VALUES ($1,$2,$3,$4,$5,NULL,0,$5)
+		ON CONFLICT (room_id) DO UPDATE SET
+			completed_game_id = EXCLUDED.completed_game_id,
+			command_id = EXCLUDED.command_id,
+			next_game_id = EXCLUDED.next_game_id,
+			available_at = EXCLUDED.available_at,
+			lease_until = NULL,
+			attempts = 0,
+			updated_at = EXCLUDED.updated_at
+		WHERE next_game_continuations.completed_game_id IS DISTINCT FROM EXCLUDED.completed_game_id
+	`, roomID, completedGameID, commandID, nextGameID, now.UTC())
+	return err
 }
 
 func syncDeadlines(ctx context.Context, tx pgx.Tx, sess *domain.Session) error {

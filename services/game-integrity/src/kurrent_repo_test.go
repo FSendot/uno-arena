@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -14,6 +15,40 @@ import (
 )
 
 const unitTestMasterKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestCommittedFirstEventMatchesCandidate_ExactLogicalEventOnly(t *testing.T) {
+	base := envelopeMetadataV1{
+		OriginalEventID: "evt-1", OriginalEventType: "CreateRoom", Stream: "gi.room.r1",
+		RoomID: "r1", GameID: "", KurrentRevision: 0, DomainRevision: 1,
+		EventUUID: deterministicEventUUID("gi.room.r1", "evt-1").String(),
+	}
+	plain := []byte(`{"eventId":"evt-1","eventType":"CreateRoom","payload":{"v":1}}`)
+	if !committedFirstEventMatchesCandidate(base, base, plain, bytes.Clone(plain)) {
+		t.Fatal("exact committed event must remain idempotent")
+	}
+
+	mutations := []struct {
+		name string
+		meta envelopeMetadataV1
+		body []byte
+	}{
+		{name: "payload", meta: base, body: []byte(`{"eventId":"evt-1","eventType":"CreateRoom","payload":{"v":2}}`)},
+		{name: "type", meta: func() envelopeMetadataV1 { m := base; m.OriginalEventType = "JoinRoom"; return m }(), body: plain},
+		{name: "room", meta: func() envelopeMetadataV1 { m := base; m.RoomID = "r2"; return m }(), body: plain},
+		{name: "uuid", meta: func() envelopeMetadataV1 {
+			m := base
+			m.EventUUID = deterministicEventUUID(m.Stream, "evt-2").String()
+			return m
+		}(), body: plain},
+	}
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			if committedFirstEventMatchesCandidate(base, tc.meta, plain, tc.body) {
+				t.Fatal("conflicting committed candidate must not compare equal")
+			}
+		})
+	}
+}
 
 func TestDecryptRoomEntry_RejectsSelfConsistentWrongRoomMetadata(t *testing.T) {
 	keys, err := ParseDevKeyring("1:" + unitTestMasterKey)

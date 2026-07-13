@@ -11,7 +11,7 @@ Application polling of transactional outboxes is rejected (ADR-0016). Kafka rete
 ## Decision
 Settle Spectator and Analytics recovery on **Kafka-carried bounded rebuild requests** plus **context-owned internal HTTP snapshot/backfill APIs**. No public BFF route is added.
 
-**Implementation status (decision unchanged):** Room/Tournament/Ranking context-owned analytics-backfill APIs and Room's spectator-recovery-snapshot API are implemented. Spectator projection-rebuilder (Room snapshot fetch + Redis fenced rebuild) and Analytics projection-rebuilder (durable ClickHouse recovery worker + producer backfill clients) are implemented. Both rebuilder Deployments stay `projectionRebuilder.enabled=false` in default, staging, production, and `kind` until real end-to-end worker live tests pass. Offline structure checks exist; live recovery proofs have not run.
+**Implementation status (decision unchanged):** Room/Tournament/Ranking context-owned analytics-backfill APIs and Room's spectator-recovery-snapshot API are implemented. Spectator projection-rebuilder (Room snapshot fetch + Redis fenced rebuild) and Analytics projection-rebuilder (durable ClickHouse recovery worker + producer backfill clients) are implemented. Their full live kind recovery lanes have passed, so `projectionRebuilder.enabled=true` is now limited to each `values.kind.yaml`. Default, staging, and production remain disabled until operators explicitly enable and capacity-plan them for those environments.
 
 ### 1. Transport and ownership
 
@@ -94,7 +94,7 @@ Backfill response body: ordered `records[]` of the same sanitized/public canonic
 - Projection-rebuilder Deployments remain long-running, HTTP-free, and consume only their rebuild-request topics (plus their worker DLQ publish path).
 - They use existing scoped owning-service credentials to call internal snapshot/backfill APIs.
 - Default/staging/production keep `projectionRebuilder.enabled=false`.
-- Local `kind` also keeps them disabled until real end-to-end worker live recovery tests pass (structure/unit/integration coverage alone is not enablement). Kind remains testable with existing context stores and internal HTTP; no cloud object store is introduced.
+- Local `kind` enables both workers because their end-to-end Kafka→HTTP→Redis/ClickHouse recovery lanes passed. Kind remains disposable and introduces no cloud object store.
 - One physical database per bounded context and existing ownership/security/privacy rules are unchanged: Room/Tournament/Ranking each own one Postgres; Analytics owns ClickHouse only; Spectator owns Redis projection only. No shared DB reads and no application outbox polling.
 
 ### 6. Relationship to Kafka retention
@@ -102,7 +102,7 @@ Backfill response body: ordered `records[]` of the same sanitized/public canonic
 Kafka retention classes from ADR-0032 are unchanged. After broker expiry, recovery APIs/backfills are the authoritative post-retention path. Rebuild-request topics themselves stay bounded (business/DLQ classes) and never substitute for Room/Tournament/Ranking durable stores or ClickHouse/Redis rebuild state.
 
 ## Consequences
-- The Spectator/Analytics projection-rebuilder source/admission path is settled in design/contracts and implemented in service code; worker Deployments remain disabled until live recovery proofs.
+- The Spectator/Analytics projection-rebuilder source/admission path is settled in design/contracts and implemented in service code. Live kind recovery proofs authorize kind-only enablement; other overlays remain disabled by default.
 - AsyncAPI carries rebuild-request channels and schemas; architecture documents the internal snapshot/backfill endpoints (not OpenAPI/BFF).
 - Recovery scales by keyed jobs and bounded pages rather than whole-topic dumps or shared DB access.
 - Online rebuild concurrency is fenced in Redis (Spectator CAS + atomic idempotency/quarantine release) and ClickHouse (Analytics deterministic generation/lease readback, active/building dual-write, server-side clone), preventing silent loss or regression under multi-replica workers while acknowledging ClickHouse's non-transactional check-then-act/idempotent same-generation constraint.

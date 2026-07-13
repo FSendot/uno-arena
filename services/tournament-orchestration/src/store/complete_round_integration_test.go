@@ -86,9 +86,13 @@ func completeRoundDifferential(t *testing.T, ts *store.TournamentStore, tid stri
 	if d.Kind == domain.CompleteRoundSuccess {
 		now := time.Now().UTC()
 		for i, f := range d.Outcome.Facts {
+			topic := "tournament.round.completed"
+			if f.Name == domain.FactTournamentCompleted {
+				topic = "tournament.completed"
+			}
 			events = append(events, store.OutboxEvent{
 				EventID: fmt.Sprintf("%s:%s:%d", cmdID, f.Name, i), EventType: string(f.Name),
-				TournamentID: tid, Topic: "tournament.round.completed", PartitionKey: tid, SchemaVersion: 1,
+				TournamentID: tid, Topic: topic, PartitionKey: tid, SchemaVersion: 1,
 				Payload: map[string]any{"schemaVersion": 1, "eventType": string(f.Name)}, CreatedAt: now,
 			})
 		}
@@ -108,6 +112,42 @@ func completeRoundDifferential(t *testing.T, ts *store.TournamentStore, tid stri
 		t.Fatalf("commit: %v", err)
 	}
 	return d
+}
+
+func TestIntegration_CompleteFinalRoundAtomicallyCompletesTournament(t *testing.T) {
+	pool, ts := openStore(t)
+	ctx := context.Background()
+	_, _ = prepareCompleteRoundReady(t, pool, ts, "t-cr-final-auto", 2)
+
+	cmdID := domain.CompleteRoundCommandID("t-cr-final-auto", 1)
+	d := completeRoundDifferential(t, ts, "t-cr-final-auto", 1, cmdID)
+	if d.Kind != domain.CompleteRoundSuccess || !d.IsFinal || d.TournamentCompletion == nil {
+		t.Fatalf("final completion decision=%+v", d)
+	}
+
+	var phase, champion string
+	var completedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT phase, completed_at, COALESCE(rules->>'championId','')
+		FROM tournaments WHERE tournament_id=$1
+	`, "t-cr-final-auto").Scan(&phase, &completedAt, &champion); err != nil {
+		t.Fatal(err)
+	}
+	if phase != string(domain.PhaseCompleted) || completedAt == nil || champion != string(d.TournamentCompletion.ChampionID) {
+		t.Fatalf("tournament completion not atomic: phase=%s completedAt=%v champion=%s decision=%+v",
+			phase, completedAt, champion, d.TournamentCompletion)
+	}
+	var roundEvents, tournamentEvents int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE event_type='TournamentRoundCompleted')::int,
+		       count(*) FILTER (WHERE event_type='TournamentCompleted')::int
+		FROM outbox_events WHERE tournament_id=$1
+	`, "t-cr-final-auto").Scan(&roundEvents, &tournamentEvents); err != nil {
+		t.Fatal(err)
+	}
+	if roundEvents != 1 || tournamentEvents != 1 {
+		t.Fatalf("atomic contracts missing: round=%d tournament=%d", roundEvents, tournamentEvents)
+	}
 }
 
 func TestIntegration_CompleteRound_NotReady(t *testing.T) {

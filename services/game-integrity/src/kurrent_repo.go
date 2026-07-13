@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -35,6 +36,7 @@ const (
 var (
 	errInjectedDeckAppend          = errors.New("injected deck append failure")
 	errInjectedUncertainDeckAppend = errors.New("injected uncertain deck append failure")
+	errCommittedFirstEventConflict = errors.New("committed first event conflicts with candidate")
 )
 
 var eventUUIDNamespace = uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // NameSpaceURL
@@ -250,7 +252,7 @@ func (r *KurrentStreamRepository) withRoomAttempt(ctx context.Context, roomID do
 	entry := state.Log.Entries()[after-1]
 	expected := expectedStreamState(len(events))
 	err = r.appendRoomEntry(ctx, stream, roomID, entry, uint64(after), expected)
-	if err != nil && allowRetry && isRevisionConflict(err) {
+	if err != nil && allowRetry && (isRevisionConflict(err) || errors.Is(err, errCommittedFirstEventConflict)) {
 		return r.withRoomAttempt(ctx, roomID, fn, false)
 	}
 	return err
@@ -365,7 +367,7 @@ func (r *KurrentStreamRepository) withDeckAttempt(ctx context.Context, roomID do
 			}
 			return r.recoverFirstDeckAppendError(ctx, gameID, roomID, ownerToken, errInjectedUncertainDeckAppend)
 		}
-		if err != nil && allowRetry && isRevisionConflict(err) {
+		if err != nil && allowRetry && (isRevisionConflict(err) || errors.Is(err, errCommittedFirstEventConflict)) {
 			return r.withDeckAttempt(ctx, roomID, gameID, create, fn, ownerToken, false)
 		}
 		if err != nil {
@@ -374,7 +376,7 @@ func (r *KurrentStreamRepository) withDeckAttempt(ctx context.Context, roomID do
 		return r.finalizeGameBinding(ctx, gameID, roomID, ownerToken)
 	}
 	err = r.appendEncryptedJSON(ctx, stream, roomID, gameID, eventID, deckSnapshotEventType, after, domainRev, expected)
-	if err != nil && allowRetry && isRevisionConflict(err) {
+	if err != nil && allowRetry && (isRevisionConflict(err) || errors.Is(err, errCommittedFirstEventConflict)) {
 		return r.withDeckAttempt(ctx, roomID, gameID, create, fn, ownerToken, false)
 	}
 	if err != nil {
@@ -905,9 +907,78 @@ func (r *KurrentStreamRepository) appendEncryptedJSON(ctx context.Context, strea
 		return err
 	}
 	if firstWrite {
-		r.commitStreamDEK(stream, keyVersion, dek, wrapped, wrapNonce)
+		// Kurrent may report success for an idempotent same-event-ID append even when
+		// another process won the NoStream race with different encrypted bytes. Anchor
+		// this repository to the key identity that actually reached the stream.
+		anchorCtx, anchorCancel := context.WithTimeout(ctx, kurrentOpTimeout)
+		defer anchorCancel()
+		if err := r.anchorCommittedStreamDEK(anchorCtx, stream, keyVersion, dek, wrapped, wrapNonce, meta, plain); err != nil {
+			return fmt.Errorf("anchor committed stream DEK: %w", err)
+		}
 	}
 	return nil
+}
+
+func (r *KurrentStreamRepository) anchorCommittedStreamDEK(ctx context.Context, stream string, candidateKeyVersion int, candidateDEK, candidateWrapped, candidateWrapNonce []byte, candidateMeta envelopeMetadataV1, candidatePlain []byte) error {
+	first, err := r.readFirstEvent(ctx, stream)
+	if err != nil {
+		return err
+	}
+	if first == nil {
+		return errors.New("first event missing after successful append")
+	}
+	meta, err := parseEnvelopeMetadata(first.Event.UserMetadata)
+	if err != nil {
+		return err
+	}
+	if err := authenticateEnvelopeMetadata(meta, stream, 0, first); err != nil {
+		return err
+	}
+	if meta.KeyVersion == candidateKeyVersion &&
+		meta.WrappedDEK == hexBytes(candidateWrapped) &&
+		meta.WrapNonce == hexBytes(candidateWrapNonce) {
+		r.commitStreamDEK(stream, candidateKeyVersion, candidateDEK, candidateWrapped, candidateWrapNonce)
+	} else {
+		committedWrapped, err := meta.wrappedDEKBytes()
+		if err != nil {
+			return err
+		}
+		committedWrapNonce, err := meta.wrapNonceBytes()
+		if err != nil {
+			return err
+		}
+		committedDEK, err := r.provider.UnwrapDEK(ctx, meta.KeyVersion, committedWrapNonce, committedWrapped)
+		if err != nil {
+			return err
+		}
+		r.commitStreamDEK(stream, meta.KeyVersion, committedDEK, committedWrapped, committedWrapNonce)
+	}
+
+	// Kurrent may acknowledge a same-UUID append as idempotent even when this
+	// candidate's encrypted bytes lost a cross-replica NoStream race. The DEK
+	// wrapper alone proves decryptability, not idempotency: authenticate and
+	// decrypt the event that actually committed, then compare its complete
+	// logical identity and plaintext to the candidate.
+	committedPlain, committedMeta, err := r.decryptEvent(ctx, stream, 0, first)
+	if err != nil {
+		return err
+	}
+	if !committedFirstEventMatchesCandidate(committedMeta, candidateMeta, committedPlain, candidatePlain) {
+		return fmt.Errorf("%w: eventId=%s stream=%s", errCommittedFirstEventConflict, candidateMeta.OriginalEventID, stream)
+	}
+	return nil
+}
+
+func committedFirstEventMatchesCandidate(committed, candidate envelopeMetadataV1, committedPlain, candidatePlain []byte) bool {
+	return committed.OriginalEventID == candidate.OriginalEventID &&
+		committed.OriginalEventType == candidate.OriginalEventType &&
+		committed.Stream == candidate.Stream &&
+		committed.RoomID == candidate.RoomID &&
+		committed.GameID == candidate.GameID &&
+		committed.KurrentRevision == candidate.KurrentRevision &&
+		committed.DomainRevision == candidate.DomainRevision &&
+		committed.EventUUID == candidate.EventUUID &&
+		bytes.Equal(committedPlain, candidatePlain)
 }
 
 func (r *KurrentStreamRepository) decryptEvent(ctx context.Context, stream string, kurrentRev uint64, ev *kurrentdb.ResolvedEvent) ([]byte, envelopeMetadataV1, error) {

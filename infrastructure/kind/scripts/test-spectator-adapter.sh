@@ -21,6 +21,7 @@ assert_kind_context
 
 # shellcheck source=port-forward-spectator-view.sh
 source "${SCRIPT_DIR}/port-forward-spectator-view.sh"
+trap cleanup EXIT
 
 CRED="${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-room-to-spectator}"
 GID="kind-adapter-$(date +%s)"

@@ -138,6 +138,7 @@ chmod +x "$CLI"
 echo "==> syntax check"
 bash -n "$CLI"
 python3 -m py_compile "$FAKE"
+python3 -m py_compile "${ROOT}/lib/game_client.py" "${ROOT}/tests/fake_game_gateway.py"
 echo "ok - bash -n and py_compile"
 PASS=$((PASS + 1))
 
@@ -538,6 +539,8 @@ SEED_OUT="$("$CLI" seed --count 2 --prefix load 2>/tmp/unoarena-test-err.$$)"
 printf '%s\n' "$SEED_OUT" >/tmp/unoarena-seed-out.$$
 SEED_LINES="$(printf '%s\n' "$SEED_OUT" | python3 -c 'import sys; print(sum(1 for line in sys.stdin if line.strip()))')"
 assert_eq "seed emits one JSON object per account" "2" "$SEED_LINES"
+SEED_TOTAL_LINES="$(printf '%s\n' "$SEED_OUT" | python3 -c 'import sys; print(len(sys.stdin.read().splitlines()))')"
+assert_eq "seed JSONL has no blank records" "2" "$SEED_TOTAL_LINES"
 printf '%s\n' "$SEED_OUT" | python3 -c '
 import json, sys
 lines = [json.loads(l) for l in sys.stdin if l.strip()]
@@ -675,6 +678,11 @@ assert_contains "Dockerfile installs python" "python" "$(cat "$DF")"
 assert_contains "Dockerfile uses nonroot USER" "USER " "$(cat "$DF")"
 [ -f "${ROOT}/.dockerignore" ]
 echo "ok - .dockerignore present"
+PASS=$((PASS + 1))
+
+echo "==> Stage B interactive and bot flows"
+bash "${ROOT}/tests/test-stage-b.sh"
+echo "ok - Stage B focused suite"
 PASS=$((PASS + 1))
 
 echo

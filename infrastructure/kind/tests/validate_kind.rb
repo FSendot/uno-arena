@@ -186,10 +186,10 @@ fail_collect(failures, "missing test-redis-aof-structure.sh") unless File.file?(
 puts "ok redis-local-aof"
 
 # --- Debezium Server (Room realtime → Redis); structure only, no delivery claim ---
-DEBEZIUM_SERVER_ARM_DIGEST = "sha256:65ba00e8de90c437fa4a3b34c6904b1f0235702350e1794006f774b7df1b826b"
+DEBEZIUM_SERVER_ARM_DIGEST = "sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08"
 DEBEZIUM_SERVER_SOURCE_IMAGE = "quay.io/debezium/server:3.6.0.Final@#{DEBEZIUM_SERVER_ARM_DIGEST}"
-DEBEZIUM_SERVER_STALE_TAG = "docker.io/uno-arena/debezium-server:3.6.0.Final-65ba00e8de90"
-DEBEZIUM_SERVER_SHORT_STALE = "uno-arena/debezium-server:3.6.0.Final-65ba00e8de90"
+DEBEZIUM_SERVER_STALE_TAG = "docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
+DEBEZIUM_SERVER_SHORT_STALE = "uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 debezium_server_path = File.join(MANIFESTS, "80-debezium-server/debezium-server-room-realtime.yaml")
 fail_collect(failures, "missing Debezium Server manifest") unless File.file?(debezium_server_path)
 ds_text = File.read(debezium_server_path)
@@ -249,11 +249,11 @@ fail_collect(failures, "Debezium Server loader must not encode ctr content / con
 puts "ok debezium-server-room-realtime"
 
 # --- Debezium Kafka Connect (four outbox routers); structure only, no delivery claim ---
-DEBEZIUM_CONNECT_ARM_DIGEST = "sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada"
+DEBEZIUM_CONNECT_ARM_DIGEST = "sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70"
 DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7"
 DEBEZIUM_CONNECT_SOURCE_IMAGE = "quay.io/debezium/connect:3.6.0.Final@#{DEBEZIUM_CONNECT_ARM_DIGEST}"
-DEBEZIUM_CONNECT_STALE_TAG = "docker.io/uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
-DEBEZIUM_CONNECT_SHORT_STALE = "uno-arena/debezium-connect:3.6.0.Final-8b6267563ceb"
+DEBEZIUM_CONNECT_STALE_TAG = "docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
+DEBEZIUM_CONNECT_SHORT_STALE = "uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 debezium_connect_path = File.join(MANIFESTS, "80-debezium/connect.yaml")
 debezium_register_path = File.join(MANIFESTS, "80-debezium/job-register-connectors.yaml")
 fail_collect(failures, "missing Debezium Connect manifest") unless File.file?(debezium_connect_path)
@@ -320,7 +320,7 @@ fail_collect(failures, "outbox must key by partition_key") unless dc_text.includ
 fail_collect(failures, "outbox must id by event_id") unless dc_text.include?('"transforms.outbox.table.field.event.id": "event_id"')
 fail_collect(failures, "outbox must payload by payload") unless dc_text.include?('"transforms.outbox.table.field.event.payload": "payload"')
 fail_collect(failures, "outbox must map event_type") unless dc_text.include?("event_type:header:type")
-fail_collect(failures, "room connector must timestamp by occurred_at") unless dc_text.include?('"transforms.outbox.table.field.event.timestamp": "occurred_at"')
+fail_collect(failures, "outbox must not map Postgres timestamptz occurred_at as an INT64 Kafka record timestamp") if dc_text.include?('"transforms.outbox.table.field.event.timestamp"')
 fail_collect(failures, "schemas must be disabled for JSON values") unless dc_text.include?('"value.converter.schemas.enable": "false"')
 fail_collect(failures, "Connect worker must not set KEY_CONVERTER (connectors own converters)") if dc_text.match?(/^\s+- name: KEY_CONVERTER\s*$/)
 fail_collect(failures, "Kafka Connect must not capture realtime_outbox") if dc_text.include?("realtime_outbox_events")
@@ -649,7 +649,7 @@ fail_collect(failures, "spectator values.kind.yaml must use existingSecret=uno-a
 fail_collect(failures, "spectator values.kind.yaml must set REDIS_URL DB 5") unless spec_kind_vals.match?(%r{REDIS_URL:.*6379/5})
 fail_collect(failures, "spectator values.kind.yaml must set DEPLOYMENT_ENV=local") unless spec_kind_vals.match?(/DEPLOYMENT_ENV:\s*local/)
 fail_collect(failures, "spectator values.kind.yaml must set kind: true") unless spec_kind_vals.match?(/^kind:\s*true\b/)
-fail_collect(failures, "spectator values.kind.yaml must keep projectionRebuilder.enabled=false until live recovery proof") unless spec_kind_vals.match?(/projectionRebuilder:\s*\n\s*enabled:\s*false/)
+fail_collect(failures, "spectator values.kind.yaml must enable projectionRebuilder after live recovery proof") unless spec_kind_vals.match?(/projectionRebuilder:\s*\n\s*enabled:\s*true/)
 fail_collect(failures, "spectator values.kind.yaml must set ROOM_GAMEPLAY_URL for rebuilder") unless spec_kind_vals.include?("ROOM_GAMEPLAY_URL")
 fail_collect(failures, "spectator values.kind.yaml must map ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL") unless spec_kind_vals.include?("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL")
 fail_collect(failures, "spectator values.kind.yaml must set KAFKA_PROJECTION_REBUILD_TOPIC") unless spec_kind_vals.include?("KAFKA_PROJECTION_REBUILD_TOPIC")
@@ -666,7 +666,7 @@ if helm_ok
   fail_collect(failures, "spectator kind render must use local tag image") unless spec_rendered.include?("uno-arena/spectator-view:local")
   fail_collect(failures, "spectator kind render must be ClusterIP") unless spec_rendered.match?(/type:\s*ClusterIP/)
   fail_collect(failures, "spectator kind render must include REDIS_URL") unless spec_rendered.include?("REDIS_URL")
-  fail_collect(failures, "spectator kind render must omit projection-rebuilder while disabled") if spec_rendered.include?("spectator-projection-rebuilder")
+  fail_collect(failures, "spectator kind render must include projection-rebuilder after live recovery proof") unless spec_rendered.include?("spectator-projection-rebuilder")
   # Template privilege checks use an explicit enable flip — not a live recovery claim.
   spec_rebuilder = `#{helm_bin} template spectator-kind-rebuilder #{spectator_chart} -f #{spectator_kind_values} --set projectionRebuilder.enabled=true 2>&1`
   unless $?.success?
@@ -1026,6 +1026,10 @@ if File.file?(plan_path)
   async = YAML.load_file(ASYNCAPI)
   channels = async.fetch("channels").keys.sort
   high = async.fetch("x-partitionPlanning").fetch("highVolumeTopics").sort
+  rebuild_requests = %w[
+    analytics.projection.rebuild_requested
+    spectator.projection.rebuild_requested
+  ].freeze
   domain = spec.fetch("domainTopics")
   domain_names = domain.map { |t| t["name"] }.sort
   fail_collect(failures, "domain topic set != AsyncAPI channels") unless domain_names == channels
@@ -1035,7 +1039,13 @@ if File.file?(plan_path)
   end
   domain.each do |t|
     fail_collect(failures, "topic #{t['name']} RF != 1") unless t["replicationFactor"] == 1
-    expected = t["class"] == "high" ? 8 : 2
+    expected = if rebuild_requests.include?(t["name"])
+                 32
+               elsif t["class"] == "high"
+                 8
+               else
+                 2
+               end
     fail_collect(failures, "topic #{t['name']} partitions=#{t['partitions']} expected=#{expected}") unless t["partitions"] == expected
     fail_collect(failures, "topic #{t['name']} missing retentionMs") if t["retentionMs"].nil? || t["retentionMs"].to_i <= 0
   end

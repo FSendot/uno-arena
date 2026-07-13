@@ -86,6 +86,13 @@ func (h *HTTPGameIntegrity) Replay(ctx context.Context, roomID string, fromOffse
 		return ReplayResult{}, err
 	}
 	if res.StatusCode >= 400 {
+		// Game Integrity's typed missing-stream response is authoritative proof
+		// of an empty stream only at its initial revision. This enables safe
+		// deterministic reconciliation after an uncertain first append without
+		// weakening any other 404/replay failure into success.
+		if isInitialGIStreamNotFound(res.StatusCode, fromOffset, raw) {
+			return ReplayResult{RoomID: roomID, Revision: 0, Entries: []ReplayEntry{}}, nil
+		}
 		return ReplayResult{}, fmt.Errorf("game integrity replay %d: %s", res.StatusCode, string(raw))
 	}
 	var out struct {
@@ -109,6 +116,20 @@ func (h *HTTPGameIntegrity) Replay(ctx context.Context, roomID string, fromOffse
 		})
 	}
 	return result, nil
+}
+
+func isInitialGIStreamNotFound(status int, fromOffset int64, raw []byte) bool {
+	if status != http.StatusNotFound || fromOffset != 0 {
+		return false
+	}
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return false
+	}
+	return body.Code == "invalid_command" && body.Message == "stream not found"
 }
 
 // HTTPGameIntegrity is a stdlib HTTP adapter for the GameIntegrity port.

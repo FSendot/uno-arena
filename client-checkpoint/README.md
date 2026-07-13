@@ -13,7 +13,7 @@ Gateway / BFF and must not introduce direct microservice access.
 | Stage | Scope | Status |
 | --- | --- | --- |
 | **A** | Auth/session/seed, room utilities, tournament utilities, spectate alias, packaging, offline tests | **Implemented** |
-| **B** | Interactive `play` (live feed + turn board) and headless `bot` (JSONL load) | **Pending** — not implemented yet |
+| **B** | Interactive `play` (live feed + turn board) and headless `bot` (JSONL load) | **Implemented** |
 
 ## Requirements
 
@@ -51,8 +51,9 @@ docker run --rm -e UNOARENA_API_URL=… -e UNOARENA_TOKEN=… uno-arena/client:l
 
 ## Canonical commands
 
-All HTTP commands use OpenAPI BFF paths on `UNOARENA_API_URL`. HTTP responses are
-always JSON; `--json` is only meaningful for `countdown` (structured JSON vs text).
+All HTTP commands use OpenAPI BFF paths on `UNOARENA_API_URL`. Utility HTTP
+responses are JSON. Interactive `play --json` and every `bot` run emit the
+machine-readable JSON Lines contract.
 
 ```bash
 # Health / public reads
@@ -95,9 +96,13 @@ unoarena stream control --token … [--last-event-id <id>]
 # Advisory Uno countdown (local only; no HTTP). --json emits structured JSON.
 unoarena countdown --expires-at <RFC3339> --opening-sequence <n> [--now <RFC3339>] [--json]
 
-# Stage B (pending — not implemented)
-# unoarena play --casual …
-# unoarena bot [--casual | --room <id> | --tournament <id>] …
+# Interactive casual play (line-oriented feed and numbered turn board)
+unoarena play --casual [--user <u> --pass <p> | --token <token>] [--json]
+
+# Headless random-valid-move load client (JSONL plus final summary)
+unoarena bot --casual (--user <u> --pass <p> | --token <token>) [--seed <rng>]
+unoarena bot --room <roomId> (--user <u> --pass <p> | --token <token>) [--seed <rng>]
+unoarena bot --tournament <tournamentId> (--user <u> --pass <p> | --token <token>) [--seed <rng>]
 ```
 
 ### Gateway paths used
@@ -124,7 +129,9 @@ unoarena countdown --expires-at <RFC3339> --opening-sequence <n> [--now <RFC3339
 | `leaderboard` | `GET /v1/rankings/leaderboards` |
 | `analytics` | `GET /v1/analytics/public` |
 | `countdown` | none (local advisory display) |
-| `play` / `bot` | **stage B pending** |
+| `play --casual` | `GET /v1/rooms`, optional `CreateRoom`/`JoinRoom`, player snapshot + SSE, room-scoped gameplay commands |
+| `bot --casual` / `--room` | Same room/snapshot/command paths as interactive play; autonomous random valid moves |
+| `bot --tournament` | `RegisterPlayer`, player assignment read, then the assigned room snapshot/command loop for each round |
 
 BFF snapshot routes (OpenAPI; used after SSE `409 snapshot_required` or reconnect) are part of the settled client contract even when invoked via `curl` rather than a dedicated CLI subcommand:
 
@@ -134,6 +141,63 @@ BFF snapshot routes (OpenAPI; used after SSE `409 snapshot_required` or reconnec
 | Spectator projection snapshot | `GET /v1/spectator/rooms/{roomId}/snapshot` (anonymous-tolerant for public non-terminal rooms; private rooms need session/invite/operator; invalid bearer → `401`) |
 
 Player and spectator snapshots include authoritative `drawPileSize` (count only) for the interactive turn board (§5.C). Deck order, seed, and undrawn card identities are never exposed.
+
+### Interactive play
+
+`play --casual` joins an available public waiting room or creates one. It opens
+the authenticated player SSE stream and renders a line-oriented board from the
+authoritative private snapshot. The board includes canonical card notation,
+active color, direction, draw-pile size, opponent counts/UNO flag, and a numbered
+private hand where `*` marks locally playable cards.
+If the casual client is the host, the same bounded policy used by the bot locks
+and starts the room once at least two players are present. Turn-changing feed
+events trigger an authoritative snapshot refresh and board re-render; feed and
+input state are synchronized so commands never use a partially refreshed view.
+
+At the `uno>` prompt use `play <n>`, `play <n> <R|G|B|Y>` for wilds, `draw`,
+`uno`, `challenge`, `pass`, `state`, or `quit`. This backend advances the turn
+automatically after drawing, so `pass` is an explicit informational no-op.
+Every mutation uses the latest snapshot sequence. A rejected stale command is
+printed as a conflict and immediately reconciled from the authoritative player
+snapshot. SSE resumes with `Last-Event-ID`; a `409 snapshot_required` also
+reloads the snapshot and reconnects without a resume marker—the opaque SSE id
+is never replaced by the room sequence number. When that snapshot carries a
+`disconnectVersion`, the client first submits `ReconnectToRoom` with that exact
+version, preserving the server-owned 60-second reconnection rule. `--json` changes state, feed, and
+action output to the §6 JSON Lines shape; interactive prompts are written to
+stderr so stdout remains JSON-only.
+
+### Headless bots and load
+
+`bot` authenticates inside its process, enters the selected room source, polls
+the authoritative private snapshot, and randomly selects among valid cards
+(or draws). `--seed` makes that choice reproducible. A wild is followed by a
+random color choice and a one-card hand triggers `CallUno`. Each attempted
+action emits one JSON object with `ts`, `action`, `room`, `player`,
+`latency_ms`, `result`, `error_code`, `seq`, and `correlationId`; termination
+adds a summary containing totals, errors, average latency, and p95 latency.
+The exit status is zero for a completed/bounded successful run. Recoverable
+rejections remain visible in action records and metrics but do not fail a run
+that reconciles and reaches its terminal success condition; authentication,
+assignment, timeout, or unrecovered gameplay failures remain non-zero.
+
+Tournament bots register themselves, poll the authenticated per-player
+assignment resource, join each newly assigned room, and run the same gameplay
+loop. They continue discovering later-round assignments until the tournament
+finishes or the run timeout is reached; faculty do not need to orchestrate
+individual rooms. For local exercise create tournaments with a low capacity
+(for example `2`) before closing registration.
+
+Live kind acceptance has exercised both autonomous paths end to end: two bots
+completed a casual best-of-three, and two tournament bots completed the
+registration, assignment, room play, result-consumption, and terminal
+`TournamentCompleted` flow. Tournament lifecycle policy remains server-owned;
+the client never submits internal `SeedRound`, `ProvisionRoundMatches`,
+`CompleteRound`, or `CompleteTournament` commands.
+
+For bounded smoke runs, the implementation also accepts hidden harness flags
+`--max-actions`, `--max-wait`, and `--poll-interval`. Normal faculty invocation
+does not need them.
 
 ### Seed convention
 
@@ -156,7 +220,7 @@ accepted `room leave` clears it. `logout` deletes only that file.
 - Request bodies are built with strict JSON encoding (`python3` stdlib).
 - `schemaVersion` must equal `1` (digits only). `expectedSequenceNumber` must be a non-negative integer (digits only).
 - `--payload` must be a JSON **object** (not an array/string); invalid JSON is rejected before send.
-- The public command catalog is closed (15 OpenAPI variants). Unknown `--type` values are rejected locally before send.
+- The public command catalog is closed (15 OpenAPI variants). Unknown `--type` values are rejected locally before send. Tournament clients receive only `CreateTournament`, `RegisterPlayer`, and `CloseRegistration`; seeding, provisioning, round completion, and tournament completion are internal Tournament-owned policy operations.
 - `expectedSequenceNumber` (`--expected-sequence`) is **required** for mutations of an existing room aggregate (`JoinRoom`, `PlayCard`, …). It must be **absent** for `CreateRoom` and the three tournament types; passing `--expected-sequence` for those is rejected locally.
 - Room IDs in paths and stream query params are URL-encoded.
 - Requests send `X-Correlation-Id` (auto-generated or `--correlation-id`) and command submissions also send `X-Command-Id`.
@@ -196,6 +260,10 @@ make test-client-checkpoint
 # or:
 ./client-checkpoint/tests/run-tests.sh
 ```
+
+The suite includes focused Stage B coverage for canonical board rendering,
+interactive JSONL, stale-command reconciliation, reproducible bot actions,
+final summaries, and versioned room command envelopes.
 
 Dockerfile packaging structure (no build/pull):
 

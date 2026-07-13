@@ -57,9 +57,9 @@ check "${CHART}/values.kind.yaml" "KAFKA_CONSUMER_GROUP"
 check "${CHART}/values.kind.yaml" "KAFKA_SPECTATOR_SAFE_TOPIC"
 check "${CHART}/values.kind.yaml" "KAFKA_SPECTATOR_SAFE_DLQ_TOPIC"
 check "${CHART}/values.kind.yaml" "projectionRebuilder"
-# Kind keeps rebuilder disabled: structure-only lane, no live recovery proof.
-if ! grep -A2 '^projectionRebuilder:' "${CHART}/values.kind.yaml" | grep -q 'enabled: false'; then
-  echo "FAIL: values.kind.yaml must keep projectionRebuilder.enabled=false" >&2
+# Kind enables the rebuilder after its live recovery proof.
+if ! grep -A2 '^projectionRebuilder:' "${CHART}/values.kind.yaml" | grep -q 'enabled: true'; then
+  echo "FAIL: values.kind.yaml must enable projectionRebuilder after live recovery proof" >&2
   fail=1
 fi
 check "${CHART}/values.kind.yaml" "ROOM_GAMEPLAY_URL"
@@ -71,11 +71,11 @@ SECRETS="${MANIFESTS_DIR}/01-local-secrets.yaml"
 check "${SECRETS}" "spectator-view-internal-credential"
 check "${SECRETS}" "room-spectator-recovery-service-credential"
 
-# Kind render omits rebuilder; privilege checks use an explicit enable flip only.
+# Kind render includes the proven rebuilder; privilege checks remain least-privilege.
 if command -v helm >/dev/null 2>&1; then
   kind_out="$(helm template spectator-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
-  ! echo "${kind_out}" | grep -q 'spectator-projection-rebuilder' \
-    || { echo "FAIL: kind render must omit projection-rebuilder while disabled" >&2; fail=1; }
+  echo "${kind_out}" | grep -q 'spectator-projection-rebuilder' \
+    || { echo "FAIL: kind render must include projection-rebuilder after live recovery proof" >&2; fail=1; }
   reb_out="$(helm template spectator-kind-rebuilder "${CHART}" -f "${CHART}/values.kind.yaml" --set projectionRebuilder.enabled=true)"
   echo "${reb_out}" | grep -q 'WORKER_ROLE'
   echo "${reb_out}" | grep -q 'spectator-projection-rebuilder'

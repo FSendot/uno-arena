@@ -25,6 +25,9 @@ type CompleteRoundContext struct {
 	// NormalizedAdvancingPlayers is COUNT(*) from round_advancing_players for the round.
 	// T4 exact source parity with AdvancingCount (and optionally array cardinality).
 	NormalizedAdvancingPlayers int
+	// FinalStandings is the authoritative ordered advancement for the single
+	// final slot. It is populated only for final rounds from the recorded result.
+	FinalStandings []PlayerID
 }
 
 // CompleteRoundKind classifies durable CompleteRound apply.
@@ -57,6 +60,15 @@ type CompleteRoundDecision struct {
 	IsFinal          bool
 	// NextRound is set on non-final success; nil for final rounds / reject / already-done.
 	NextRound *NextRoundSeedingPlan
+	// TournamentCompletion is set on final-round success so the same durable
+	// transaction can execute the Tournament-owned CompleteTournament policy.
+	TournamentCompletion *TournamentCompletionPlan
+}
+
+// TournamentCompletionPlan is the atomic final-round → tournament completion handoff.
+type TournamentCompletionPlan struct {
+	ChampionID     PlayerID
+	FinalStandings []PlayerID
 }
 
 // DecideCompleteRound evaluates CompleteRound against a bounded context.
@@ -160,20 +172,38 @@ func DecideCompleteRound(ctx CompleteRoundContext, cmd CompleteRoundCommand) Com
 	}
 
 	remaining := ctx.AdvancingCount
+	facts := []Fact{
+		newFact(FactTournamentRoundCompleted, map[string]string{
+			"tournamentId":     string(ctx.TournamentID),
+			"roundNumber":      strconv.Itoa(cmd.RoundNumber),
+			"remainingPlayers": strconv.Itoa(remaining),
+			"isFinal":          strconv.FormatBool(ctx.IsFinal),
+		}),
+	}
 	d := CompleteRoundDecision{
 		Kind:             CompleteRoundSuccess,
 		RemainingPlayers: remaining,
 		IsFinal:          ctx.IsFinal,
-		Outcome: acceptedOutcome(cmd.CommandID, []Fact{
-			newFact(FactTournamentRoundCompleted, map[string]string{
-				"tournamentId":     string(ctx.TournamentID),
-				"roundNumber":      strconv.Itoa(cmd.RoundNumber),
-				"remainingPlayers": strconv.Itoa(remaining),
-				"isFinal":          strconv.FormatBool(ctx.IsFinal),
-			}),
-		}),
 	}
-	if !ctx.IsFinal {
+	if ctx.IsFinal {
+		standings := append([]PlayerID(nil), ctx.FinalStandings...)
+		if err := ValidateFinalStandings(standings); err != nil {
+			return CompleteRoundDecision{
+				Kind: CompleteRoundReject,
+				Outcome: rejectedOutcome(cmd.CommandID, Rejection{
+					Code: RejectRoundIncomplete, Message: "final standings not determined",
+				}),
+			}
+		}
+		d.TournamentCompletion = &TournamentCompletionPlan{
+			ChampionID: standings[0], FinalStandings: standings,
+		}
+		facts = append(facts, newFact(FactTournamentCompleted, map[string]string{
+			"tournamentId":   string(ctx.TournamentID),
+			"finalStandings": joinPlayerIDs(standings),
+			"phase":          string(PhaseCompleted),
+		}))
+	} else {
 		plan, err := ComputeRoundSlotPlan(remaining)
 		if err != nil {
 			return CompleteRoundDecision{
@@ -197,6 +227,7 @@ func DecideCompleteRound(ctx CompleteRoundContext, cmd CompleteRoundCommand) Com
 			JobCommandID:      SeedRoundCommandID(ctx.TournamentID, nextRN),
 		}
 	}
+	d.Outcome = acceptedOutcome(cmd.CommandID, facts)
 	return d
 }
 
