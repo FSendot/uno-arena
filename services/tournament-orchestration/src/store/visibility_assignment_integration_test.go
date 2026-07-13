@@ -171,6 +171,69 @@ func TestIntegration_PlayerAssignmentIndexRoundProgressionAndAuth(t *testing.T) 
 		t.Fatalf("latest mapping want round2, got %+v", view.Assignment)
 	}
 
+	const roomID = "room-asg-r2-0"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO assigned_matches (tournament_id, round_number, slot_id, room_id)
+		VALUES ($1, 2, 'slot-r2-0', $2)
+	`, tid, roomID); err != nil {
+		t.Fatal(err)
+	}
+	view, err = ts.LoadPlayerAssignment(ctx, tid, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Assignment.RoomID != "" || view.Assignment.SlotStatus != "provisioning" {
+		t.Fatalf("pre-ready assignment leaked room: %+v", view.Assignment)
+	}
+	roundTwo := 2
+	page, err := ts.LoadBracketPage(ctx, store.BracketPageQuery{TournamentID: tid, RoundNumber: &roundTwo, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Slots) != 1 || page.Slots[0].RoomID != "" || page.Slots[0].Status != "provisioning" {
+		t.Fatalf("pre-ready bracket leaked room: %+v", page.Slots)
+	}
+	projectionBefore, _, err := ts.LoadProjectionCheckpoint(ctx, tid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyAt := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	applied, err := ts.ApplyRoomRuntimeReady(ctx, store.RoomRuntimeReady{
+		EventID: "room-runtime-ready:" + roomID, RoomID: roomID, TournamentID: tid,
+		RoundNumber: 2, SlotID: "slot-r2-0", Generation: 1, OccurredAt: readyAt,
+	})
+	if err != nil || !applied {
+		t.Fatalf("apply readiness applied=%v err=%v", applied, err)
+	}
+	view, err = ts.LoadPlayerAssignment(ctx, tid, "p1")
+	if err != nil || view.Assignment.RoomID != roomID {
+		t.Fatalf("ready assignment=%+v err=%v", view.Assignment, err)
+	}
+	page, err = ts.LoadBracketPage(ctx, store.BracketPageQuery{TournamentID: tid, RoundNumber: &roundTwo, Limit: 10})
+	if err != nil || len(page.Slots) != 1 || page.Slots[0].RoomID != roomID {
+		t.Fatalf("ready bracket=%+v err=%v", page.Slots, err)
+	}
+	projectionReady, _, err := ts.LoadProjectionCheckpoint(ctx, tid)
+	if err != nil || projectionReady != projectionBefore+1 {
+		t.Fatalf("readiness projection before=%d after=%d err=%v", projectionBefore, projectionReady, err)
+	}
+	// A replacement generation is not a new visibility transition and cannot hide the room.
+	applied, err = ts.ApplyRoomRuntimeReady(ctx, store.RoomRuntimeReady{
+		EventID: "replacement-should-not-publish", RoomID: roomID, TournamentID: tid,
+		RoundNumber: 2, SlotID: "slot-r2-0", Generation: 2, OccurredAt: readyAt.Add(time.Minute),
+	})
+	if err != nil || applied {
+		t.Fatalf("replacement applied=%v err=%v", applied, err)
+	}
+	view, err = ts.LoadPlayerAssignment(ctx, tid, "p1")
+	if err != nil || view.Assignment.RoomID != roomID {
+		t.Fatalf("replacement hid room: %+v err=%v", view.Assignment, err)
+	}
+	projectionReplacement, _, err := ts.LoadProjectionCheckpoint(ctx, tid)
+	if err != nil || projectionReplacement != projectionReady {
+		t.Fatalf("replacement projection ready=%d after=%d err=%v", projectionReady, projectionReplacement, err)
+	}
+
 	var conflict int
 	err = pool.QueryRow(ctx, `
 		WITH incoming_players AS (

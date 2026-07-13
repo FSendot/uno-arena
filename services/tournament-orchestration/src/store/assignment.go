@@ -156,11 +156,21 @@ func loadPlayerAssignmentQ(ctx context.Context, q dbQuerier, tournamentID, playe
 			(SELECT generated_at FROM proj),
 			(SELECT round_number FROM latest_map),
 			(SELECT slot_id FROM latest_map),
-			(SELECT s.status FROM bracket_slots s, latest_map lm
+			(SELECT CASE
+				WHEN am.room_id IS NOT NULL AND am.runtime_ready_at IS NULL THEN 'provisioning'
+				ELSE s.status
+			 END
+			 FROM bracket_slots s
+			 JOIN latest_map lm ON true
+			 LEFT JOIN assigned_matches am
+			   ON am.tournament_id = $1
+			  AND am.round_number = lm.round_number
+			  AND am.slot_id = lm.slot_id
 				WHERE s.tournament_id = $1
 				  AND s.round_number = lm.round_number
 				  AND s.slot_id = lm.slot_id),
-			(SELECT am.room_id FROM assigned_matches am, latest_map lm
+			(SELECT CASE WHEN am.runtime_ready_at IS NOT NULL THEN am.room_id END
+			 FROM assigned_matches am, latest_map lm
 				WHERE am.tournament_id = $1
 				  AND am.round_number = lm.round_number
 				  AND am.slot_id = lm.slot_id)

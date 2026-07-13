@@ -2,6 +2,14 @@
 
 This changelog records design-package updates made while shaping the architecture checkpoint. It is limited to changes that affect traceability between the original design deliverables and the architecture.
 
+## Runtime Routing and Client Parity Contract (2026-07-13)
+
+- Stale room-sequence command outcomes use HTTP `409 Conflict` while preserving the structured rejected command result. Accepted commands and non-stale domain rejections remain HTTP `200`.
+- ADR-0042 defines event-driven tournament assignment readiness: Room atomically emits `RoomRuntimeReady` on first runtime readiness, Tournament withholds `roomId` until consuming it, and later runtime replacement uses bounded client `room_starting` retry without revoking the assignment.
+- ADR-0043 defines authorization-first Room routing: the stable boundary validates the original route-specific caller and BFF-derived player principal before pod lookup, then upgrades only authorized traffic to the scoped router credential and pinned generation.
+- The CLI uses a configurable 60-second default budget for safe `room_starting` reads, honoring `Retry-After` with jitter and a five-second interval cap while never retrying mutations after unknown outcomes.
+- ADR-0044 separates Room maintenance roles: dedicated runtimes and routers perform no global scans; the timer worker rebuilds under one context lease, and bounded integrity-reconciler replicas claim repair work with `FOR UPDATE SKIP LOCKED`.
+
 ## Client Parity and Dedicated Room Runtime Topology (2026-07-13)
 
 - Client playability and bot selection now apply the Room contract during a pending penalty: only an ordinarily legal `Draw Two`, or a `Wild Draw Four` when the hand contains no non-wild active-color card, is selectable. The server remains authoritative.

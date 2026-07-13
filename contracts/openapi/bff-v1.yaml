@@ -196,7 +196,8 @@ paths:
       description: |
         Compact command entrypoint. `commandId` is the idempotency key.
         `expectedSequenceNumber` is required for mutations of an existing room aggregate.
-        Domain rejection is HTTP 200 with `status=rejected` (not HTTP 409).
+        A `stale_sequence` rejection is HTTP 409 with the structured rejected
+        `CommandResult`; accepted commands and other domain rejections are HTTP 200.
       operationId: submitCommand
       security:
         - SessionBearer: []
@@ -212,7 +213,7 @@ paths:
               $ref: "#/components/schemas/CommandEnvelope"
       responses:
         "200":
-          description: Command accepted or rejected (rejection is not a domain event)
+          description: Command accepted or rejected for a non-stale domain reason
           content:
             application/json:
               schema:
@@ -225,6 +226,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "409":
+          description: Stale room sequence; body preserves the structured rejected command result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResult"
         "429":
           $ref: "#/components/responses/Error"
         "502":
@@ -305,7 +312,8 @@ paths:
       tags: [commands]
       summary: Submit a room-scoped command envelope
       description: |
-        Domain rejection is HTTP 200 with `status=rejected` (not HTTP 409).
+        A `stale_sequence` rejection is HTTP 409 with the structured rejected
+        `CommandResult`; accepted commands and other domain rejections are HTTP 200.
       operationId: submitRoomCommand
       security:
         - SessionBearer: []
@@ -326,7 +334,7 @@ paths:
               $ref: "#/components/schemas/CommandEnvelope"
       responses:
         "200":
-          description: Command outcome
+          description: Accepted command or non-stale rejected command outcome
           content:
             application/json:
               schema:
@@ -339,6 +347,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "409":
+          description: Stale room sequence; body preserves the structured rejected command result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResult"
         "429":
           $ref: "#/components/responses/Error"
         "502":
@@ -357,7 +371,9 @@ paths:
         reconnect. Includes that player's private hand as runtime `Card` objects
         (`id`/`color`/`face`) when a game is active, public room/game facts, and open
         Uno window fields (`expiresAt`, `openingSequence`) when applicable. Requires an
-        authenticated room member (or reconnect-eligible disconnected member).
+        authenticated room member (or reconnect-eligible disconnected member). While
+        the assigned runtime is starting or being replaced, returns a structured
+        `503 room_starting` with `Retry-After` for bounded safe-read retry.
       operationId: getPlayerRoomSnapshot
       security:
         - SessionBearer: []
@@ -390,6 +406,18 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+        "503":
+          description: Assigned room runtime is not ready; safe reads may retry after the advertised delay
+          headers:
+            Retry-After:
+              description: Delay before the next safe snapshot read, in seconds
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
 
   /v1/spectator/rooms/{roomId}/snapshot:
     get:

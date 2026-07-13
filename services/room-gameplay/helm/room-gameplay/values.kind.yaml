@@ -1,5 +1,6 @@
 # Local kind overlay for Room Gameplay durable Postgres + Redis timer index.
-# Debezium Kafka + Redis sink delivery remain PENDING (shared CDC infra).
+# Shared kind manifests configure Kafka Connect for the integration outbox and
+# Debezium Server for the realtime Redis outbox; this chart deploys neither.
 kind: true
 
 replicaCount: 1
@@ -22,10 +23,14 @@ env:
   GAME_INTEGRITY_URL: http://game-integrity.uno-arena.svc.cluster.local:8080
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
   # Durable mode: no ROOM_CAPABILITY_MODE; DATABASE_URL from secret.
-  # KAFKA_BROKERS intentionally unused until Debezium CDC delivery lands.
+  # KAFKA_BROKERS is not consumed by Room; outbox delivery is external CDC.
 
 timerWorker:
   enabled: true
+
+integrityReconciler:
+  enabled: true
+  replicaCount: 2
 
 topology:
   controller:
@@ -70,7 +75,6 @@ secretEnv:
 controllerSecretEnv:
   DATABASE_URL: room-database-url
 runtimeSecretEnv:
-  SERVICE_CREDENTIAL: room-service-credential
   ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
   IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential

@@ -204,8 +204,8 @@ func (c *HTTPRoomClient) PlayerSnapshot(ctx context.Context, roomID, playerID st
 	if roomID == "" || playerID == "" {
 		return nil, fmt.Errorf("roomId and playerId required")
 	}
-	url := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/rooms/" + roomID + "/snapshot?playerId=" + urlQueryEscape(playerID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/rooms/" + url.PathEscape(roomID) + "/snapshot"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,11 @@ func (c *HTTPRoomClient) PlayerSnapshot(ctx context.Context, roomID, playerID st
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, MaxRequestBodyBytes))
 	if resp.StatusCode >= 400 {
-		return nil, &httpStatusError{status: resp.StatusCode, body: string(raw)}
+		return nil, &httpStatusError{
+			status:     resp.StatusCode,
+			body:       string(raw),
+			retryAfter: resp.Header.Get("Retry-After"),
+		}
 	}
 	return json.RawMessage(raw), nil
 }
@@ -255,10 +259,6 @@ func (c *HTTPRoomClient) PublicList(ctx context.Context, rawQuery string, corr c
 		return nil, fmt.Errorf("decode upstream public list: invalid JSON body")
 	}
 	return json.RawMessage(raw), nil
-}
-
-func urlQueryEscape(s string) string {
-	return url.QueryEscape(s)
 }
 
 // HTTPTournamentClient dispatches tournament commands over HTTP.

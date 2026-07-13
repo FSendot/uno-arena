@@ -2,33 +2,69 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"unoarena/services/room-gameplay/app"
-	"unoarena/services/room-gameplay/store"
 )
 
+var errReconciliationLeaseLost = errors.New("reconciliation claim lost")
+
 // ReconciliationWorker drains pending GI-success/DB-commit-failure markers.
-// Runs in the durable API process (not OutboxRetryWorker, not room-timer).
+// It runs only in the bounded room-integrity-reconciler process role.
 type ReconciliationWorker struct {
-	store     *store.SessionStore
+	store     reconciliationQueue
 	integrity app.GameIntegrity
 	deals     app.DealSource
+	owner     string
+	batch     int
+	lease     time.Duration
 	interval  time.Duration
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 }
 
+type reconciliationQueue interface {
+	ClaimPendingReconciliationMarkers(context.Context, string, int, time.Duration) ([]app.ReconciliationMarker, error)
+	RenewReconciliationClaim(context.Context, string, string, time.Duration) (bool, error)
+	ReconcileClaimedMarker(context.Context, app.GameIntegrity, app.DealSource, app.ReconciliationMarker, string) error
+	ReleaseReconciliationClaim(context.Context, string, string, time.Duration) error
+}
+
 // NewReconciliationWorker constructs a background reconciler.
-func NewReconciliationWorker(sessions *store.SessionStore, integrity app.GameIntegrity, deals app.DealSource) *ReconciliationWorker {
+func NewReconciliationWorker(sessions reconciliationQueue, integrity app.GameIntegrity, deals app.DealSource) *ReconciliationWorker {
 	return &ReconciliationWorker{
 		store:     sessions,
 		integrity: integrity,
 		deals:     deals,
+		owner:     "room-integrity-reconciler",
+		batch:     32,
+		lease:     time.Minute,
 		interval:  2 * time.Second,
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
+	}
+}
+
+// Configure sets bounded per-replica claim controls.
+func (w *ReconciliationWorker) Configure(owner string, batch int, lease, interval time.Duration) {
+	if strings.TrimSpace(owner) != "" {
+		w.owner = strings.TrimSpace(owner)
+	}
+	if batch > 0 {
+		w.batch = batch
+	}
+	if w.batch > 128 {
+		w.batch = 128
+	}
+	if lease > 0 {
+		w.lease = lease
+	}
+	if interval > 0 {
+		w.interval = interval
 	}
 }
 
@@ -52,14 +88,89 @@ func (w *ReconciliationWorker) loop() {
 		case <-w.stopCh:
 			return
 		case <-ticker.C:
-			n, err := w.store.ReconcilePending(context.Background(), w.integrity, w.deals, 32)
-			if err != nil {
-				log.Printf(`{"level":"warn","event":"reconciliation_failed","error":%q}`, err.Error())
+			w.tick(context.Background())
+		}
+	}
+}
+
+func (w *ReconciliationWorker) tick(ctx context.Context) {
+	markers, err := w.store.ClaimPendingReconciliationMarkers(ctx, w.owner, w.batch, w.lease)
+	if err != nil {
+		log.Printf(`{"level":"warn","event":"reconciliation_claim_failed","error":%q}`, err.Error())
+		return
+	}
+	for _, marker := range markers {
+		if err := w.reconcileWithLease(ctx, marker); err != nil {
+			log.Printf(`{"level":"warn","event":"reconciliation_failed","commandId":%q,"error":%q}`, marker.CommandID, err.Error())
+			if errors.Is(err, errReconciliationLeaseLost) {
 				continue
 			}
-			if n > 0 {
-				log.Printf(`{"level":"info","event":"reconciliation_tick","markers":%d}`, n)
+			if releaseErr := w.store.ReleaseReconciliationClaim(ctx, marker.CommandID, w.owner, reconciliationRetryDelay(marker.Attempts)); releaseErr != nil {
+				log.Printf(`{"level":"warn","event":"reconciliation_release_failed","commandId":%q,"error":%q}`, marker.CommandID, releaseErr.Error())
 			}
 		}
 	}
+	if len(markers) > 0 {
+		log.Printf(`{"level":"info","event":"reconciliation_tick","markers":%d}`, len(markers))
+	}
+}
+
+// reconcileWithLease keeps one marker's lease live for slow GI replay, append,
+// and reservation work. A failed renewal cancels the repair context; the store
+// also fences every completion write so cancellation timing cannot make a stale
+// worker complete a marker.
+func (w *ReconciliationWorker) reconcileWithLease(ctx context.Context, marker app.ReconciliationMarker) error {
+	repairCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	renewResult := make(chan error, 1)
+	interval := w.lease / 3
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-repairCtx.Done():
+				renewResult <- nil
+				return
+			case <-ticker.C:
+				renewed, err := w.store.RenewReconciliationClaim(repairCtx, marker.CommandID, w.owner, w.lease)
+				if err != nil {
+					renewResult <- err
+					cancel()
+					return
+				}
+				if !renewed {
+					renewResult <- fmt.Errorf("%w command=%s owner=%s", errReconciliationLeaseLost, marker.CommandID, w.owner)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	repairErr := w.store.ReconcileClaimedMarker(repairCtx, w.integrity, w.deals, marker, w.owner)
+	cancel()
+	renewErr := <-renewResult
+	if renewErr != nil {
+		return renewErr
+	}
+	return repairErr
+}
+
+func reconciliationRetryDelay(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	delay := time.Second
+	for i := 1; i < attempts && delay < 30*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }

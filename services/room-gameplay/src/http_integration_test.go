@@ -246,7 +246,9 @@ func TestCreateJoinLockStartPlayCard_HappyPath(t *testing.T) {
 	}
 
 	// Snapshot includes private hand for host.
-	w = e.do(t, http.MethodGet, "/v1/rooms/room_a/snapshot?playerId=host", nil, h)
+	snapshotAuth := e.auth()
+	snapshotAuth["X-Player-Id"] = "host"
+	w = e.do(t, http.MethodGet, "/v1/rooms/room_a/snapshot", nil, snapshotAuth)
 	if w.Code != http.StatusOK {
 		t.Fatalf("snapshot: %d %s", w.Code, w.Body.String())
 	}
@@ -505,7 +507,9 @@ func TestTimerCommands_StaleUnoAndReconnectIdempotency(t *testing.T) {
 	}
 	cur = *disc.Sequence
 
-	snapW := e.do(t, http.MethodGet, "/v1/rooms/room_timer/snapshot?playerId=guest", nil, h)
+	snapshotAuth := e.auth()
+	snapshotAuth["X-Player-Id"] = "guest"
+	snapW := e.do(t, http.MethodGet, "/v1/rooms/room_timer/snapshot", nil, snapshotAuth)
 	var snap map[string]any
 	_ = json.NewDecoder(snapW.Body).Decode(&snap)
 	discInfo, _ := snap["disconnect"].(map[string]any)

@@ -224,11 +224,12 @@ func (s *Server) roomScopedHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := parts[0]
 	action := parts[1]
-	if !s.authorizeRuntime(r, roomID) {
-		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
-		return
-	}
-	if s.runtimeRoomID == "" && !s.authorizeInternal(r) {
+	if s.runtimeRoomID != "" {
+		if !s.authorizeRuntime(r, roomID) {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
+			return
+		}
+	} else if !s.authorizeInternal(r) {
 		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
 		return
 	}
@@ -250,10 +251,6 @@ func (s *Server) internalCommandsHandler(w http.ResponseWriter, r *http.Request)
 	if !s.requireReady(w) {
 		return
 	}
-	if !s.authorizeInternal(r) {
-		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
-		return
-	}
 	if s.runtimeRoomID != "" {
 		body, err := readBody(r)
 		if err != nil {
@@ -268,6 +265,9 @@ func (s *Server) internalCommandsHandler(w http.ResponseWriter, r *http.Request)
 			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
 			return
 		}
+	} else if !s.authorizeInternal(r) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
+		return
 	}
 	s.dispatchCommand(w, r, "", false)
 }
@@ -288,22 +288,27 @@ func (s *Server) internalRoomScopedHandler(w http.ResponseWriter, r *http.Reques
 	}
 	roomID := parts[0]
 	action := parts[1]
-	if !s.authorizeRuntime(r, roomID) {
-		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
-		return
-	}
 	switch action {
 	case "timer-commands":
 		if r.Method != http.MethodPost {
 			_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
 			return
 		}
-		if s.runtimeRoomID == "" && !s.authorizeTimer(r) {
+		if s.runtimeRoomID != "" {
+			if !s.authorizeRuntime(r, roomID) {
+				_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid room runtime credential or generation", "", "")
+				return
+			}
+		} else if !s.authorizeTimer(r) {
 			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid timer service credential", "", "")
 			return
 		}
 		s.dispatchCommand(w, r, roomID, true)
 	case "spectator-recovery-snapshot":
+		if s.runtimeRoomID != "" {
+			_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "route not found", "", "")
+			return
+		}
 		if r.Method != http.MethodGet {
 			_ = httpx.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "", "")
 			return
@@ -494,10 +499,9 @@ func (s *Server) publicListHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request, roomID string) {
-	playerID := strings.TrimSpace(r.URL.Query().Get("playerId"))
-	if playerID == "" {
-		playerID = strings.TrimSpace(r.Header.Get("X-Player-Id"))
-	}
+	// X-Player-Id is accepted only behind the authenticated stable Room hop.
+	// Query input is never an identity source.
+	playerID := strings.TrimSpace(r.Header.Get("X-Player-Id"))
 	if playerID == "" {
 		_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "playerId required", "", "")
 		return
@@ -760,10 +764,27 @@ func main() {
 			log.Fatal("WORKER_ROLE=room-timer requires durable mode with Redis timers")
 		}
 		continuations := store.NewNextGameContinuationQueue(wired.Pool.Main)
+		rebuilder := NewTimerIndexRebuildWorker(wired.Sessions, cfg.RuntimeControllerOwner, func(ctx context.Context) error {
+			return wired.Timers.RebuildFromPostgres(ctx, wired.Pool.Main)
+		})
+		rebuilder.Start()
+		defer rebuilder.Stop()
 		tw := NewTimerWorkerWithContinuations(wired.Timers, continuations, cfg.RoomGameplayURL, cfg.TimerCredential)
 		tw.Start()
 		defer tw.Stop()
 		log.Printf(`{"level":"info","service":"%s","event":"timer_worker_startup","mode":%q}`, cfg.ServiceName, wired.Mode)
+		select {}
+	}
+
+	if cfg.WorkerRole == "room-integrity-reconciler" {
+		if wired.Mode != "durable" || wired.Sessions == nil || wired.Deps.Integrity == nil {
+			log.Fatal("WORKER_ROLE=room-integrity-reconciler requires durable Room Postgres and Game Integrity")
+		}
+		rw := NewReconciliationWorker(wired.Sessions, wired.Deps.Integrity, wired.Deps.Deals)
+		rw.Configure(cfg.RuntimeControllerOwner, cfg.IntegrityReconcilerBatch, cfg.IntegrityReconcilerLease, cfg.IntegrityReconcilerInterval)
+		rw.Start()
+		defer rw.Stop()
+		log.Printf(`{"level":"info","service":"%s","event":"room_integrity_reconciler_startup","mode":%q}`, cfg.ServiceName, wired.Mode)
 		select {}
 	}
 
@@ -773,13 +794,6 @@ func main() {
 		worker := NewOutboxRetryWorker(wired.Service)
 		worker.Start()
 		defer worker.Stop()
-	}
-
-	// Durable API: autonomous GI reconciliation (markers survive commit failure).
-	if wired.Mode == "durable" && wired.Sessions != nil && wired.Deps.Integrity != nil {
-		rw := NewReconciliationWorker(wired.Sessions, wired.Deps.Integrity, wired.Deps.Deals)
-		rw.Start()
-		defer rw.Stop()
 	}
 
 	srv := NewServerWithScopedCreds(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.SpectatorRecoveryCredential, cfg.AnalyticsBackfillCredential, cfg.ServiceName)
@@ -806,39 +820,12 @@ func main() {
 			}
 		}()
 		router := NewRoomRouter(directory, cfg.RuntimeRouterCredential, nil)
-		base := srv.routes()
-		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if shouldRouteToRuntime(r) {
-				router.ServeHTTP(w, r)
-				return
-			}
-			base.ServeHTTP(w, r)
-		})
+		handler := NewStableRoomHandler(srv, router)
 		log.Printf(`{"level":"info","service":"%s","event":"room_router_startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
 		log.Fatal(http.ListenAndServe(":8080", handler))
 	}
 	log.Printf(`{"level":"info","service":"%s","event":"startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
 	log.Fatal(http.ListenAndServe(":8080", srv.routes()))
-}
-
-func shouldRouteToRuntime(r *http.Request) bool {
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/v1/rooms/") {
-		return true
-	}
-	if path == "/internal/v1/commands" && r.Method == http.MethodPost {
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
-		if err != nil {
-			return true
-		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		var command struct {
-			Type string `json:"type"`
-		}
-		return json.Unmarshal(body, &command) == nil && command.Type != app.CmdCreateRoom
-	}
-	parts := strings.Split(strings.TrimPrefix(path, "/internal/v1/rooms/"), "/")
-	return strings.HasPrefix(path, "/internal/v1/rooms/") && len(parts) == 2 && parts[0] != "" && parts[0] != "provision"
 }
 
 func refreshPodDirectory(ctx context.Context, directory *PodDirectory, kube KubePodClient) {

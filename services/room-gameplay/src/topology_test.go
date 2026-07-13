@@ -398,7 +398,7 @@ func TestDedicatedRuntimeDurableValidationSkipsUnservedScopedSecrets(t *testing.
 	}
 }
 
-func TestDedicatedRuntimeDurableValidationRequiresCommandIngressCredential(t *testing.T) {
+func TestDedicatedRuntimeDurableValidationDoesNotRequireGatewayCredential(t *testing.T) {
 	cfg := roomRuntimeConfig{
 		WorkerRole:        "room-runtime",
 		DatabaseURL:       "postgres://room",
@@ -409,7 +409,46 @@ func TestDedicatedRuntimeDurableValidationRequiresCommandIngressCredential(t *te
 		GameIntegrityCred: "gi-cred",
 	}
 	missing := roomDurableMissing(cfg)
-	if len(missing) != 1 || missing[0] != "SERVICE_CREDENTIAL" {
-		t.Fatalf("dedicated runtime missing=%v, want SERVICE_CREDENTIAL", missing)
+	if len(missing) != 0 {
+		t.Fatalf("dedicated runtime inherited stable Gateway authority: missing=%v", missing)
+	}
+}
+
+func TestRoomProcessRolesDoNotMultiplyGlobalMaintenance(t *testing.T) {
+	for _, tc := range []struct {
+		role                 string
+		wantTimerRebuild     bool
+		wantIntegrityRepairs bool
+	}{
+		{role: ""},
+		{role: "room-router"},
+		{role: "room-runtime"},
+		{role: "room-runtime-controller"},
+		{role: "room-timer", wantTimerRebuild: true},
+		{role: "room-integrity-reconciler", wantIntegrityRepairs: true},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			got := responsibilitiesForRoomRole(tc.role)
+			if got.TimerIndexRebuild != tc.wantTimerRebuild || got.IntegrityReconciliation != tc.wantIntegrityRepairs {
+				t.Fatalf("role=%q responsibilities=%+v", tc.role, got)
+			}
+		})
+	}
+}
+
+func TestMaintenanceRolesRequireOnlyOwnedDurableDependencies(t *testing.T) {
+	timer := roomRuntimeConfig{
+		WorkerRole: "room-timer", DatabaseURL: "postgres://room", RedisURL: "redis://room",
+		TimerCredential: "timer-cred",
+	}
+	if missing := roomDurableMissing(timer); len(missing) != 0 {
+		t.Fatalf("timer inherited unrelated credentials: %v", missing)
+	}
+	reconciler := roomRuntimeConfig{
+		WorkerRole: "room-integrity-reconciler", DatabaseURL: "postgres://room", RedisURL: "redis://room",
+		GameIntegrityURL: "http://gi", GameIntegrityCred: "gi-cred",
+	}
+	if missing := roomDurableMissing(reconciler); len(missing) != 0 {
+		t.Fatalf("integrity reconciler inherited unrelated credentials: %v", missing)
 	}
 }

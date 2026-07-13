@@ -148,12 +148,53 @@ func (s *SessionStore) ClaimRuntimeAssignments(ctx context.Context, owner string
 }
 
 func (s *SessionStore) MarkRuntimePodReady(ctx context.Context, roomID string, generation int64, ip string) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
 		UPDATE room_runtime_assignments
 		SET observed_state = 'ready', pod_ip = $3, lease_owner = NULL, lease_until = NULL, updated_at = now()
 		WHERE room_id = $1 AND generation = $2 AND desired_state = 'running'
 	`, roomID, generation, ip)
-	return wrapUnavailable(err)
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return wrapUnavailable(tx.Commit(ctx))
+	}
+	// The stable event identity makes first readiness durable and deduplicated
+	// across repeated observations and every later runtime generation.
+	_, err = tx.Exec(ctx, `
+		INSERT INTO integration_outbox_events (
+			event_id, event_type, topic, partition_key, schema_version, room_id,
+			payload, correlation_id, occurred_at
+		)
+		SELECT
+			'room-runtime-ready:' || r.room_id,
+			'RoomRuntimeReady', 'room.runtime.ready', r.room_id, 1, r.room_id,
+			jsonb_build_object(
+				'schemaVersion', 1,
+				'eventId', 'room-runtime-ready:' || r.room_id,
+				'eventType', 'RoomRuntimeReady',
+				'correlationId', 'room-runtime-ready:' || r.room_id,
+				'occurredAt', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+				'roomId', r.room_id,
+				'tournamentId', r.tournament_id,
+				'roundNumber', r.round_number,
+				'slotId', r.slot_id,
+				'generation', $2
+			),
+			'room-runtime-ready:' || r.room_id, now()
+		FROM rooms r
+		WHERE r.room_id = $1 AND r.room_type = 'tournament'
+		ON CONFLICT (event_id) DO NOTHING
+	`, roomID, generation)
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	return wrapUnavailable(tx.Commit(ctx))
 }
 
 func (s *SessionStore) MarkRuntimePodCreating(ctx context.Context, roomID string, generation int64) error {

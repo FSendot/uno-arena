@@ -12,6 +12,8 @@ env:
   KAFKA_CONSUMER_GROUP: tournament-orchestration
   KAFKA_MATCH_COMPLETED_TOPIC: room.match.completed
   KAFKA_MATCH_COMPLETED_DLQ_TOPIC: room.match.completed.tournament-orchestration.dlq
+  KAFKA_ROOM_RUNTIME_READY_TOPIC: room.runtime.ready
+  KAFKA_ROOM_RUNTIME_READY_DLQ_TOPIC: room.runtime.ready.tournament-orchestration.dlq
   # Disposable Redis bracket projection (DB 7 deploy; integration tests use DB 14 —
   # default Redis databases=16 only allows indices 0..15).
   REDIS_URL: redis://redis:6379/7

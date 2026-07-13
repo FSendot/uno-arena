@@ -286,12 +286,31 @@ capability_assert_http "spectator snapshot in_progress" "200" "$code"
 capability_json_assert "spectator in_progress status" "$CAP_TMPDIR/spec-progress.json" \
   "assert data.get('status')=='in_progress', data; assert data.get('streamClosed') is False, data"
 
-# stale sequence reject (after start; expectedSequence 1 is stale)
-# command-id deliberately omits "stale" so reason_substr cannot match via echo.
-must_cli_json "stale JoinRoom rejected envelope" "$CAP_TMPDIR/stale-join.json" \
+# stale sequence reject (after start; expectedSequence 1 is stale). The CLI
+# exits nonzero for HTTP 409 while preserving the rejected CommandResult in its
+# diagnostic stream, so recover that JSON for the same contract assertion.
+if cli_json "$CAP_TMPDIR/stale-join.json" \
   command --token "$GUEST_TOKEN" --type JoinRoom --room-id "$ROOM_MAIN" \
   --command-id "cmd-join-oldseq-$RUN_ID" --expected-sequence 1 --payload '{}' \
-  --correlation-id "corr-join-oldseq-$RUN_ID"
+  --correlation-id "corr-join-oldseq-$RUN_ID"; then
+  die "stale JoinRoom unexpectedly exited zero"
+fi
+python3 - "$CAP_TMPDIR/stale-join.json.err" "$CAP_TMPDIR/stale-join.json" <<'PY'
+import json, pathlib, sys
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+for line in reversed(source.read_text(encoding="utf-8").splitlines()):
+    try:
+        result = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(result, dict) and result.get("status") == "rejected":
+        destination.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
+        break
+else:
+    raise SystemExit("stale JoinRoom diagnostic omitted rejected CommandResult")
+PY
+echo "ok - stale JoinRoom rejected envelope (cli exit nonzero)"
 capability_assert_rejected "stale sequence rejected" "$CAP_TMPDIR/stale-join.json" "stale"
 
 # --- 4 DrawCard via player snapshot currentPlayer + spectator SSE after mutation ---

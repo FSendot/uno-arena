@@ -51,6 +51,9 @@ type roomRuntimeConfig struct {
 	RuntimeControllerConcurrency int
 	RuntimeControllerCadence     time.Duration
 	RuntimeReadinessTimeout      time.Duration
+	IntegrityReconcilerBatch     int
+	IntegrityReconcilerLease     time.Duration
+	IntegrityReconcilerInterval  time.Duration
 	KubernetesAPIURL             string
 	KubernetesNamespace          string
 	RuntimeSecretName            string
@@ -68,6 +71,22 @@ type roomRuntime struct {
 	NotReadyReason string
 	Mode           string // durable | capability | capability-fakes | misconfigured
 	DurableReady   func(context.Context) error
+}
+
+type roomRoleResponsibilities struct {
+	TimerIndexRebuild       bool
+	IntegrityReconciliation bool
+}
+
+func responsibilitiesForRoomRole(role string) roomRoleResponsibilities {
+	switch strings.TrimSpace(role) {
+	case "room-timer":
+		return roomRoleResponsibilities{TimerIndexRebuild: true}
+	case "room-integrity-reconciler":
+		return roomRoleResponsibilities{IntegrityReconciliation: true}
+	default:
+		return roomRoleResponsibilities{}
+	}
 }
 
 func loadRoomRuntimeConfig() roomRuntimeConfig {
@@ -137,6 +156,9 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 		RuntimeControllerConcurrency: envInt("ROOM_RUNTIME_CONTROLLER_CONCURRENCY", 4),
 		RuntimeControllerCadence:     time.Duration(envInt("ROOM_RUNTIME_CONTROLLER_CADENCE_MILLIS", 1000)) * time.Millisecond,
 		RuntimeReadinessTimeout:      time.Duration(envInt("ROOM_RUNTIME_READINESS_TIMEOUT_SECONDS", 60)) * time.Second,
+		IntegrityReconcilerBatch:     envInt("ROOM_INTEGRITY_RECONCILER_CLAIM_BATCH", 32),
+		IntegrityReconcilerLease:     time.Duration(envInt("ROOM_INTEGRITY_RECONCILER_LEASE_SECONDS", 60)) * time.Second,
+		IntegrityReconcilerInterval:  time.Duration(envInt("ROOM_INTEGRITY_RECONCILER_INTERVAL_MILLIS", 2000)) * time.Millisecond,
 		KubernetesAPIURL:             strings.TrimSpace(os.Getenv("KUBERNETES_API_URL")),
 		KubernetesNamespace:          firstNonEmptyEnv(os.Getenv("POD_NAMESPACE"), os.Getenv("KUBERNETES_NAMESPACE"), "default"),
 		RuntimeSecretName:            strings.TrimSpace(os.Getenv("ROOM_RUNTIME_SECRET_NAME")),
@@ -304,8 +326,6 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 	}
 
 	sessions := store.NewSessionStoreWithPools(pool.Main, pool.Intent).WithTimers(timers)
-	// Best-effort rebuild of non-authoritative Redis index from Postgres deadlines.
-	_ = timers.RebuildFromPostgres(context.Background(), pool.Main)
 	var auditSink app.AuditSink = app.NewStderrJSONLAuditSink()
 	if cfg.AuditLogPath != "" {
 		sink, err := app.OpenJSONLAuditSink(cfg.AuditLogPath)
@@ -346,7 +366,7 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 		Ready:     true,
 		Mode:      "durable",
 		DurableReady: func(ctx context.Context) error {
-			if cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-timer" {
+			if cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-integrity-reconciler" {
 				if !app.AnalyticsBackfillCursorSecretConfigured() {
 					return fmt.Errorf("%w", app.ErrAnalyticsBackfillCursorSecretRequired)
 				}
@@ -374,21 +394,26 @@ func roomDurableMissing(cfg roomRuntimeConfig) []string {
 	}
 	require("DATABASE_URL", cfg.DatabaseURL)
 	require("REDIS_URL", cfg.RedisURL)
-	require("IDENTITY_URL", cfg.IdentityURL)
-	require("IDENTITY_CREDENTIAL", cfg.IdentityCred)
-	require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)
-	require("GAME_INTEGRITY_CREDENTIAL", cfg.GameIntegrityCred)
-	if cfg.WorkerRole != "room-runtime" {
+	if cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-integrity-reconciler" {
+		require("IDENTITY_URL", cfg.IdentityURL)
+		require("IDENTITY_CREDENTIAL", cfg.IdentityCred)
+	}
+	if cfg.WorkerRole != "room-timer" {
+		require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)
+		require("GAME_INTEGRITY_CREDENTIAL", cfg.GameIntegrityCred)
+	}
+	if cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-integrity-reconciler" {
 		require("ROOM_TIMER_SERVICE_CREDENTIAL", cfg.TimerCredential)
 	}
-	// Every HTTP command executor authenticates the Gateway-to-Room credential.
-	// Dedicated runtimes skip recovery-only authority, but not command ingress.
-	require("SERVICE_CREDENTIAL", cfg.ServiceCredential)
-	if cfg.WorkerRole != "room-runtime" {
+	// Only stable request-serving processes authenticate the original Gateway.
+	if cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-integrity-reconciler" {
+		require("SERVICE_CREDENTIAL", cfg.ServiceCredential)
+	}
+	if cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-integrity-reconciler" {
 		require("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL", cfg.SpectatorRecoveryCredential)
 	}
 	// Timer worker does not serve analytics-backfill or public-list; skip least-privilege secrets.
-	if cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-runtime" {
+	if cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-runtime" && cfg.WorkerRole != "room-integrity-reconciler" {
 		require("ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL", cfg.AnalyticsBackfillCredential)
 		if !app.AnalyticsBackfillCursorSecretConfigured() {
 			missing = append(missing, "ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET")

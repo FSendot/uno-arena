@@ -17,7 +17,7 @@ Two players attempt to play different cards at nearly the same time.
 ### Emitted events
 
 - accepted branch: `CardPlayed`, follow-up events such as `ColorChosen`, `UnoPenaltyApplied`, `TurnAdvanced`
-- rejected branch: no domain event and no Game Integrity log entry; API returns stale-command outcome and a structured operational/security audit record is emitted with `commandId`, `correlationId`, session/player, room/tournament when known, rejection reason, submitted/current sequence, and timestamp
+- rejected branch: no domain event and no Game Integrity log entry; API returns HTTP `409 Conflict` with the structured `stale_sequence` command result and emits a structured operational/security audit record with `commandId`, `correlationId`, session/player, room/tournament when known, rejection reason, submitted/current sequence, and timestamp
 
 ### Jump-in race
 
@@ -61,6 +61,7 @@ Two players attempt to play different cards at nearly the same time.
 ### Expected domain behavior
 
 - A command with an old sequence number is rejected as stale.
+- The BFF preserves that rejection as HTTP `409 Conflict` while retaining the structured rejected command result for deterministic client reconciliation.
 - A command with a previously seen idempotency key is recognized as a duplicate.
 - If the original command succeeded, the duplicate should return the already-known result without reapplying state.
 - If the original command failed validation, the duplicate should return the same failure classification if available.

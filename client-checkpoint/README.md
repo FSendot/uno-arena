@@ -28,9 +28,16 @@ Gateway / BFF and must not introduce direct microservice access.
 | `UNOARENA_API_URL` | Yes (except `countdown`, or `logout` when no local session exists) | Gateway/BFF base URL. The CLI never calls microservices directly. |
 | `UNOARENA_TOKEN` | No | Default bearer token when `--token` is omitted (after `--token`, before session file) |
 | `UNOARENA_SESSION_FILE` | No | Session file path. Default: `${XDG_STATE_HOME:-$HOME/.local/state}/unoarena/session.json` |
+| `UNOARENA_ROOM_START_TIMEOUT_SECONDS` | No | Total retry budget for safe `503 room_starting` snapshot/assignment reads. Default: `60`; each retry honors `Retry-After` with jitter and a five-second interval cap. |
 
 Token resolution for one-shot utilities: `--token` → `UNOARENA_TOKEN` → session file.
 Corrupt or group/world-readable session files fail closed.
+
+Room creation and assignment are asynchronous to dedicated runtime admission.
+Only player-snapshot and tournament-assignment GETs retry a structured
+`503 room_starting`; the bounded policy honors `Retry-After`, adds jitter, and
+caps each interval at five seconds. Exhaustion is a structured nonzero failure.
+The client never automatically retries a mutation or any unknown outcome.
 
 ## Invocation
 
@@ -228,7 +235,7 @@ external identity provider or unrelated applications.
 - `expectedSequenceNumber` (`--expected-sequence`) is **required** for mutations of an existing room aggregate (`JoinRoom`, `PlayCard`, …). It must be **absent** for `CreateRoom` and the three tournament types; passing `--expected-sequence` for those is rejected locally.
 - Room IDs in paths and stream query params are URL-encoded.
 - Requests send `X-Correlation-Id` (auto-generated or `--correlation-id`) and command submissions also send `X-Command-Id`.
-- Rejected commands return HTTP `200` with `status=rejected` and a reason (including stale/wrong sequence); they are audit-only and never domain events. Malformed envelopes (unknown type, missing required sequence, prohibited sequence, bad schemaVersion) are HTTP `400` `invalid_envelope`.
+- Rejected commands preserve the `status=rejected` `CommandResult` body and are audit-only, never domain events. Exact `reason=stale_sequence` returns HTTP `409` so clients reconcile; every other domain rejection remains HTTP `200`. Malformed envelopes (unknown type, missing required sequence, prohibited sequence, bad schemaVersion) are HTTP `400` `invalid_envelope`.
 
 ### SSE
 

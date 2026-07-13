@@ -86,6 +86,14 @@ spec:
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
+  - name: room.runtime.ready
+    class: business
+    retentionClass: business
+    retentionMs: 7200000
+    partitions: 2
+    replicationFactor: 1
+    productionPlanningPartitions: 32
+    cleanupPolicy: delete
   - name: room.spectator-safe.events
     class: high
     retentionClass: spectator-safe
@@ -229,6 +237,16 @@ spec:
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.match.completed
+    consumer: tournament-orchestration
+    note: ADR-0017 scaffolding; consumer process not claimed
+  - name: room.runtime.ready.tournament-orchestration.dlq
+    class: dlq
+    retentionClass: dlq
+    retentionMs: 21600000
+    partitions: 2
+    replicationFactor: 1
+    cleanupPolicy: delete
+    sourceTopic: room.runtime.ready
     consumer: tournament-orchestration
     note: ADR-0017 scaffolding; consumer process not claimed
   - name: room.spectator-safe.events.spectator-view.dlq

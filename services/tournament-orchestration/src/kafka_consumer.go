@@ -58,6 +58,12 @@ type MatchCompletedIngester interface {
 	IngestMatchCompleted(ctx context.Context, evt MatchCompletedEvent) (map[string]any, error)
 }
 
+// RoomRuntimeReadyIngester opens assignment visibility after Room's first
+// durable playable observation.
+type RoomRuntimeReadyIngester interface {
+	IngestRoomRuntimeReady(ctx context.Context, evt RoomRuntimeReadyEvent) (bool, error)
+}
+
 // KafkaRecordSource polls and manually commits source offsets.
 type KafkaRecordSource interface {
 	Poll(ctx context.Context) ([]ConsumerRecord, error)
@@ -149,6 +155,7 @@ type MatchCompletedKafkaConsumer struct {
 	source     KafkaRecordSource
 	dlq        DLQPublisher
 	handler    MatchCompletedIngester
+	readiness  RoomRuntimeReadyIngester
 	quarantine AggregateQuarantineStore
 	cfg        MatchCompletedKafkaConfig
 	clock      Clock
@@ -304,6 +311,9 @@ func (c *MatchCompletedKafkaConsumer) processOne(ctx context.Context, rec Consum
 			})
 		}
 	}
+	if sourceTopic == c.cfg.RuntimeReadyTopic {
+		return c.processRoomRuntimeReady(ctx, rec, key, sourceTopic)
+	}
 
 	evt, err := ParseMatchCompletedRecord(rec.Value)
 	if err != nil {
@@ -331,7 +341,9 @@ func (c *MatchCompletedKafkaConsumer) processOne(ctx context.Context, rec Consum
 	}
 	var firstFail, lastFail time.Time
 	var lastErr error
+	attemptCount := 0
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCount = attempt
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -371,7 +383,62 @@ func (c *MatchCompletedKafkaConsumer) processOne(ctx context.Context, rec Consum
 		SourceTopic:     sourceTopic,
 		SourcePartition: rec.Partition,
 		SourceOffset:    rec.Offset,
-		AttemptCount:    maxAttempts,
+		AttemptCount:    attemptCount,
+		Classification:  ClassifyKafkaConsumeError(lastErr),
+		FirstFailureAt:  firstFail,
+		LastFailureAt:   lastFail,
+		CorrelationID:   evt.CorrelationID,
+		ErrorSummary:    sanitizeDLQErrorSummary(lastErr.Error()),
+	}, evt.RoomID, evt.EventID)
+}
+
+func (c *MatchCompletedKafkaConsumer) processRoomRuntimeReady(ctx context.Context, rec ConsumerRecord, key, sourceTopic string) error {
+	evt, err := ParseRoomRuntimeReadyRecord(rec.Value)
+	if err != nil {
+		return c.terminalToDLQAndCommit(ctx, rec, err, 1, firstNonEmpty(key, peekSafeRoomID(rec.Value)))
+	}
+	if key == "" || key != evt.RoomID {
+		return c.terminalToDLQAndCommit(ctx, rec,
+			newTerminalKafkaError(KafkaFailureSchemaInvalid, fmt.Errorf("kafka key must equal roomId")),
+			1, firstNonEmpty(key, evt.RoomID))
+	}
+	if c.readiness == nil {
+		return fmt.Errorf("room runtime readiness ingester not configured")
+	}
+	maxAttempts := c.cfg.MaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var firstFail, lastFail time.Time
+	var lastErr error
+	attemptCount := 0
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptCount = attempt
+		_, err := c.readiness.IngestRoomRuntimeReady(ctx, evt)
+		if err == nil {
+			return c.source.Commit(ctx, rec)
+		}
+		lastErr = err
+		now := c.now()
+		if firstFail.IsZero() {
+			firstFail = now
+		}
+		lastFail = now
+		if IsTerminalKafkaConsumeError(err) {
+			break
+		}
+		if attempt < maxAttempts {
+			if sleepErr := c.doSleep(ctx, c.cfg.RetryBackoff); sleepErr != nil {
+				return sleepErr
+			}
+		}
+	}
+	return c.failureToDLQAndCommit(ctx, rec, DLQFailureMeta{
+		Consumer:        c.cfg.Group,
+		SourceTopic:     sourceTopic,
+		SourcePartition: rec.Partition,
+		SourceOffset:    rec.Offset,
+		AttemptCount:    attemptCount,
 		Classification:  ClassifyKafkaConsumeError(lastErr),
 		FirstFailureAt:  firstFail,
 		LastFailureAt:   lastFail,

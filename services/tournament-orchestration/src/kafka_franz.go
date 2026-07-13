@@ -24,21 +24,23 @@ const (
 
 // franzMatchCompletedClient wraps a single kgo client for consume + DLQ produce.
 type franzMatchCompletedClient struct {
-	cl       *kgo.Client
-	dlqTopic string
+	cl                *kgo.Client
+	matchDLQTopic     string
+	readyTopic        string
+	readinessDLQTopic string
 }
 
 func newFranzMatchCompletedClient(cfg MatchCompletedKafkaConfig) (*franzMatchCompletedClient, error) {
 	if len(cfg.Brokers) == 0 {
 		return nil, fmt.Errorf("kafka brokers required")
 	}
-	if cfg.Group == "" || cfg.Topic == "" || cfg.DLQTopic == "" {
+	if cfg.Group == "" || cfg.Topic == "" || cfg.RuntimeReadyTopic == "" || cfg.DLQTopic == "" || cfg.RuntimeReadyDLQTopic == "" {
 		return nil, fmt.Errorf("kafka group/topic/dlq required")
 	}
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ConsumerGroup(cfg.Group),
-		kgo.ConsumeTopics(cfg.Topic),
+		kgo.ConsumeTopics(cfg.Topic, cfg.RuntimeReadyTopic),
 		kgo.DisableAutoCommit(),
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
@@ -47,7 +49,10 @@ func newFranzMatchCompletedClient(cfg MatchCompletedKafkaConfig) (*franzMatchCom
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &franzMatchCompletedClient{cl: cl, dlqTopic: cfg.DLQTopic}, nil
+	return &franzMatchCompletedClient{
+		cl: cl, matchDLQTopic: cfg.DLQTopic,
+		readyTopic: cfg.RuntimeReadyTopic, readinessDLQTopic: cfg.RuntimeReadyDLQTopic,
+	}, nil
 }
 
 func (c *franzMatchCompletedClient) Poll(ctx context.Context) ([]ConsumerRecord, error) {
@@ -85,8 +90,9 @@ func (c *franzMatchCompletedClient) Commit(ctx context.Context, rec ConsumerReco
 }
 
 func (c *franzMatchCompletedClient) PublishDLQ(ctx context.Context, original ConsumerRecord, meta DLQFailureMeta) error {
+	dlqTopic := dlqTopicForSource(meta.SourceTopic, c.readyTopic, c.matchDLQTopic, c.readinessDLQTopic)
 	rec := &kgo.Record{
-		Topic:   c.dlqTopic,
+		Topic:   dlqTopic,
 		Key:     append([]byte(nil), original.Key...),
 		Value:   append([]byte(nil), original.Value...),
 		Headers: dlqHeaders(meta),
@@ -96,6 +102,13 @@ func (c *franzMatchCompletedClient) PublishDLQ(ctx context.Context, original Con
 		return fmt.Errorf("dlq produce: %w", err)
 	}
 	return nil
+}
+
+func dlqTopicForSource(sourceTopic, readinessTopic, matchDLQ, readinessDLQ string) string {
+	if sourceTopic == readinessTopic {
+		return readinessDLQ
+	}
+	return matchDLQ
 }
 
 func (c *franzMatchCompletedClient) Close() error {

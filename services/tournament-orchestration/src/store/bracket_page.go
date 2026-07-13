@@ -257,8 +257,11 @@ func loadBracketSlotPageQ(ctx context.Context, q dbQuerier, tournamentID string,
 func bracketSlotPageSQL(filterRound, hasCursor bool) string {
 	// Public pages exclude pending seeding rounds (partial slots invisible until finalized).
 	const base = `
-		SELECT bs.round_number, bs.slot_index, bs.slot_id, bs.status, bs.seeded_player_ids,
-			COALESCE(am.room_id, ''), COALESCE(am.provisioning_batch_id, ''),
+		SELECT bs.round_number, bs.slot_index, bs.slot_id,
+			CASE WHEN am.room_id IS NOT NULL AND am.runtime_ready_at IS NULL THEN 'provisioning' ELSE bs.status END,
+			bs.seeded_player_ids,
+			COALESCE(CASE WHEN am.runtime_ready_at IS NOT NULL THEN am.room_id END, ''),
+			COALESCE(am.provisioning_batch_id, ''),
 			COALESCE(ar.advancing_player_ids, '{}'),
 			COALESCE(mr.completion_version, 0),
 			COALESCE(mq.quarantine_reason, mr.quarantine_reason, '')
@@ -385,8 +388,11 @@ func (s *TournamentStore) LoadBatchChunkForProjection(ctx context.Context, tourn
 		return nil, fmt.Errorf("batch chunk exceeds max size")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT bs.round_number, bs.slot_index, bs.slot_id, bs.status, bs.seeded_player_ids,
-			COALESCE(am.room_id, ''), COALESCE(am.provisioning_batch_id, ''),
+		SELECT bs.round_number, bs.slot_index, bs.slot_id,
+			CASE WHEN am.room_id IS NOT NULL AND am.runtime_ready_at IS NULL THEN 'provisioning' ELSE bs.status END,
+			bs.seeded_player_ids,
+			COALESCE(CASE WHEN am.runtime_ready_at IS NOT NULL THEN am.room_id END, ''),
+			COALESCE(am.provisioning_batch_id, ''),
 			COALESCE(ar.advancing_player_ids, '{}'),
 			COALESCE(mr.completion_version, 0),
 			COALESCE(mq.quarantine_reason, mr.quarantine_reason, '')

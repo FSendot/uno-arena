@@ -72,6 +72,7 @@ func resetPublic(t *testing.T, pool *pgxpool.Pool) {
 		DROP TABLE IF EXISTS
 			realtime_outbox_events, integration_outbox_events,
 			processed_reconciliation_offsets, pending_integrity_reconciliations,
+			room_maintenance_leases,
 			pending_rejection_audits, player_stream_highwater, tournament_provisions,
 		player_session_bindings, next_game_continuations, reconnect_deadlines, uno_deadlines,
 		command_idempotency, current_games, room_roster, room_runtime_assignments, rooms,
@@ -131,6 +132,92 @@ func TestIntegration_SchemaVerify(t *testing.T) {
 	pool := openPool(t)
 	if err := store.VerifySchema(context.Background(), pool, store.DefaultSchemaExpectation()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIntegration_ReconciliationClaimsAreBoundedSkipLockedAndRecoverAfterLease(t *testing.T) {
+	pool := openPool(t)
+	ctx := context.Background()
+	for _, id := range []string{"claim-1", "claim-2", "claim-3"} {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO pending_integrity_reconciliations (command_id, room_id, expected_revision, payload, next_attempt_at)
+			VALUES ($1, 'room-claims', 0, '{}', clock_timestamp())
+		`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	storeA := store.NewSessionStore(pool)
+	storeB := store.NewSessionStore(pool)
+	first, err := storeA.ClaimPendingReconciliationMarkers(ctx, "worker-a", 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first bounded claim=%d want=2", len(first))
+	}
+	if renewed, err := storeA.RenewReconciliationClaim(ctx, first[0].CommandID, "worker-a", time.Minute); err != nil || !renewed {
+		t.Fatalf("owner renewal=%v err=%v", renewed, err)
+	}
+	if renewed, err := storeB.RenewReconciliationClaim(ctx, first[0].CommandID, "worker-b", time.Minute); err != nil || renewed {
+		t.Fatalf("non-owner renewal=%v err=%v", renewed, err)
+	}
+	second, err := storeB.ClaimPendingReconciliationMarkers(ctx, "worker-b", 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].CommandID == first[0].CommandID || second[0].CommandID == first[1].CommandID {
+		t.Fatalf("second claim must skip active leases: first=%+v second=%+v", first, second)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE pending_integrity_reconciliations
+		SET lease_until = clock_timestamp() - interval '1 microsecond'
+		WHERE room_id = 'room-claims'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := storeB.ClaimPendingReconciliationMarkers(ctx, "worker-b", 3, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 3 {
+		t.Fatalf("expired claims recovered=%d want=3", len(recovered))
+	}
+}
+
+func TestIntegration_TimerIndexRebuildUsesContextLeaseAndCompletionFence(t *testing.T) {
+	pool := openPool(t)
+	ctx := context.Background()
+	workerStarted := time.Now().UTC()
+	claimed, err := store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-a", workerStarted, time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("first claim=%v err=%v", claimed, err)
+	}
+	claimed, err = store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-b", workerStarted, time.Minute)
+	if err != nil || claimed {
+		t.Fatalf("concurrent claim=%v err=%v", claimed, err)
+	}
+	if renewed, err := store.NewSessionStore(pool).RenewTimerIndexRebuild(ctx, "timer-b", time.Minute); err != nil || renewed {
+		t.Fatalf("non-owner renewal=%v err=%v", renewed, err)
+	}
+	if renewed, err := store.NewSessionStore(pool).RenewTimerIndexRebuild(ctx, "timer-a", time.Minute); err != nil || !renewed {
+		t.Fatalf("owner renewal=%v err=%v", renewed, err)
+	}
+	if err := store.NewSessionStore(pool).CompleteTimerIndexRebuild(ctx, "timer-a"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-b", workerStarted, time.Minute)
+	if err != nil || claimed {
+		t.Fatalf("same rollout must observe completion: claim=%v err=%v", claimed, err)
+	}
+	claimed, err = store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-c", time.Now().UTC().Add(time.Second), time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("later worker may initiate a fresh guarded rebuild: claim=%v err=%v", claimed, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE room_maintenance_leases SET lease_until = now() - interval '1 second' WHERE lease_name = 'timer-index-rebuild'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NewSessionStore(pool).CompleteTimerIndexRebuild(ctx, "timer-c"); err == nil {
+		t.Fatal("expired owner must not record rebuild completion")
 	}
 }
 
@@ -1200,6 +1287,175 @@ func TestIntegration_ReconciliationRepairsOnceSecondNoOp(t *testing.T) {
 	`, app.EventRoomStateReconciled).Scan(&reconcileEvents)
 	if reconcileEvents != 1 {
 		t.Fatalf("double-applied RoomStateReconciled: %d", reconcileEvents)
+	}
+}
+
+type leaseStealingIntegrity struct {
+	inner app.GameIntegrity
+	steal func() error
+	once  sync.Once
+	err   error
+}
+
+func (g *leaseStealingIntegrity) Append(ctx context.Context, req app.AppendRequest) (app.AppendResult, error) {
+	return g.inner.Append(ctx, req)
+}
+
+func (g *leaseStealingIntegrity) Replay(ctx context.Context, roomID string, fromOffset int64) (app.ReplayResult, error) {
+	g.once.Do(func() { g.err = g.steal() })
+	if g.err != nil {
+		return app.ReplayResult{}, g.err
+	}
+	return g.inner.Replay(ctx, roomID, fromOffset)
+}
+
+func TestIntegration_ReconciliationClaimFencePreventsStaleCompletion(t *testing.T) {
+	pool := openPool(t)
+	ctx := context.Background()
+	sessions := store.NewSessionStore(pool)
+	sessions.FailNextCommitAccepted = context.DeadlineExceeded
+	gi := app.NewFakeGameIntegrity()
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: sessions, Commands: sessions, Integrity: gi,
+		Publisher: app.NewFakeEventPublisher(), Audit: app.NewFakeAuditSink(),
+		Deals: app.NewFakeDealSource(), Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	res := svc.HandleCommand(ctx, app.CommandInput{
+		CommandID: "stale_claim", Type: app.CmdCreateRoom, SchemaVersion: 1,
+		PlayerID: "host", SessionID: "sess", RoomID: "room_stale_claim",
+		Payload: mustJSON(map[string]any{"roomId": "room_stale_claim", "maxSeats": 2}),
+	})
+	if res.Err == nil {
+		t.Fatal("expected commit failure")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE pending_integrity_reconciliations
+		SET next_attempt_at = clock_timestamp()
+		WHERE command_id = 'stale_claim'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	markers, err := sessions.ClaimPendingReconciliationMarkers(ctx, "worker-a", 1, time.Minute)
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("claim=%+v err=%v", markers, err)
+	}
+	stealingGI := &leaseStealingIntegrity{
+		inner: gi,
+		steal: func() error {
+			_, err := pool.Exec(ctx, `
+				UPDATE pending_integrity_reconciliations
+				SET lease_owner = 'worker-b', lease_until = clock_timestamp() + interval '1 minute'
+				WHERE command_id = 'stale_claim'
+			`)
+			return err
+		},
+	}
+	if err := sessions.ReconcileClaimedMarker(ctx, stealingGI, nil, markers[0], "worker-a"); err == nil {
+		t.Fatal("stale owner must not complete reconciliation")
+	}
+	if _, ok := sessions.Get(ctx, "room_stale_claim"); ok {
+		t.Fatal("stale repair must not persist the room")
+	}
+	var status, owner string
+	if err := pool.QueryRow(ctx, `
+		SELECT status, lease_owner FROM pending_integrity_reconciliations WHERE command_id = 'stale_claim'
+	`).Scan(&status, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || owner != "worker-b" {
+		t.Fatalf("stale completion changed marker: status=%q owner=%q", status, owner)
+	}
+	var reconciledEvents int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM integration_outbox_events WHERE event_type = $1
+	`, app.EventRoomStateReconciled).Scan(&reconciledEvents); err != nil {
+		t.Fatal(err)
+	}
+	if reconciledEvents != 0 {
+		t.Fatalf("stale repair emitted reconciliation side effects=%d", reconciledEvents)
+	}
+}
+
+func TestIntegration_ReconciliationLeaseExpiryDuringRepairTransactionRollsBack(t *testing.T) {
+	pool := openPool(t)
+	ctx := context.Background()
+	sessions := store.NewSessionStore(pool)
+	sessions.FailNextCommitAccepted = context.DeadlineExceeded
+	gi := app.NewFakeGameIntegrity()
+	svc := app.NewService(app.ServiceDeps{
+		Sessions: sessions, Commands: sessions, Integrity: gi,
+		Publisher: app.NewFakeEventPublisher(), Audit: app.NewFakeAuditSink(),
+		Deals: app.NewFakeDealSource(), Clock: app.SystemClock{}, SessionsV: app.AllowAllSessionValidator{},
+	})
+	res := svc.HandleCommand(ctx, app.CommandInput{
+		CommandID: "lease_expires_during_repair", Type: app.CmdCreateRoom, SchemaVersion: 1,
+		PlayerID: "host", SessionID: "sess", RoomID: "room_lease_expires_during_repair",
+		Payload: mustJSON(map[string]any{"roomId": "room_lease_expires_during_repair", "maxSeats": 2}),
+	})
+	if res.Err == nil {
+		t.Fatal("expected commit failure")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE pending_integrity_reconciliations
+		SET next_attempt_at = clock_timestamp()
+		WHERE command_id = 'lease_expires_during_repair'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	markers, err := sessions.ClaimPendingReconciliationMarkers(ctx, "worker-a", 1, time.Minute)
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("claim=%+v err=%v", markers, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION reconciliation_test_expire_claim()
+		RETURNS trigger AS $$
+		BEGIN
+			UPDATE pending_integrity_reconciliations
+			SET lease_until = clock_timestamp() + interval '25 milliseconds'
+			WHERE command_id = 'lease_expires_during_repair';
+			PERFORM pg_sleep(0.100);
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE TRIGGER reconciliation_test_expire_claim_before_room_insert
+		BEFORE INSERT ON rooms
+		FOR EACH ROW EXECUTE FUNCTION reconciliation_test_expire_claim();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS reconciliation_test_expire_claim_before_room_insert ON rooms`)
+		_, _ = pool.Exec(context.Background(), `DROP FUNCTION IF EXISTS reconciliation_test_expire_claim()`)
+	})
+
+	if err := sessions.ReconcileClaimedMarker(ctx, gi, nil, markers[0], "worker-a"); err == nil {
+		t.Fatal("expired lease must reject terminal completion")
+	}
+	if _, ok := sessions.Get(ctx, "room_lease_expires_during_repair"); ok {
+		t.Fatal("expired terminal fence must roll back the repaired room")
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `
+		SELECT status FROM pending_integrity_reconciliations
+		WHERE command_id = 'lease_expires_during_repair'
+	`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Fatalf("marker status=%q want pending", status)
+	}
+	var reconciledEvents int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM integration_outbox_events WHERE event_type = $1
+	`, app.EventRoomStateReconciled).Scan(&reconciledEvents); err != nil {
+		t.Fatal(err)
+	}
+	if reconciledEvents != 0 {
+		t.Fatalf("expired terminal fence committed reconciliation side effects=%d", reconciledEvents)
 	}
 }
 

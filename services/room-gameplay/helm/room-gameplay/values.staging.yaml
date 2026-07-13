@@ -11,7 +11,8 @@ env:
   GAME_INTEGRITY_URL: http://game-integrity.uno-arena.svc.cluster.local:8080
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
-  # Durable Postgres adapter is implemented; Debezium Kafka + Redis sink delivery PENDING.
+  # Room appends both outboxes in Postgres. Environment-owned Kafka Connect and
+  # Debezium Server pipelines are required separately; this chart deploys neither.
 
 timerWorker:
   enabled: false

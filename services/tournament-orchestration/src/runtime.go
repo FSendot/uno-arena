@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -225,7 +226,7 @@ func wireTournamentRuntime() (tournamentRuntime, error) {
 		})
 		svc.SetAnalyticsBackfillReader(newDurableAnalyticsBackfillStore(store.NewAnalyticsBackfillStore(pool.Pool)))
 		exp := store.DefaultSchemaExpectation()
-		life, err := newMatchCompletedKafkaLifecycle(kafkaCfg, svc, storeQuarantineAdapter{store: ts})
+		life, err := newMatchCompletedKafkaLifecycle(kafkaCfg, svc, readinessStoreAdapter{store: ts, svc: svc}, storeQuarantineAdapter{store: ts})
 		if err != nil {
 			_ = rdb.Close()
 			pool.Close()
@@ -510,7 +511,7 @@ func wireCompletionWorkerRuntime(dbURL string) (tournamentRuntime, error) {
 	}, nil
 }
 
-func newMatchCompletedKafkaLifecycle(cfg MatchCompletedKafkaConfig, svc *Service, quarantine AggregateQuarantineStore) (*matchCompletedKafkaLifecycle, error) {
+func newMatchCompletedKafkaLifecycle(cfg MatchCompletedKafkaConfig, svc *Service, readiness RoomRuntimeReadyIngester, quarantine AggregateQuarantineStore) (*matchCompletedKafkaLifecycle, error) {
 	client, err := newFranzMatchCompletedClient(cfg)
 	if err != nil {
 		if client != nil {
@@ -522,11 +523,38 @@ func newMatchCompletedKafkaLifecycle(cfg MatchCompletedKafkaConfig, svc *Service
 		source:     client,
 		dlq:        client,
 		handler:    serviceMatchIngester{svc: svc},
+		readiness:  readiness,
 		quarantine: quarantine,
 		cfg:        cfg,
 		clock:      systemClock{},
 	}
 	return &matchCompletedKafkaLifecycle{consumer: consumer, client: client}, nil
+}
+
+type readinessStoreAdapter struct {
+	store *store.TournamentStore
+	svc   *Service
+}
+
+func (a readinessStoreAdapter) IngestRoomRuntimeReady(ctx context.Context, evt RoomRuntimeReadyEvent) (bool, error) {
+	applied, err := a.store.ApplyRoomRuntimeReady(ctx, store.RoomRuntimeReady{
+		EventID:      evt.EventID,
+		RoomID:       evt.RoomID,
+		TournamentID: evt.TournamentID,
+		RoundNumber:  evt.RoundNumber,
+		SlotID:       evt.SlotID,
+		Generation:   evt.Generation,
+		OccurredAt:   evt.OccurredAt,
+	})
+	if errors.Is(err, store.ErrRuntimeReadinessMismatch) {
+		return false, newTerminalKafkaError(KafkaFailurePayloadInvalid, err)
+	}
+	if err == nil && applied && a.svc != nil {
+		a.svc.refreshBracketBestEffort(context.Background(), a.svc.scopeForSlot(
+			ctx, evt.TournamentID, evt.RoundNumber, evt.SlotID,
+		))
+	}
+	return applied, err
 }
 
 // storeQuarantineAdapter adapts store.TournamentStore to AggregateQuarantineStore.

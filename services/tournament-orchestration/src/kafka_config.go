@@ -10,6 +10,8 @@ import (
 const (
 	DefaultTournamentKafkaGroup           = "tournament-orchestration"
 	DefaultMatchCompletedTopic            = "room.match.completed"
+	DefaultRoomRuntimeReadyTopic          = "room.runtime.ready"
+	DefaultRoomRuntimeReadyDLQTopic       = "room.runtime.ready.tournament-orchestration.dlq"
 	DefaultMatchCompletedDLQTopic         = "room.match.completed.tournament-orchestration.dlq"
 	defaultMatchCompletedMaxAttempt       = 5
 	defaultMatchCompletedRetryBack        = 200 * time.Millisecond
@@ -25,13 +27,15 @@ const (
 
 // MatchCompletedKafkaConfig is the Tournament-owned Kafka consumer settings.
 type MatchCompletedKafkaConfig struct {
-	Brokers             []string
-	Group               string
-	Topic               string
-	DLQTopic            string
-	MaxAttempts         int
-	RetryBackoff        time.Duration
-	MaxPartitionWorkers int
+	Brokers              []string
+	Group                string
+	Topic                string
+	RuntimeReadyTopic    string
+	DLQTopic             string
+	RuntimeReadyDLQTopic string
+	MaxAttempts          int
+	RetryBackoff         time.Duration
+	MaxPartitionWorkers  int
 }
 
 // LoadMatchCompletedKafkaConfigFromEnv loads Kafka settings. enabled is false when
@@ -52,6 +56,14 @@ func LoadMatchCompletedKafkaConfigFromEnv() (MatchCompletedKafkaConfig, bool, er
 		return MatchCompletedKafkaConfig{}, false, err
 	}
 	topic, err := envOrDefaultRequired("KAFKA_MATCH_COMPLETED_TOPIC", DefaultMatchCompletedTopic)
+	if err != nil {
+		return MatchCompletedKafkaConfig{}, false, err
+	}
+	readyTopic, err := envOrDefaultRequired("KAFKA_ROOM_RUNTIME_READY_TOPIC", DefaultRoomRuntimeReadyTopic)
+	if err != nil {
+		return MatchCompletedKafkaConfig{}, false, err
+	}
+	readyDLQ, err := envOrDefaultRequired("KAFKA_ROOM_RUNTIME_READY_DLQ_TOPIC", DefaultRoomRuntimeReadyDLQTopic)
 	if err != nil {
 		return MatchCompletedKafkaConfig{}, false, err
 	}
@@ -79,13 +91,15 @@ func LoadMatchCompletedKafkaConfigFromEnv() (MatchCompletedKafkaConfig, bool, er
 	}
 
 	return MatchCompletedKafkaConfig{
-		Brokers:             brokers,
-		Group:               group,
-		Topic:               topic,
-		DLQTopic:            dlq,
-		MaxAttempts:         maxAttempts,
-		RetryBackoff:        defaultMatchCompletedRetryBack,
-		MaxPartitionWorkers: maxWorkers,
+		Brokers:              brokers,
+		Group:                group,
+		Topic:                topic,
+		RuntimeReadyTopic:    readyTopic,
+		DLQTopic:             dlq,
+		RuntimeReadyDLQTopic: readyDLQ,
+		MaxAttempts:          maxAttempts,
+		RetryBackoff:         defaultMatchCompletedRetryBack,
+		MaxPartitionWorkers:  maxWorkers,
 	}, true, nil
 }
 

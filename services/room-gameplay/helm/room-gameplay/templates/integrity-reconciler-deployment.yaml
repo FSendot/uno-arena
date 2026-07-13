@@ -1,0 +1,67 @@
+{{- if .Values.integrityReconciler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-integrity-reconciler
+  labels:
+    app: {{ .Release.Name }}-integrity-reconciler
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+    unoarena.io/component: room-integrity-reconciler
+spec:
+  replicas: {{ .Values.integrityReconciler.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-integrity-reconciler
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-integrity-reconciler
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+        unoarena.io/component: room-integrity-reconciler
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: integrity-reconciler
+          image: {{ include "room-gameplay.image" . | quote }}
+          imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
+          env:
+            - name: WORKER_ROLE
+              value: "room-integrity-reconciler"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            - name: GAME_INTEGRITY_URL
+              value: {{ .Values.env.GAME_INTEGRITY_URL | quote }}
+            - name: ROOM_INTEGRITY_RECONCILER_CLAIM_BATCH
+              value: {{ .Values.integrityReconciler.claimBatch | quote }}
+            - name: ROOM_INTEGRITY_RECONCILER_LEASE_SECONDS
+              value: {{ .Values.integrityReconciler.leaseSeconds | quote }}
+            - name: ROOM_INTEGRITY_RECONCILER_INTERVAL_MILLIS
+              value: {{ .Values.integrityReconciler.intervalMillis | quote }}
+            {{- if .Values.existingSecret }}
+            - name: ROOM_PGBOUNCER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ .Values.secretEnv.ROOM_PGBOUNCER_URL | quote }}
+            - name: GAME_INTEGRITY_INTERNAL_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ .Values.secretEnv.GAME_INTEGRITY_INTERNAL_CREDENTIAL | quote }}
+            - name: GAME_INTEGRITY_AUDIT_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | quote }}
+                  key: {{ .Values.secretEnv.GAME_INTEGRITY_AUDIT_CREDENTIAL | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

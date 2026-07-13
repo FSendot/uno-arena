@@ -34,6 +34,21 @@ echo "${kind_out}" | grep -q 'default_pool_size = 4'
 echo "${kind_out}" | grep -q 'auth_type = plain'
 echo "${kind_out}" | grep -q 'ROOM_RUNTIME_SECRET_ENV_JSON'
 echo "${kind_out}" | grep -q 'room-runtime-router-credential'
+echo "${kind_out}" | grep -q 'name: room-kind-integrity-reconciler'
+
+reconciler_doc="$(echo "${kind_out}" | awk '/name: room-kind-integrity-reconciler$/,/^---$/')"
+echo "${reconciler_doc}" | grep -q 'replicas: 2'
+echo "${reconciler_doc}" | grep -q 'value: "room-integrity-reconciler"'
+echo "${reconciler_doc}" | grep -q 'ROOM_INTEGRITY_RECONCILER_CLAIM_BATCH'
+echo "${reconciler_doc}" | grep -q 'key: "room-pgbouncer-database-url"'
+echo "${reconciler_doc}" | grep -q 'key: "game-integrity-internal-credential"'
+echo "${reconciler_doc}" | grep -q 'key: "game-integrity-audit-credential"'
+! echo "${reconciler_doc}" | grep -Eq 'name: (SERVICE_CREDENTIAL|ROOM_SERVICE_CREDENTIAL|GATEWAY_SERVICE_CREDENTIAL)$'
+! echo "${reconciler_doc}" | grep -q 'IDENTITY_SERVICE_CREDENTIAL'
+! echo "${reconciler_doc}" | grep -q 'ROOM_TIMER_SERVICE_CREDENTIAL'
+! echo "${reconciler_doc}" | grep -q 'ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL'
+! echo "${reconciler_doc}" | grep -q 'ROOM_ANALYTICS_BACKFILL'
+! echo "${reconciler_doc}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
 
 controller_doc="$(echo "${kind_out}" | awk '/name: room-kind-runtime-controller$/,/^---$/')"
 test "$(echo "${controller_doc}" | grep -c 'secretKeyRef:')" -eq 1
@@ -60,9 +75,15 @@ echo "${kind_out}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
 echo "${kind_out}" | grep -q 'key: "room-public-list-cursor-secret"'
 # Timer worker must not receive Analytics backfill auth, public-list cursor, or cursor MAC secrets.
 timer_doc="$(echo "${kind_out}" | awk '/name: room-kind-timer-worker$/,/^---$/')"
+echo "${timer_doc}" | grep -q 'key: "room-timer-service-credential"'
+echo "${timer_doc}" | grep -q 'key: "room-pgbouncer-database-url"'
 ! echo "${timer_doc}" | grep -q 'ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET'
 ! echo "${timer_doc}" | grep -q 'ROOM_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
 ! echo "${timer_doc}" | grep -q 'ROOM_PUBLIC_LIST_CURSOR_SECRET'
+! echo "${timer_doc}" | grep -Eq 'name: (SERVICE_CREDENTIAL|ROOM_SERVICE_CREDENTIAL|GATEWAY_SERVICE_CREDENTIAL)$'
+! echo "${timer_doc}" | grep -q 'IDENTITY_SERVICE_CREDENTIAL'
+! echo "${timer_doc}" | grep -q 'GAME_INTEGRITY_INTERNAL_CREDENTIAL'
+! echo "${timer_doc}" | grep -q 'ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL'
 
 if "${HELM}" template room-staging "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.staging.yaml" >/dev/null 2>&1; then
   echo "staging without digest must fail" >&2

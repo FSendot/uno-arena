@@ -71,6 +71,7 @@ flowchart TB
 
     subgraph Workers["Workers"]
         TimerWorker["Room Timer Worker"]
+        IntegrityReconciler["Room Integrity Reconciler"]
         TournamentWorkers["Sharded Tournament Provisioning Workers"]
         ProjectionWorkers["Projection Rebuilders"]
         BootstrapJobs["Context Postgres Bootstrap Jobs"]
@@ -115,6 +116,8 @@ flowchart TB
     BFF --> Kafka
     TimerWorker --> Redis
     TimerWorker --> RoomDB
+    IntegrityReconciler --> RoomDB
+    IntegrityReconciler --> KurrentDB
     TournamentWorkers --> TourneyDB
     TournamentWorkers --> RoomSvc
     ProjectionWorkers --> Kafka

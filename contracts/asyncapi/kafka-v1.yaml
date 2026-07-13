@@ -133,6 +133,23 @@ channels:
         x-idempotencyKey: "(roomId, completionVersion)"
         x-partitionKey: roomId
 
+  room.runtime.ready:
+    description: Room Gameplay publishes the first durable playable observation for a tournament room. Runtime replacements do not republish it.
+    publish:
+      operationId: publishRoomRuntimeReady
+      message:
+        $ref: "#/components/messages/RoomRuntimeReady"
+    bindings:
+      kafka:
+        bindingVersion: 0.4.0
+        topic: room.runtime.ready
+        partitions: 32
+        key:
+          type: string
+          description: Partition key = roomId
+        x-idempotencyKey: eventId
+        x-partitionKey: roomId
+
   room.spectator-safe.events:
     description: Privacy-filtered room events for Spectator View.
     publish:
@@ -461,6 +478,27 @@ components:
                   type: string
               isAbandoned:
                 type: boolean
+
+    RoomRuntimeReady:
+      name: RoomRuntimeReady
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/EventMetadata"
+          - type: object
+            required: [roomId, tournamentId, roundNumber, slotId, generation]
+            properties:
+              roomId:
+                type: string
+              tournamentId:
+                type: string
+              roundNumber:
+                type: integer
+                minimum: 1
+              slotId:
+                type: string
+              generation:
+                type: integer
+                minimum: 1
 
     SpectatorSafeEvent:
       name: SpectatorSafeEvent

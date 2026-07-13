@@ -17,12 +17,22 @@ env:
   REDIS_URL: redis://redis:6379/2
   KAFKA_BROKERS: kafka:9092
   # Durable mode when DATABASE_URL is set (secret). Capability mode remains
-  # ROOM_CAPABILITY_MODE for offline stacks. Debezium CDC delivery is PENDING.
+  # ROOM_CAPABILITY_MODE for offline stacks. The Room process only appends its
+  # outboxes; external Kafka Connect and Debezium Server pipelines deliver them.
 
-# Timer worker enabled in values.kind.yaml; staging/production keep false until
-# Redis timer index + CDC sink ops are fully rolled out.
+# Timer worker is enabled by the kind overlay. Other environments opt in only
+# after their independent worker operations are provisioned; it is not a CDC relay.
 timerWorker:
   enabled: false
+
+# Bounded GI-success/local-commit repair worker. It owns no HTTP routes and
+# receives only Room Postgres/Redis plus Game Integrity credentials.
+integrityReconciler:
+  enabled: false
+  replicaCount: 2
+  claimBatch: 32
+  leaseSeconds: 60
+  intervalMillis: 2000
 
 # Durable Kubernetes topology: the stable router and leaderless controller are
 # deployments; active Rooms are controller-created bare Pods only.
@@ -99,7 +109,6 @@ secretEnv:
 controllerSecretEnv:
   DATABASE_URL: database-url
 runtimeSecretEnv:
-  SERVICE_CREDENTIAL: room-service-credential
   ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
   IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential

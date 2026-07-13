@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -70,7 +71,9 @@ func (s *SessionStore) beginReconciliationIntentRaw(ctx context.Context, intent 
 			_, err = tx.Exec(ctx, `
 				UPDATE pending_integrity_reconciliations
 				SET expected_revision = $2, payload = $3, status = 'pending',
-				    log_offset = NULL, revision = NULL, completed_at = NULL
+				    log_offset = NULL, revision = NULL, completed_at = NULL,
+				    lease_owner = NULL, lease_until = NULL, attempts = 0,
+				    next_attempt_at = clock_timestamp() + interval '30 seconds'
 				WHERE command_id = $1 AND status = 'cancelled'
 			`, intent.CommandID, intent.ExpectedRevision, payload)
 		case "done":
@@ -85,8 +88,8 @@ func (s *SessionStore) beginReconciliationIntentRaw(ctx context.Context, intent 
 	case errors.Is(err, pgx.ErrNoRows):
 		_, err = tx.Exec(ctx, `
 			INSERT INTO pending_integrity_reconciliations
-				(command_id, room_id, expected_revision, payload, status)
-			VALUES ($1, $2, $3, $4, 'pending')
+				(command_id, room_id, expected_revision, payload, status, next_attempt_at)
+			VALUES ($1, $2, $3, $4, 'pending', clock_timestamp() + interval '30 seconds')
 		`, intent.CommandID, intent.RoomID, intent.ExpectedRevision, payload)
 		if err != nil {
 			return wrapUnavailable(err)
@@ -128,7 +131,7 @@ func (s *SessionStore) FinalizeReconciliationIntent(ctx context.Context, command
 func (s *SessionStore) CancelReconciliationIntent(ctx context.Context, commandID string) error {
 	_, err := s.intentPool.Exec(ctx, `
 		UPDATE pending_integrity_reconciliations
-		SET status = 'cancelled', completed_at = now()
+		SET status = 'cancelled', completed_at = clock_timestamp()
 		WHERE command_id = $1 AND status = 'pending'
 	`, commandID)
 	return wrapUnavailable(err)
@@ -206,6 +209,191 @@ func (s *SessionStore) ListPendingReconciliationMarkers(ctx context.Context, lim
 	return out, rows.Err()
 }
 
+// ClaimPendingReconciliationMarkers leases a bounded repair batch. Candidate
+// rows are locked with SKIP LOCKED so replicas never block one another.
+func (s *SessionStore) ClaimPendingReconciliationMarkers(ctx context.Context, owner string, limit int, lease time.Duration) ([]app.ReconciliationMarker, error) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil, fmt.Errorf("reconciliation claim owner required")
+	}
+	if limit <= 0 {
+		limit = 32
+	}
+	if limit > 128 {
+		limit = 128
+	}
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT command_id
+			FROM pending_integrity_reconciliations
+			WHERE status = 'pending'
+			  AND next_attempt_at <= clock_timestamp()
+			  AND (lease_until IS NULL OR lease_until <= clock_timestamp())
+			ORDER BY next_attempt_at ASC, created_at ASC, command_id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE pending_integrity_reconciliations AS pending
+		SET lease_owner = $2,
+		    lease_until = clock_timestamp() + ($3 * interval '1 second'),
+		    attempts = pending.attempts + 1
+		FROM candidates
+		WHERE pending.command_id = candidates.command_id
+		RETURNING pending.command_id, pending.room_id, pending.expected_revision,
+		          pending.log_offset, pending.revision, pending.payload, pending.attempts
+	`, limit, owner, lease.Seconds())
+	if err != nil {
+		return nil, wrapUnavailable(err)
+	}
+	defer rows.Close()
+	var out []app.ReconciliationMarker
+	for rows.Next() {
+		var marker app.ReconciliationMarker
+		var logOffset, revision *int64
+		var payload []byte
+		if err := rows.Scan(&marker.CommandID, &marker.RoomID, &marker.ExpectedRevision, &logOffset, &revision, &payload, &marker.Attempts); err != nil {
+			return nil, wrapUnavailable(err)
+		}
+		marker.Payload = payload
+		if logOffset != nil {
+			marker.LogOffset = *logOffset
+			marker.HasLogOffset = true
+		}
+		if revision != nil {
+			marker.Revision = *revision
+		}
+		out = append(out, marker)
+	}
+	return out, wrapUnavailable(rows.Err())
+}
+
+// ReconcileClaimedMarker verifies the worker lease before applying one repair.
+func (s *SessionStore) ReconcileClaimedMarker(ctx context.Context, integrity app.GameIntegrity, deals app.DealSource, marker app.ReconciliationMarker, owner string) error {
+	if err := s.requireLiveReconciliationClaim(ctx, marker.CommandID, owner); err != nil {
+		return err
+	}
+	return s.reconcileOneClaimed(ctx, integrity, deals, marker, owner)
+}
+
+// RenewReconciliationClaim extends only the caller's still-live marker lease.
+// A false result means the worker must stop using the marker immediately.
+func (s *SessionStore) RenewReconciliationClaim(ctx context.Context, commandID, owner string, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_integrity_reconciliations
+		SET lease_until = clock_timestamp() + ($3 * interval '1 second')
+		WHERE command_id = $1 AND status = 'pending'
+		  AND lease_owner = $2 AND lease_until > clock_timestamp()
+	`, commandID, owner, lease.Seconds())
+	if err != nil {
+		return false, wrapUnavailable(err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReleaseReconciliationClaim returns one failed marker after bounded backoff.
+func (s *SessionStore) ReleaseReconciliationClaim(ctx context.Context, commandID, owner string, retryDelay time.Duration) error {
+	if retryDelay < 0 {
+		retryDelay = 0
+	}
+	if retryDelay > 30*time.Second {
+		retryDelay = 30 * time.Second
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE pending_integrity_reconciliations
+		SET lease_owner = NULL, lease_until = NULL,
+		    next_attempt_at = clock_timestamp() + ($3 * interval '1 second')
+		WHERE command_id = $1 AND status = 'pending'
+		  AND lease_owner = $2 AND lease_until > clock_timestamp()
+	`, commandID, owner, retryDelay.Seconds())
+	return wrapUnavailable(err)
+}
+
+// ClaimTimerIndexRebuild acquires the Room-context timer rebuild lease. A
+// completion newer than this worker's start fences sibling rollout replicas.
+func (s *SessionStore) ClaimTimerIndexRebuild(ctx context.Context, owner string, workerStarted time.Time, lease time.Duration) (bool, error) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return false, fmt.Errorf("timer rebuild owner required")
+	}
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO room_maintenance_leases (lease_name)
+		VALUES ('timer-index-rebuild')
+		ON CONFLICT (lease_name) DO NOTHING
+	`); err != nil {
+		return false, wrapUnavailable(err)
+	}
+	var claimed bool
+	err := s.pool.QueryRow(ctx, `
+		WITH claimed AS (
+			UPDATE room_maintenance_leases
+			SET lease_owner = $1,
+			    lease_until = now() + ($3 * interval '1 second'),
+			    updated_at = now()
+			WHERE lease_name = 'timer-index-rebuild'
+			  AND (lease_until IS NULL OR lease_until <= now())
+			  AND (completed_at IS NULL OR completed_at < $2)
+			RETURNING 1
+		)
+		SELECT EXISTS(SELECT 1 FROM claimed)
+	`, owner, workerStarted.UTC(), lease.Seconds()).Scan(&claimed)
+	return claimed, wrapUnavailable(err)
+}
+
+// TimerIndexRebuildCompletedSince reports whether a sibling timer replica
+// completed this rollout's guarded rebuild.
+func (s *SessionStore) TimerIndexRebuildCompletedSince(ctx context.Context, workerStarted time.Time) (bool, error) {
+	var completed bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM room_maintenance_leases
+			WHERE lease_name = 'timer-index-rebuild' AND completed_at >= $1
+		)
+	`, workerStarted.UTC()).Scan(&completed)
+	return completed, wrapUnavailable(err)
+}
+
+// RenewTimerIndexRebuild extends only a live lease owned by this replica.
+func (s *SessionStore) RenewTimerIndexRebuild(ctx context.Context, owner string, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		lease = time.Minute
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE room_maintenance_leases
+		SET lease_until = now() + ($2 * interval '1 second'), updated_at = now()
+		WHERE lease_name = 'timer-index-rebuild'
+		  AND lease_owner = $1 AND lease_until > now()
+	`, owner, lease.Seconds())
+	if err != nil {
+		return false, wrapUnavailable(err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// CompleteTimerIndexRebuild records completion and releases the caller's lease.
+func (s *SessionStore) CompleteTimerIndexRebuild(ctx context.Context, owner string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE room_maintenance_leases
+		SET lease_owner = NULL, lease_until = NULL, completed_at = now(), updated_at = now()
+		WHERE lease_name = 'timer-index-rebuild' AND lease_owner = $1 AND lease_until > now()
+	`, owner)
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("timer rebuild lease not owned by %s", owner)
+	}
+	return nil
+}
+
 // IsProcessedReconciliationOffset reports whether (room_id, log_offset) was already applied.
 func (s *SessionStore) IsProcessedReconciliationOffset(ctx context.Context, roomID string, logOffset int64) (bool, error) {
 	var exists bool
@@ -222,7 +410,7 @@ func (s *SessionStore) IsProcessedReconciliationOffset(ctx context.Context, room
 func (s *SessionStore) MarkReconciliationDone(ctx context.Context, commandID string) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE pending_integrity_reconciliations
-		SET status = 'done', completed_at = now()
+		SET status = 'done', completed_at = clock_timestamp()
 		WHERE command_id = $1 AND status = 'pending'
 	`, commandID)
 	return wrapUnavailable(err)
@@ -244,6 +432,12 @@ func (s *SessionStore) ReconcilePending(ctx context.Context, integrity app.GameI
 }
 
 func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameIntegrity, deals app.DealSource, m app.ReconciliationMarker) error {
+	return s.reconcileOneClaimed(ctx, integrity, deals, m, "")
+}
+
+// reconcileOneClaimed performs one repair. When owner is non-empty, every
+// durable marker transition is fenced by that owner and a still-live lease.
+func (s *SessionStore) reconcileOneClaimed(ctx context.Context, integrity app.GameIntegrity, deals app.DealSource, m app.ReconciliationMarker, owner string) error {
 	var blob app.ReconciliationRepairBlob
 	if err := json.Unmarshal(m.Payload, &blob); err != nil {
 		return fmt.Errorf("repair blob: %w", err)
@@ -286,7 +480,7 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 			if err != nil {
 				return fmt.Errorf("gi deterministic reappend command=%s room=%s: %w", m.CommandID, m.RoomID, err)
 			}
-			if err := s.FinalizeReconciliationIntent(ctx, m.CommandID, appendRes.LogOffset, appendRes.Revision); err != nil {
+			if err := s.finalizeReconciliationIntentClaimed(ctx, m.CommandID, appendRes.LogOffset, appendRes.Revision, owner); err != nil {
 				return err
 			}
 			m.LogOffset = appendRes.LogOffset
@@ -300,7 +494,7 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 			if err != nil {
 				return err
 			}
-			if err := s.FinalizeReconciliationIntent(ctx, m.CommandID, found.Offset, rev); err != nil {
+			if err := s.finalizeReconciliationIntentClaimed(ctx, m.CommandID, found.Offset, rev, owner); err != nil {
 				return err
 			}
 			m.LogOffset = found.Offset
@@ -314,7 +508,7 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 		return err
 	}
 	if processed {
-		return s.MarkReconciliationDone(ctx, m.CommandID)
+		return s.markReconciliationDoneClaimed(ctx, m.CommandID, owner)
 	}
 
 	replay, err := integrity.Replay(ctx, m.RoomID, m.LogOffset)
@@ -349,6 +543,11 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 
 	// Reservation action before local snapshot/outbox repair.
 	if blob.ReservationID != "" && blob.ReservationAction != "" {
+		if owner != "" {
+			if err := s.requireLiveReconciliationClaim(ctx, m.CommandID, owner); err != nil {
+				return err
+			}
+		}
 		if deals == nil {
 			return fmt.Errorf("reservation recovery requires DealSource (leave pending)")
 		}
@@ -382,12 +581,8 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 	}
 	if roomExists {
 		if integrityOffset >= m.Revision {
-			if _, err := tx.Exec(ctx, `
-				UPDATE pending_integrity_reconciliations
-				SET status = 'done', completed_at = now()
-				WHERE command_id = $1 AND status = 'pending'
-			`, m.CommandID); err != nil {
-				return wrapUnavailable(err)
+			if err := markReconciliationDoneTx(ctx, tx, m.CommandID, owner); err != nil {
+				return err
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO processed_reconciliation_offsets (room_id, log_offset, notes)
@@ -476,18 +671,86 @@ func (s *SessionStore) reconcileOne(ctx context.Context, integrity app.GameInteg
 	`, m.RoomID, m.LogOffset); err != nil {
 		return wrapUnavailable(err)
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE pending_integrity_reconciliations
-		SET status = 'done', completed_at = now()
-		WHERE command_id = $1 AND status = 'pending'
-	`, m.CommandID); err != nil {
-		return wrapUnavailable(err)
+	if err := markReconciliationDoneTx(ctx, tx, m.CommandID, owner); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return wrapUnavailable(err)
 	}
 	if s.Timers != nil && sess != nil {
 		_ = scheduleTimersFromSession(ctx, s.Timers, sess)
+	}
+	return nil
+}
+
+func (s *SessionStore) requireLiveReconciliationClaim(ctx context.Context, commandID, owner string) error {
+	var owned bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM pending_integrity_reconciliations
+			WHERE command_id = $1 AND status = 'pending'
+			  AND lease_owner = $2 AND lease_until > clock_timestamp()
+		)
+	`, commandID, owner).Scan(&owned); err != nil {
+		return wrapUnavailable(err)
+	}
+	if !owned {
+		return fmt.Errorf("reconciliation claim lost command=%s owner=%s", commandID, owner)
+	}
+	return nil
+}
+
+func (s *SessionStore) finalizeReconciliationIntentClaimed(ctx context.Context, commandID string, logOffset, revision int64, owner string) error {
+	if owner == "" {
+		return s.FinalizeReconciliationIntent(ctx, commandID, logOffset, revision)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_integrity_reconciliations
+		SET log_offset = $2, revision = $3
+		WHERE command_id = $1 AND status = 'pending'
+		  AND lease_owner = $4 AND lease_until > clock_timestamp()
+	`, commandID, logOffset, revision, owner)
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("reconciliation claim lost command=%s owner=%s", commandID, owner)
+	}
+	return nil
+}
+
+func (s *SessionStore) markReconciliationDoneClaimed(ctx context.Context, commandID, owner string) error {
+	if owner == "" {
+		return s.MarkReconciliationDone(ctx, commandID)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := markReconciliationDoneTx(ctx, tx, commandID, owner); err != nil {
+		return err
+	}
+	return wrapUnavailable(tx.Commit(ctx))
+}
+
+func markReconciliationDoneTx(ctx context.Context, tx pgx.Tx, commandID, owner string) error {
+	query := `
+		UPDATE pending_integrity_reconciliations
+		SET status = 'done', completed_at = clock_timestamp()
+		WHERE command_id = $1 AND status = 'pending'
+	`
+	args := []any{commandID}
+	if owner != "" {
+		query += " AND lease_owner = $2 AND lease_until > clock_timestamp()"
+		args = append(args, owner)
+	}
+	tag, err := tx.Exec(ctx, query, args...)
+	if err != nil {
+		return wrapUnavailable(err)
+	}
+	if owner != "" && tag.RowsAffected() != 1 {
+		return fmt.Errorf("reconciliation claim lost command=%s owner=%s", commandID, owner)
 	}
 	return nil
 }

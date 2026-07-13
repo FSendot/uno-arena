@@ -14,6 +14,7 @@
 - Admit spectators only while a room is `waiting`, `locked`, or `in_progress` subject to public/private authorization; deny new connections and close existing streams after `RoomCompleted` or `RoomCancelled`.
 - Keep microservices off the public internet; the BFF is the only external surface.
 - Enroll production application, worker, CDC, and datastore namespaces in Istio Ambient; require strict mTLS and dedicated Kubernetes service accounts with default-deny L4 authorization.
+- Treat the stable Room router as an application authorization boundary: route-specific caller credentials and BFF-derived player principals are validated before pod lookup, then replaced by a scoped router credential plus generation only for the internal runtime hop.
 - Room PgBouncer renders a workload-scoped strict-mTLS policy in staging/production and additionally requires SCRAM-SHA-256 plus TLS on client and server database legs. Helm rejects a staging/production topology that omits any of those controls; the explicit local kind profile is the only plaintext exception.
 - Use the repo-owned simple CLI as the sole client/test interface for this implementation; deferred graphical clients must preserve the BFF-only REST/SSE boundary.
 

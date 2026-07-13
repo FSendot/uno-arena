@@ -65,6 +65,18 @@ func TestSpectatorSafeEventSchema(t *testing.T) {
 	}
 }
 
+func TestRoomRuntimeReadySchema(t *testing.T) {
+	schema := loadContractSchema(t, "../contracts/room.runtime.ready.schema.json")
+	valid := decodeContractPayload(t, `{"schemaVersion":1,"eventId":"room-runtime-ready:r1","eventType":"RoomRuntimeReady","correlationId":"room-runtime-ready:r1","occurredAt":"2026-07-13T12:00:00Z","roomId":"r1","tournamentId":"t1","roundNumber":1,"slotId":"s1","generation":1}`)
+	if err := validateContractPayload(schema, valid); err != nil {
+		t.Fatalf("valid readiness payload: %v", err)
+	}
+	delete(valid, "generation")
+	if err := validateContractPayload(schema, valid); err == nil {
+		t.Fatal("generation must be required")
+	}
+}
+
 func loadContractSchema(t *testing.T, relativePath string) contractSchema {
 	t.Helper()
 

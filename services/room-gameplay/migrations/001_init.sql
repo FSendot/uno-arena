@@ -16,9 +16,10 @@
 --  10. player_stream_highwater
 --  11. pending_rejection_audits
 --  12. pending_integrity_reconciliations
---  13. integration_outbox_events
---  14. realtime_outbox_events
---  15. processed_reconciliation_offsets
+--  13. room_maintenance_leases
+--  14. integration_outbox_events
+--  15. realtime_outbox_events
+--  16. processed_reconciliation_offsets
 -- schema_bootstrap_meta is bootstrap-owned and is NOT created by this migration.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -352,6 +353,10 @@ CREATE TABLE IF NOT EXISTS pending_integrity_reconciliations (
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'done', 'cancelled')),
+    lease_owner TEXT,
+    lease_until TIMESTAMPTZ,
+    attempts INT NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '30 seconds'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ
 );
@@ -360,12 +365,26 @@ COMMENT ON TABLE pending_integrity_reconciliations IS
     'Durable GI reconciliation intent keyed by command_id. Inserted before Append; finalized with log_offset/revision after success; worker repairs pending intents.';
 
 CREATE INDEX IF NOT EXISTS pending_integrity_reconciliations_pending_idx
-    ON pending_integrity_reconciliations (status, created_at)
+    ON pending_integrity_reconciliations (status, next_attempt_at, created_at)
     WHERE status = 'pending';
 
 -- ---------------------------------------------------------------------------
--- Integration outbox (lock order #13; Kafka via Debezium Outbox Event Router). NO published_at.
--- Append-only. Lock order #13.
+-- Context-wide maintenance leases (lock order #13).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS room_maintenance_leases (
+    lease_name TEXT PRIMARY KEY,
+    lease_owner TEXT,
+    lease_until TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE room_maintenance_leases IS
+    'Room-context leases for global maintenance such as Redis timer-index rebuild; never acquired by dedicated runtimes or routers.';
+
+-- ---------------------------------------------------------------------------
+-- Integration outbox (lock order #14; Kafka via Debezium Outbox Event Router). NO published_at.
+-- Append-only. Lock order #14.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS integration_outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
@@ -398,8 +417,8 @@ CREATE INDEX IF NOT EXISTS integration_outbox_events_topic_outbox_idx
     ON integration_outbox_events (topic, outbox_id);
 
 -- ---------------------------------------------------------------------------
--- Realtime outbox (lock order #14; Redis Streams via Debezium Server). NO published_at.
--- Append-only. Lock order #14.
+-- Realtime outbox (lock order #15; Redis Streams via Debezium Server). NO published_at.
+-- Append-only. Lock order #15.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS realtime_outbox_events (
     outbox_id BIGSERIAL PRIMARY KEY,
@@ -432,7 +451,7 @@ CREATE INDEX IF NOT EXISTS realtime_outbox_events_created_idx
     ON realtime_outbox_events (created_at);
 
 -- ---------------------------------------------------------------------------
--- Processed reconciliation offsets (lock order #15). Idempotent by (room, offset).
+-- Processed reconciliation offsets (lock order #16). Idempotent by (room, offset).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS processed_reconciliation_offsets (
     room_id TEXT NOT NULL,

@@ -42,3 +42,12 @@ func TestDLQHeaders_SanitizedOperationalMetadata(t *testing.T) {
 		t.Fatalf("missing timestamps: %+v", got)
 	}
 }
+
+func TestDLQTopicForSource_IsConsumerOwnedPerTopic(t *testing.T) {
+	if got := dlqTopicForSource(DefaultRoomRuntimeReadyTopic, DefaultRoomRuntimeReadyTopic, DefaultMatchCompletedDLQTopic, DefaultRoomRuntimeReadyDLQTopic); got != DefaultRoomRuntimeReadyDLQTopic {
+		t.Fatalf("readiness DLQ=%q", got)
+	}
+	if got := dlqTopicForSource(DefaultMatchCompletedTopic, DefaultRoomRuntimeReadyTopic, DefaultMatchCompletedDLQTopic, DefaultRoomRuntimeReadyDLQTopic); got != DefaultMatchCompletedDLQTopic {
+		t.Fatalf("match DLQ=%q", got)
+	}
+}

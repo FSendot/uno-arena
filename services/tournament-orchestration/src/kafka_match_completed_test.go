@@ -319,12 +319,14 @@ func newTestConsumer(src *fakeSource, dlq *fakeDLQ, h *fakeHandler) *MatchComple
 		dlq:     dlq,
 		handler: h,
 		cfg: MatchCompletedKafkaConfig{
-			Group:               DefaultTournamentKafkaGroup,
-			Topic:               DefaultMatchCompletedTopic,
-			DLQTopic:            DefaultMatchCompletedDLQTopic,
-			MaxAttempts:         3,
-			RetryBackoff:        time.Millisecond,
-			MaxPartitionWorkers: 4,
+			Group:                DefaultTournamentKafkaGroup,
+			Topic:                DefaultMatchCompletedTopic,
+			RuntimeReadyTopic:    DefaultRoomRuntimeReadyTopic,
+			DLQTopic:             DefaultMatchCompletedDLQTopic,
+			RuntimeReadyDLQTopic: DefaultRoomRuntimeReadyDLQTopic,
+			MaxAttempts:          3,
+			RetryBackoff:         time.Millisecond,
+			MaxPartitionWorkers:  4,
 		},
 		clock: fixedClock{now: time.Date(2026, 7, 11, 16, 0, 0, 0, time.UTC)},
 		sleep: func(ctx context.Context, d time.Duration) error {
@@ -986,7 +988,9 @@ func TestLoadMatchCompletedKafkaConfig_DefaultsAndFailClosed(t *testing.T) {
 		for _, k := range []string{
 			"KAFKA_CONSUMER_GROUP",
 			"KAFKA_MATCH_COMPLETED_TOPIC",
+			"KAFKA_ROOM_RUNTIME_READY_TOPIC",
 			"KAFKA_MATCH_COMPLETED_DLQ_TOPIC",
+			"KAFKA_ROOM_RUNTIME_READY_DLQ_TOPIC",
 			"KAFKA_MATCH_COMPLETED_MAX_ATTEMPTS",
 			"KAFKA_MATCH_COMPLETED_MAX_PARTITION_WORKERS",
 		} {
@@ -998,7 +1002,7 @@ func TestLoadMatchCompletedKafkaConfig_DefaultsAndFailClosed(t *testing.T) {
 		if err != nil || !enabled {
 			t.Fatalf("enabled=%v err=%v", enabled, err)
 		}
-		if cfg.Group != DefaultTournamentKafkaGroup || cfg.Topic != DefaultMatchCompletedTopic || cfg.DLQTopic != DefaultMatchCompletedDLQTopic {
+		if cfg.Group != DefaultTournamentKafkaGroup || cfg.Topic != DefaultMatchCompletedTopic || cfg.RuntimeReadyTopic != DefaultRoomRuntimeReadyTopic || cfg.DLQTopic != DefaultMatchCompletedDLQTopic || cfg.RuntimeReadyDLQTopic != DefaultRoomRuntimeReadyDLQTopic {
 			t.Fatalf("defaults: %+v", cfg)
 		}
 		if cfg.MaxPartitionWorkers != defaultMatchCompletedPartitionWorkers {
@@ -1039,6 +1043,19 @@ func TestLoadMatchCompletedKafkaConfig_DefaultsAndFailClosed(t *testing.T) {
 		_, _, err := LoadMatchCompletedKafkaConfigFromEnv()
 		if err == nil {
 			t.Fatal("blank dlq must fail closed")
+		}
+	})
+
+	t.Run("blank_readiness_dlq_fail_closed", func(t *testing.T) {
+		t.Setenv("KAFKA_BROKERS", "kafka.uno-arena.svc.cluster.local:9092")
+		t.Setenv("KAFKA_CONSUMER_GROUP", DefaultTournamentKafkaGroup)
+		t.Setenv("KAFKA_MATCH_COMPLETED_TOPIC", DefaultMatchCompletedTopic)
+		t.Setenv("KAFKA_ROOM_RUNTIME_READY_TOPIC", DefaultRoomRuntimeReadyTopic)
+		t.Setenv("KAFKA_MATCH_COMPLETED_DLQ_TOPIC", DefaultMatchCompletedDLQTopic)
+		t.Setenv("KAFKA_ROOM_RUNTIME_READY_DLQ_TOPIC", "   ")
+		_, _, err := LoadMatchCompletedKafkaConfigFromEnv()
+		if err == nil {
+			t.Fatal("blank readiness DLQ must fail closed")
 		}
 	})
 }

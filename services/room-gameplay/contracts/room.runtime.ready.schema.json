@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://uno-arena.local/contracts/room.runtime.ready.schema.json",
+  "title": "RoomRuntimeReady",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "eventType",
+    "correlationId",
+    "occurredAt",
+    "roomId",
+    "tournamentId",
+    "roundNumber",
+    "slotId",
+    "generation"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "eventType": { "type": "string", "const": "RoomRuntimeReady" },
+    "correlationId": { "type": "string", "minLength": 1 },
+    "causationId": { "type": "string", "minLength": 1 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "roomId": { "type": "string", "minLength": 1 },
+    "tournamentId": { "type": "string", "minLength": 1 },
+    "roundNumber": { "type": "integer", "minimum": 1 },
+    "slotId": { "type": "string", "minLength": 1 },
+    "generation": { "type": "integer", "minimum": 1 }
+  }
+}

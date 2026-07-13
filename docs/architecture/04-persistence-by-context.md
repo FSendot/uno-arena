@@ -75,6 +75,7 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers t
 - Redis scheduling uses sorted-set buckets partitioned by stable `roomId` hash and timer family. Lua claims move due entries into visibility-leased in-flight sets; workers acknowledge success/stale outcomes and a reaper retries expired leases.
 - Redis scheduling indexes are rebuilt from open Postgres deadlines after loss. Rebuild and ordinary duplicate delivery use the same stable timer identities and Room-side revalidation.
 - Room Postgres snapshots, deadlines, dedupe state, and outboxes recover through context PITR; Redis timers and feeds are rebuilt/reconciled after restore.
+- Only the `room-timer` role rebuilds the Redis timer index, guarded by a context-wide rebuild lease. Only bounded `room-integrity-reconciler` replicas claim Game Integrity repair markers with `FOR UPDATE SKIP LOCKED`; dedicated room runtimes and routers perform neither global operation.
 - The outbox bridges committed room state to downstream consumers.
 - Room Gameplay owns one database connection pool, one Kafka-bound Debezium connector, and one separate Redis-bound Debezium Server pipeline for its context-owned Postgres database.
 - Room's integration and realtime outboxes rotate and reclaim independently. Each sealed partition requires proof from its own pipeline offset; progress in one pipeline cannot authorize cleanup in the other.

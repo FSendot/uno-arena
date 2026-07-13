@@ -14,6 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -32,9 +33,55 @@ FACE = {
 
 
 class ClientError(RuntimeError):
-    def __init__(self, message: str, code: Any = "client_error") -> None:
+    def __init__(self, message: str, code: Any = "client_error", *,
+                 detail: Any = None, retry_after: str = "") -> None:
         super().__init__(message)
         self.code = code
+        self.detail = detail
+        self.retry_after = retry_after
+
+
+@dataclass(frozen=True)
+class RoomStartRetryPolicy:
+    """Bounded retry policy for explicitly safe room-read operations only."""
+
+    timeout_seconds: float = 60.0
+    interval_cap_seconds: float = 5.0
+    jitter_seconds: float = 0.25
+
+    @classmethod
+    def from_environment(cls) -> "RoomStartRetryPolicy":
+        raw = os.environ.get("UNOARENA_ROOM_START_TIMEOUT_SECONDS", "60")
+        try:
+            timeout = float(raw)
+        except ValueError as exc:
+            raise ClientError(
+                "UNOARENA_ROOM_START_TIMEOUT_SECONDS must be a non-negative number",
+                "invalid_configuration",
+            ) from exc
+        if not 0 <= timeout <= 3600:
+            raise ClientError(
+                "UNOARENA_ROOM_START_TIMEOUT_SECONDS must be between 0 and 3600",
+                "invalid_configuration",
+            )
+        return cls(timeout_seconds=timeout)
+
+    def retry_delay(self, retry_after: str, *, now: datetime | None = None) -> float:
+        base = 0.25
+        value = retry_after.strip()
+        if value:
+            try:
+                base = max(0.0, float(value))
+            except ValueError:
+                try:
+                    parsed = parsedate_to_datetime(value)
+                    current = now or datetime.now(timezone.utc)
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    base = max(0.0, (parsed - current).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    base = 0.25
+        return min(self.interval_cap_seconds, base + random.uniform(0.0, self.jitter_seconds))
 
 
 @dataclass
@@ -168,6 +215,7 @@ class Gateway:
     def __init__(self, base: str, token: str = "") -> None:
         self.base = base.rstrip("/")
         self.token = token
+        self.room_start_retry = RoomStartRetryPolicy.from_environment()
 
     def request(self, method: str, path: str, body: Any = None, *, auth: bool = True,
                 correlation_id: str | None = None) -> tuple[Any, str, int]:
@@ -190,7 +238,10 @@ class Gateway:
                 detail = json.loads(payload) if payload else {}
             except json.JSONDecodeError:
                 detail = payload.decode(errors="replace")
-            raise ClientError(f"HTTP {exc.code}: {detail}", exc.code) from exc
+            raise ClientError(
+                f"HTTP {exc.code}: {detail}", exc.code, detail=detail,
+                retry_after=exc.headers.get("Retry-After", ""),
+            ) from exc
         except (URLError, TimeoutError) as exc:
             raise ClientError(f"gateway request failed: {exc}", "timeout") from exc
 
@@ -207,8 +258,43 @@ class Gateway:
         return data
 
     def snapshot(self, room: str) -> dict[str, Any]:
-        data, _, _ = self.request("GET", f"/v1/rooms/{quote(room, safe='')}/snapshot")
+        data, _, _ = self.safe_room_read(f"/v1/rooms/{quote(room, safe='')}/snapshot")
         return data
+
+    def assignment(self, tournament: str, player: str) -> dict[str, Any]:
+        path = (
+            f"/v1/tournaments/{quote(tournament, safe='')}/players/"
+            f"{quote(player, safe='')}/assignment"
+        )
+        data, _, _ = self.safe_room_read(path)
+        return data
+
+    def safe_room_read(self, path: str) -> tuple[Any, str, int]:
+        """Retry only a known-safe snapshot/assignment GET while a room starts."""
+        deadline = time.monotonic() + self.room_start_retry.timeout_seconds
+        while True:
+            try:
+                return self.request("GET", path)
+            except ClientError as exc:
+                structured_starting = (
+                    exc.code == 503
+                    and isinstance(exc.detail, dict)
+                    and exc.detail.get("code") == "room_starting"
+                )
+                if not structured_starting:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ClientError(
+                        "room runtime did not become ready before the configured timeout",
+                        "room_start_timeout",
+                        detail=exc.detail,
+                    ) from exc
+                delay = min(
+                    remaining,
+                    self.room_start_retry.retry_delay(exc.retry_after),
+                )
+                time.sleep(delay)
 
     def command(self, room: str, kind: str, sequence: int, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
         command_id, corr = str(uuid.uuid4()), str(uuid.uuid4())
@@ -254,9 +340,15 @@ def command_with_resync(gateway: Gateway, room: str, snapshot: dict[str, Any], k
     try:
         response, corr = gateway.command(room, kind, sequence, payload)
     except ClientError as exc:
-        if exc.code != 409:
+        stale_result = (
+            exc.code == 409
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("status") == "rejected"
+            and exc.detail.get("reason") == "stale_sequence"
+        )
+        if not stale_result:
             raise
-        return gateway.snapshot(room), {}, str(uuid.uuid4()), False
+        return gateway.snapshot(room), exc.detail, str(uuid.uuid4()), False
     if not accepted(response):
         # Rejections, including stale sequence, are surfaced and reconciled.
         return gateway.snapshot(room), response, corr, False
@@ -342,6 +434,16 @@ def emit_interactive_state(snapshot: dict[str, Any], player_id: str) -> None:
         "player": player_id, "latency_ms": 0, "result": "ok", "error_code": None,
         "seq": snapshot.get("sequenceNumber"), "correlationId": str(uuid.uuid4()),
         "state": snapshot,
+    }, separators=(",", ":")), flush=True)
+
+
+def emit_interactive_failure(exc: ClientError, *, player: str = "") -> None:
+    """Emit one machine-readable terminal failure for interactive JSON mode."""
+    print(json.dumps({
+        "ts": now_rfc3339(), "action": "room_start", "room": "",
+        "player": player, "latency_ms": 0, "result": "error",
+        "error_code": exc.code, "seq": None,
+        "correlationId": str(uuid.uuid4()),
     }, separators=(",", ":")), flush=True)
 
 
@@ -650,7 +752,7 @@ def run_bot(args: argparse.Namespace) -> int:
             success = False
             tournament_completed = False
             while time.monotonic() < deadline:
-                assignment, _, _ = gateway.request("GET", f"/v1/tournaments/{quote(args.tournament, safe='')}/players/{quote(player_id, safe='')}/assignment")
+                assignment = gateway.assignment(args.tournament, player_id)
                 slot = assignment.get("assignment") or {}
                 key = (slot.get("roundNumber"), slot.get("slotId"))
                 room = str(slot.get("roomId") or "")
@@ -723,6 +825,8 @@ def main() -> int:
         try:
             return play_interactive(args)
         except ClientError as exc:
+            if args.json:
+                emit_interactive_failure(exc, player=args.user or "")
             print(f"FAIL: {exc}", file=sys.stderr)
             return 1
     return run_bot(args)

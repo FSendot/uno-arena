@@ -244,7 +244,7 @@ func TestRejection_CreateRoomDoesNotRequireSequence(t *testing.T) {
 func TestRejection_BackendRejectedAudited(t *testing.T) {
 	h := newHarness(t)
 	seq := int64(7)
-	h.room.Results["cmd_rej"] = envelope.Rejected("cmd_rej", "PlayCard", "stale_sequence", &seq)
+	h.room.Results["cmd_rej"] = envelope.Rejected("cmd_rej", "PlayCard", "room_full", &seq)
 	body := []byte(`{"commandId":"cmd_rej","type":"PlayCard","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"roomId":"room_2"}}`)
 	w := h.do(http.MethodPost, "/v1/rooms/room_2/commands", body, h.authHeaders())
 	if w.Code != http.StatusOK {
@@ -252,13 +252,13 @@ func TestRejection_BackendRejectedAudited(t *testing.T) {
 	}
 	var res envelope.Result
 	_ = json.Unmarshal(w.Body.Bytes(), &res)
-	if res.Status != envelope.StatusRejected || res.Reason != "stale_sequence" {
+	if res.Status != envelope.StatusRejected || res.Reason != "room_full" {
 		t.Fatalf("result=%+v", res)
 	}
 	if h.room.DispatchCount() != 1 {
 		t.Fatal("backend rejection still dispatched once")
 	}
-	if h.audit.Len() != 1 || h.audit.Records()[0].Reason != "stale_sequence" {
+	if h.audit.Len() != 1 || h.audit.Records()[0].Reason != "room_full" {
 		t.Fatalf("audit=%v", h.audit.Records())
 	}
 	rec := h.audit.Records()[0]
@@ -1174,13 +1174,13 @@ func TestEnvelope_ValidPayloadBoundsDispatch(t *testing.T) {
 	}
 }
 
-func TestRejection_StaleSequenceStillHTTP200DomainReject(t *testing.T) {
+func TestRejection_StaleSequenceReturnsHTTP409WithCommandResult(t *testing.T) {
 	h := newHarness(t)
 	seq := int64(7)
 	h.room.Results["cmd_stale"] = envelope.Rejected("cmd_stale", "PlayCard", "stale_sequence", &seq)
 	body := []byte(`{"commandId":"cmd_stale","type":"PlayCard","expectedSequenceNumber":3,"schemaVersion":1,"payload":{"roomId":"room_1"}}`)
 	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusConflict {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	var res envelope.Result

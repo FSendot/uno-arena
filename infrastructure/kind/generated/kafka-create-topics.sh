@@ -130,6 +130,7 @@ create_or_assert_topic "ranking.player_rating_updated" 2 1 "delete" 1 7200000
 create_or_assert_topic "room.game.completed" 2 1 "delete" 1 7200000
 create_or_assert_topic "room.gameplay.metrics" 8 1 "delete" 1 1800000
 create_or_assert_topic "room.match.completed" 2 1 "delete" 1 7200000
+create_or_assert_topic "room.runtime.ready" 2 1 "delete" 1 7200000
 create_or_assert_topic "room.spectator-safe.events" 8 1 "delete" 1 600000
 create_or_assert_topic "spectator.projection.rebuild_requested" 32 1 "delete" 1 7200000
 create_or_assert_topic "spectator.room_projection.updated" 2 1 "delete" 1 7200000
@@ -146,6 +147,7 @@ create_or_assert_topic "room.game.completed.ranking.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "room.gameplay.metrics.analytics.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "room.match.completed.analytics.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "room.match.completed.tournament-orchestration.dlq" 2 1 "delete" 1 21600000
+create_or_assert_topic "room.runtime.ready.tournament-orchestration.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "room.spectator-safe.events.spectator-view.dlq" 2 1 "delete" 1 21600000
 create_or_assert_topic "spectator.projection.rebuild_requested.spectator-view.dlq" 32 1 "delete" 1 21600000
 create_or_assert_topic "tournament.completed.analytics.dlq" 2 1 "delete" 1 21600000

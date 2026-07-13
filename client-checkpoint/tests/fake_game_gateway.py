@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 STATE = {"sequence": 7, "complete": False, "requests": [], "stale_seen": False,
          "reconnected": set(), "host_status": "waiting", "sse_delivered": False,
-         "resync_stream_calls": 0}
+         "resync_stream_calls": 0, "starting_attempts": {}}
 
 
 def player(headers) -> str:
@@ -56,11 +56,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/v1/rooms/") and parsed.path.endswith("/commands"):
             kind = data.get("type")
+            if kind == "PlayCard" and player(self.headers) == "player-mutation":
+                raw = b'{"code":"room_starting","message":"mutation outcome unknown"}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             # Alice exercises rejected stale-command reconciliation once.
             if kind == "PlayCard" and player(self.headers) == "player-alice" and not STATE["stale_seen"]:
                 STATE["stale_seen"] = True
                 STATE["sequence"] += 1
-                self.send_json(200, {"status": "rejected", "reason": "stale_sequence",
+                self.send_json(409, {"status": "rejected", "reason": "stale_sequence",
                                      "sequenceNumber": STATE["sequence"]})
                 return
             STATE["sequence"] += 1
@@ -91,6 +100,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/v1/rooms/") and parsed.path.endswith("/snapshot"):
             pid = player(self.headers)
+            attempts = STATE["starting_attempts"].get(pid, 0)
+            if pid == "player-never":
+                raw = b'{"code":"room_starting","message":"runtime pending"}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if pid == "player-starting" and attempts == 0:
+                STATE["starting_attempts"][pid] = attempts + 1
+                raw = b'{"code":"room_starting","message":"runtime pending"}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             host_status = STATE["host_status"] if pid == "player-host" else None
             sse_state = pid == "player-sse" and STATE["sse_delivered"]
             snapshot = {"roomId": "room-game", "status": "completed" if STATE["complete"] else "in_progress",
@@ -106,6 +135,10 @@ class Handler(BaseHTTPRequestHandler):
                 "hand": [] if STATE["complete"] else [{"id": "card-5", "color": "red", "face": "5"}]}
             if host_status:
                 snapshot["status"] = host_status
+            if pid == "player-mutation":
+                snapshot["status"] = "in_progress"
+                snapshot["game"]["completed"] = False
+                snapshot["hand"] = [{"id": "card-5", "color": "red", "face": "5"}]
             if sse_state:
                 snapshot["game"]["discardTop"] = {"id": "top-next", "color": "blue", "face": "9"}
                 snapshot["game"]["activeColor"] = "blue"
@@ -124,6 +157,17 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/v1/tournaments/") and "/players/" in parsed.path and parsed.path.endswith("/assignment"):
             bits = parsed.path.strip("/").split("/")
             pid = unquote(bits[4])
+            attempts = STATE["starting_attempts"].get(pid, 0)
+            if pid == "player-tourney-starting" and attempts == 0:
+                STATE["starting_attempts"][pid] = attempts + 1
+                raw = b'{"code":"room_starting","message":"assignment pending"}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if pid == "player-tourney-timeout":
                 self.send_json(200, {"tournamentId": unquote(bits[2]), "playerId": pid,
                     "phase": "running", "registrationStatus": "registered", "assignment": {}})

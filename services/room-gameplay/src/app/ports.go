@@ -125,6 +125,7 @@ type ReconciliationMarker struct {
 	Revision         int64
 	Payload          json.RawMessage
 	HasLogOffset     bool
+	Attempts         int
 }
 
 // ReconciliationRepairBlob is the durable marker payload for autonomous repair.

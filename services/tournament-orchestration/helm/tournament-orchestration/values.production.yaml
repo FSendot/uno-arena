@@ -7,6 +7,8 @@ env:
   KAFKA_CONSUMER_GROUP: tournament-orchestration
   KAFKA_MATCH_COMPLETED_TOPIC: room.match.completed
   KAFKA_MATCH_COMPLETED_DLQ_TOPIC: room.match.completed.tournament-orchestration.dlq
+  KAFKA_ROOM_RUNTIME_READY_TOPIC: room.runtime.ready
+  KAFKA_ROOM_RUNTIME_READY_DLQ_TOPIC: room.runtime.ready.tournament-orchestration.dlq
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/7
 
 provisioningWorker:

@@ -205,18 +205,29 @@ CREATE TABLE IF NOT EXISTS assigned_matches (
     room_id TEXT NOT NULL,
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     provisioning_batch_id TEXT,
+    -- First RoomRuntimeReady observation. NULL keeps room_id internal/provisioning.
+    runtime_ready_event_id TEXT UNIQUE,
+    runtime_ready_generation BIGINT CHECK (runtime_ready_generation >= 1),
+    runtime_ready_at TIMESTAMPTZ,
     PRIMARY KEY (tournament_id, round_number, slot_id),
     UNIQUE (room_id),
     -- Composite unique enables match_results ownership FK on exact (slot, room_id).
     UNIQUE (tournament_id, round_number, slot_id, room_id),
     FOREIGN KEY (tournament_id, round_number, slot_id)
-        REFERENCES bracket_slots (tournament_id, round_number, slot_id)
+        REFERENCES bracket_slots (tournament_id, round_number, slot_id),
+    CONSTRAINT assigned_matches_runtime_ready_complete CHECK (
+        (runtime_ready_event_id IS NULL AND runtime_ready_generation IS NULL AND runtime_ready_at IS NULL)
+        OR
+        (runtime_ready_event_id IS NOT NULL AND runtime_ready_generation IS NOT NULL AND runtime_ready_at IS NOT NULL)
+    )
 );
 
 COMMENT ON TABLE assigned_matches IS
     'AssignedMatch entity. Duplicate room assignments are rejected by UNIQUE(room_id).';
 COMMENT ON COLUMN assigned_matches.room_id IS
     'Reference-by-identity to Room Gameplay; no cross-context FK.';
+COMMENT ON COLUMN assigned_matches.runtime_ready_event_id IS
+    'Deduplicates the first RoomRuntimeReady event atomically with making room_id externally visible.';
 
 CREATE INDEX IF NOT EXISTS assigned_matches_batch_idx
     ON assigned_matches (tournament_id, round_number, provisioning_batch_id);

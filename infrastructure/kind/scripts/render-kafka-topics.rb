@@ -48,6 +48,7 @@ DOCUMENTED_DLQ_CONSUMERS = [
   { "source" => "identity.session.invalidated", "consumer" => "gateway" },
   { "source" => "room.game.completed", "consumer" => "ranking" },
   { "source" => "room.match.completed", "consumer" => "tournament-orchestration" },
+  { "source" => "room.runtime.ready", "consumer" => "tournament-orchestration" },
   { "source" => "room.match.completed", "consumer" => "analytics" },
   { "source" => "room.spectator-safe.events", "consumer" => "spectator-view" },
   { "source" => "spectator.projection.rebuild_requested", "consumer" => "spectator-view" },

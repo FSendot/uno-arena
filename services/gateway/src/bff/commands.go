@@ -65,6 +65,14 @@ func (s *Server) handlePlayerSnapshot(w http.ResponseWriter, r *http.Request, ro
 			case http.StatusForbidden:
 				s.writeErr(w, r, http.StatusForbidden, "forbidden", "not a room member", "")
 				return
+			case http.StatusServiceUnavailable:
+				if upstreamErrorCode(he.body) == "room_starting" {
+					if he.retryAfter != "" {
+						w.Header().Set("Retry-After", he.retryAfter)
+					}
+					s.writeErr(w, r, http.StatusServiceUnavailable, "room_starting", "room runtime is not ready", "")
+					return
+				}
 			}
 		}
 		s.writeErr(w, r, http.StatusBadGateway, "upstream_error", "player snapshot failed", "")
@@ -74,6 +82,16 @@ func (s *Server) handlePlayerSnapshot(w http.ResponseWriter, r *http.Request, ro
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
+}
+
+func upstreamErrorCode(body string) string {
+	var response struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(response.Code)
 }
 
 func (s *Server) handleSpectatorSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +316,11 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 		}
 	}
 
-	_ = httpx.WriteJSON(w, http.StatusOK, result)
+	status := http.StatusOK
+	if result.Status == envelope.StatusRejected && strings.TrimSpace(result.Reason) == "stale_sequence" {
+		status = http.StatusConflict
+	}
+	_ = httpx.WriteJSON(w, status, result)
 }
 
 func requireExplicitSchemaVersion1(body []byte) error {

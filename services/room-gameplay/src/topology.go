@@ -160,6 +160,10 @@ func (rr *RoomRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstream.Header = r.Header.Clone()
+	// The stable Room boundary authenticates the original caller. Dedicated
+	// runtimes receive only the scoped router hop plus any already-derived
+	// principal fields; upstream service credentials never fan out to room pods.
+	upstream.Header.Del(internalCredentialHeader)
 	upstream.Header.Set(runtimeCredentialHeader, rr.credential)
 	upstream.Header.Set(runtimeRoomIDHeader, roomID)
 	upstream.Header.Set(runtimeGenerationHeader, strconv.FormatInt(pod.Generation, 10))
@@ -176,6 +180,110 @@ func (rr *RoomRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// NewStableRoomHandler composes the stable Postgres-backed Room boundary with
+// dedicated runtime routing. Original route authority is checked before the
+// pod directory is consulted. Stable-only recovery reads never enter routing.
+func NewStableRoomHandler(server *Server, router *RoomRouter) http.Handler {
+	base := server.routes()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		if roomID, action, ok := splitRoomPath(path, "/v1/rooms/"); ok {
+			switch action {
+			case "snapshot":
+				serveStableAuthorizedSnapshot(w, r, server, router, roomID)
+				return
+			case "commands":
+				if !server.authorizeInternal(r) {
+					_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
+					return
+				}
+				router.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		if roomID, action, ok := splitRoomPath(path, "/internal/v1/rooms/"); ok {
+			switch action {
+			case "spectator-recovery-snapshot":
+				base.ServeHTTP(w, r)
+				return
+			case "timer-commands":
+				if !server.authorizeTimer(r) {
+					_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid timer service credential", "", "")
+					return
+				}
+				_ = roomID
+				router.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		if path == "/internal/v1/commands" && r.Method == http.MethodPost {
+			body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+			if err != nil {
+				_ = httpx.WriteError(w, http.StatusBadRequest, "bad_request", "unable to read request", "", "")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var command struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(body, &command) == nil && command.Type != app.CmdCreateRoom {
+				if !server.authorizeInternal(r) {
+					_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
+					return
+				}
+				router.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		base.ServeHTTP(w, r)
+	})
+}
+
+func splitRoomPath(path, prefix string) (roomID, action string, ok bool) {
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func serveStableAuthorizedSnapshot(w http.ResponseWriter, r *http.Request, server *Server, router *RoomRouter, roomID string) {
+	if !server.authorizeInternal(r) {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid service credential", "", "")
+		return
+	}
+	playerID := strings.TrimSpace(r.Header.Get("X-Player-Id"))
+	if playerID == "" {
+		_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "trusted player identity required", "", "")
+		return
+	}
+	snapshot, err := server.svc.PlayerSnapshot(r.Context(), roomID, playerID)
+	if err != nil {
+		switch {
+		case errors.Is(err, app.ErrNotFound):
+			_ = httpx.WriteError(w, http.StatusNotFound, "not_found", "room not found", "", "")
+		case errors.Is(err, app.ErrForbidden):
+			_ = httpx.WriteError(w, http.StatusForbidden, "forbidden", "not a room member", "", "")
+		default:
+			_ = httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "snapshot authorization failed", "", "")
+		}
+		return
+	}
+	status, _ := snapshot["status"].(string)
+	if status == "completed" || status == "cancelled" {
+		_ = httpx.WriteJSON(w, http.StatusOK, snapshot)
+		return
+	}
+	router.ServeHTTP(w, r)
 }
 func roomIDFromRouterRequest(path string, body []byte) (string, bool) {
 	if path == "/internal/v1/commands" {
