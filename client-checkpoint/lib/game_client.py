@@ -254,11 +254,11 @@ class Gateway:
         return data
 
     def whoami(self) -> dict[str, Any]:
-        data, _, _ = self.request("GET", "/v1/auth/whoami")
+        data, _, _ = self.safe_read("/v1/auth/whoami")
         return data
 
     def snapshot(self, room: str) -> dict[str, Any]:
-        data, _, _ = self.safe_room_read(f"/v1/rooms/{quote(room, safe='')}/snapshot")
+        data, _, _ = self.safe_read(f"/v1/rooms/{quote(room, safe='')}/snapshot")
         return data
 
     def assignment(self, tournament: str, player: str) -> dict[str, Any]:
@@ -266,11 +266,11 @@ class Gateway:
             f"/v1/tournaments/{quote(tournament, safe='')}/players/"
             f"{quote(player, safe='')}/assignment"
         )
-        data, _, _ = self.safe_room_read(path)
+        data, _, _ = self.safe_read(path)
         return data
 
-    def safe_room_read(self, path: str) -> tuple[Any, str, int]:
-        """Retry only a known-safe snapshot/assignment GET while a room starts."""
+    def safe_read(self, path: str) -> tuple[Any, str, int]:
+        """Boundedly retry an explicitly known-safe GET."""
         deadline = time.monotonic() + self.room_start_retry.timeout_seconds
         while True:
             try:
@@ -281,15 +281,18 @@ class Gateway:
                     and isinstance(exc.detail, dict)
                     and exc.detail.get("code") == "room_starting"
                 )
-                if not structured_starting:
+                transient_transport = exc.code in (502, 504, "timeout")
+                if not structured_starting and not transient_transport:
                     raise
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ClientError(
-                        "room runtime did not become ready before the configured timeout",
-                        "room_start_timeout",
-                        detail=exc.detail,
-                    ) from exc
+                    if structured_starting:
+                        raise ClientError(
+                            "room runtime did not become ready before the configured timeout",
+                            "room_start_timeout",
+                            detail=exc.detail,
+                        ) from exc
+                    raise
                 delay = min(
                     remaining,
                     self.room_start_retry.retry_delay(exc.retry_after),
@@ -309,6 +312,32 @@ class Gateway:
         envelope = {"commandId": str(uuid.uuid4()), "type": kind, "schemaVersion": 1, "payload": payload}
         data, _, _ = self.request("POST", "/v1/commands", envelope, correlation_id=corr)
         return data, corr
+
+    def register_tournament(self, tournament: str, player: str) -> tuple[dict[str, Any], str]:
+        """Register once, reconciling an unknown transport result by safe read."""
+        corr = str(uuid.uuid4())
+        envelope = {
+            "commandId": str(uuid.uuid4()),
+            "type": "RegisterPlayer",
+            "schemaVersion": 1,
+            "payload": {"tournamentId": tournament, "playerId": player},
+        }
+        try:
+            data, _, _ = self.request("POST", "/v1/commands", envelope, correlation_id=corr)
+            return data, corr
+        except ClientError as exc:
+            if exc.code not in (502, 504, "timeout"):
+                raise
+            # Never replay an uncertain mutation. The authenticated assignment
+            # projection is the authoritative, safe reconciliation surface.
+            try:
+                assignment = self.assignment(tournament, player)
+            except ClientError as reconcile_exc:
+                raise exc from reconcile_exc
+            registration = str(assignment.get("registrationStatus") or "").lower()
+            if registration not in ("registered", "eliminated"):
+                raise exc
+            return {"status": "accepted", "sequenceNumber": assignment.get("projectionVersion")}, corr
 
 
 def identity(gateway: Gateway, args: argparse.Namespace) -> tuple[str, str]:
@@ -353,6 +382,39 @@ def command_with_resync(gateway: Gateway, room: str, snapshot: dict[str, Any], k
         # Rejections, including stale sequence, are surfaced and reconciled.
         return gateway.snapshot(room), response, corr, False
     return gateway.snapshot(room), response, corr, True
+
+
+def recover_unknown_bot_outcome(
+    gateway: Gateway, room: str, exc: ClientError, submitted_sequence: int, *,
+    deadline: float, poll_interval: float,
+) -> dict[str, Any] | None:
+    """Observe bounded authoritative progress without replaying a mutation."""
+    if exc.code not in (502, 503, 504, "timeout"):
+        return None
+    # A peer command, Room-owned timer, or dedicated-runtime replacement may
+    # resolve the uncertainty after the transport failure. Use the configured
+    # safe-read budget, bounded by the bot's overall deadline, and resume only
+    # from newer committed state. The uncertain mutation is never replayed.
+    observation_deadline = min(
+        deadline,
+        time.monotonic() + gateway.room_start_retry.timeout_seconds,
+    )
+    while time.monotonic() < observation_deadline:
+        try:
+            snapshot = ensure_reconnected(gateway, room, gateway.snapshot(room))
+        except ClientError:
+            snapshot = None
+        if snapshot is not None:
+            if snapshot.get("status") in ("completed", "cancelled"):
+                return snapshot
+            sequence = snapshot.get("sequenceNumber")
+            if type(sequence) is int and sequence > submitted_sequence:
+                return snapshot
+        time.sleep(max(0.01, poll_interval))
+    # The authoritative state did not advance within the observation window,
+    # so choosing the same action again could replay an uncertain mutation with
+    # a new command ID.
+    return None
 
 
 def ensure_reconnected(gateway: Gateway, room: str, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -719,6 +781,14 @@ def play_bot_room(gateway: Gateway, room: str, player_id: str, username: str,
                 actions += 1
         except ClientError as exc:
             metrics.emit(kind.lower(), started, "error", exc.code, snapshot.get("sequenceNumber"), str(uuid.uuid4()))
+            reconciled = recover_unknown_bot_outcome(
+                gateway, room, exc, int(snapshot.get("sequenceNumber", 0)),
+                deadline=deadline, poll_interval=args.poll_interval,
+            )
+            if reconciled is not None:
+                snapshot = reconciled
+                time.sleep(args.poll_interval)
+                continue
             return False
     # A bounded action cap ends the run, but never turns an active match into a
     # success. Reconcile once because the cap may have been reached by the
@@ -741,7 +811,7 @@ def run_bot(args: argparse.Namespace) -> int:
         metrics.player = username or player_id
         if args.tournament:
             started = time.monotonic()
-            response, corr = gateway.global_command("RegisterPlayer", {"tournamentId": args.tournament, "playerId": player_id})
+            response, corr = gateway.register_tournament(args.tournament, player_id)
             ok = accepted(response)
             metrics.emit("tournament_register", started, "ok" if ok else "error", None if ok else "rejected",
                          response.get("sequenceNumber"), corr)

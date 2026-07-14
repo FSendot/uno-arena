@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -54,12 +54,12 @@ func (l *matchCompletedKafkaLifecycle) start(parent context.Context) {
 		if err != nil {
 			l.healthy.Store(false)
 			l.stoppedErr.Store(err)
-			log.Printf(`{"level":"error","service":"tournament-orchestration","event":"kafka_consumer_stopped","err":%q}`, sanitizeLogErr(err))
+			slog.ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", sanitizeLogErr(err))
 			return
 		}
 		l.healthy.Store(false)
 		l.stoppedErr.Store(fmt.Errorf("kafka consumer exited unexpectedly"))
-		log.Printf(`{"level":"error","service":"tournament-orchestration","event":"kafka_consumer_stopped","err":"exited unexpectedly"}`)
+		slog.ErrorContext(ctx, "Kafka consumer stopped unexpectedly", "event", "kafka_consumer_stopped", "error", "exited unexpectedly")
 	}()
 }
 
@@ -172,7 +172,7 @@ func wireTournamentRuntime() (tournamentRuntime, error) {
 					Repo:      NewMemoryTournamentRepository(), // never used while not ready
 					Rooms:     NoopRoomProvisioner{},
 					Publisher: NoopPublisher{},
-					Audit:     NewMemoryAudit(),
+					Audit:     productionTournamentAudit(),
 				}),
 				mode:        "durable",
 				ready:       false,
@@ -215,7 +215,7 @@ func wireTournamentRuntime() (tournamentRuntime, error) {
 			QuarantineResults: &durableQuarantineResultRepo{store: ts},
 			Rooms:             NewHTTPRoomProvisioner(roomURL, roomCred, nil),
 			Publisher:         NoopPublisher{}, // CDC publishes; never DrainOutbox in durable mode
-			Audit:             NewMemoryAudit(),
+			Audit:             productionTournamentAudit(),
 			Clock:             systemClock{},
 			IDs:               randomIDs{},
 			BracketPages:      pages,
@@ -358,7 +358,7 @@ func wireProvisioningWorkerRuntime(dbURL, roomURL, roomCred, internalCred string
 		Provisioning:   &durableProvisioningRepo{store: ts},
 		Rooms:          NewHTTPRoomProvisioner(roomURL, roomCred, nil),
 		Publisher:      NoopPublisher{},
-		Audit:          NewMemoryAudit(),
+		Audit:          productionTournamentAudit(),
 		Clock:          systemClock{},
 		IDs:            randomIDs{},
 		BracketRefresh: refresher,
@@ -423,7 +423,7 @@ func wireSeedingWorkerRuntime(dbURL string) (tournamentRuntime, error) {
 		svc: NewService(ServiceDeps{
 			Repo:           &durableRepo{store: ts},
 			Publisher:      NoopPublisher{},
-			Audit:          NewMemoryAudit(),
+			Audit:          productionTournamentAudit(),
 			Clock:          systemClock{},
 			IDs:            randomIDs{},
 			BracketRefresh: refresher,
@@ -489,7 +489,7 @@ func wireCompletionWorkerRuntime(dbURL string) (tournamentRuntime, error) {
 			Repo:           repo,
 			CompleteRounds: complete,
 			Publisher:      NoopPublisher{},
-			Audit:          NewMemoryAudit(),
+			Audit:          productionTournamentAudit(),
 			Clock:          systemClock{},
 			IDs:            randomIDs{},
 			BracketRefresh: refresher,

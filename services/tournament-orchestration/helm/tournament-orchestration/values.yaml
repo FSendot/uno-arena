@@ -4,6 +4,12 @@ image:
   repository: registry.gitlab.com/group/uno-arena/tournament-orchestration
   digest: ""
 
+telemetry:
+  mode: required
+  otlpEndpoint: http://alloy-otlp.observability.svc.cluster.local:4317
+  tracesSampler: parentbased_traceidratio
+  tracesSamplerArg: "0.001"
+
 # Peer URLs use Service port 8080.
 env:
   SERVICE_NAME: tournament-orchestration
@@ -56,3 +62,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

@@ -6,6 +6,7 @@ image:
 
 env:
   SERVICE_NAME: spectator-view
+  DEPLOYMENT_ENV: staging
   REDIS_URL: redis://redis:6379/5
   # Kafka brokers/group/topics are environment-specific (see values.kind / staging / production).
   SPECTATOR_REDIS_KEY_PREFIX: "spectator:"
@@ -37,3 +38,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

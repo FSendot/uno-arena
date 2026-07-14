@@ -1,0 +1,5 @@
+profile: ambient
+image: docker.io/istio/install-cni@sha256:b2eb80818fc345e3e9033f424ec7757cbf1a9d9a6494fea79648dab4887f2f7f
+global:
+  imagePullPolicy: IfNotPresent
+

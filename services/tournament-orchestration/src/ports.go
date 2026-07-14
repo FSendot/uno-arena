@@ -364,7 +364,7 @@ type EventPublisher interface {
 
 // AuditSink records operational/security rejection audits (never domain events).
 type AuditSink interface {
-	RecordRejection(record audit.RejectionRecord) error
+	RecordRejection(context.Context, audit.RejectionRecord) error
 }
 
 // MatchCompletedEvent is the consumed room.match.completed payload.

@@ -53,7 +53,7 @@ func (s *RankingStore) PublishNextDirtyLeaderboardSnapshot(ctx context.Context, 
 		LIMIT 1
 	`, cooldownSecs).Scan(&board, &dirty, &published)
 	if err == pgx.ErrNoRows {
-		if err := tx.Commit(ctx); err != nil {
+		if err := s.commitTransaction(ctx, tx); err != nil {
 			return ClaimedBoardPublish{}, wrapUnavailable(err)
 		}
 		return ClaimedBoardPublish{Published: false}, nil
@@ -126,7 +126,7 @@ func (s *RankingStore) PublishNextDirtyLeaderboardSnapshot(ctx context.Context, 
 		return ClaimedBoardPublish{}, fmt.Errorf("failed to checkpoint published_version for %s", board)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitTransaction(ctx, tx); err != nil {
 		return ClaimedBoardPublish{}, wrapUnavailable(err)
 	}
 	return ClaimedBoardPublish{

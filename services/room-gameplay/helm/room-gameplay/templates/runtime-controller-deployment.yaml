@@ -15,14 +15,21 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-runtime-controller
+        app.kubernetes.io/name: room-gameplay
         unoarena.io/component: room-runtime-controller
+        unoarena.io/metrics-scrape: pod
+        unoarena.io/metrics-exposed: "true"
     spec:
       serviceAccountName: {{ .Release.Name }}-runtime-controller
       containers:
         - name: room-runtime-controller
           image: {{ include "room-gameplay.image" . | quote }}
           imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            {{- include "room-gameplay.telemetryEnv" (dict "root" . "component" "room-runtime-controller") | nindent 12 }}
             - name: WORKER_ROLE
               value: "room-runtime-controller"
             - name: POD_NAME
@@ -49,6 +56,18 @@ spec:
               value: {{ .Values.runtimeSecretEnv | toJson | quote }}
             - name: ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY
               value: {{ .Values.topology.runtime.mutationQueueCapacity | quote }}
+            - name: ROOM_RUNTIME_CPU_REQUEST
+              value: {{ .Values.topology.runtime.resources.requests.cpu | quote }}
+            - name: ROOM_RUNTIME_MEMORY_REQUEST
+              value: {{ .Values.topology.runtime.resources.requests.memory | quote }}
+            - name: ROOM_RUNTIME_CPU_LIMIT
+              value: {{ .Values.topology.runtime.resources.limits.cpu | quote }}
+            - name: ROOM_RUNTIME_MEMORY_LIMIT
+              value: {{ .Values.topology.runtime.resources.limits.memory | quote }}
+            - name: ROOM_RUNTIME_PROBE_TIMEOUT_SECONDS
+              value: {{ .Values.topology.runtime.healthProbes.timeoutSeconds | quote }}
+            - name: ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD
+              value: {{ .Values.topology.runtime.healthProbes.failureThreshold | quote }}
             {{- range $name, $val := .Values.env }}
             - name: {{ $name }}
               value: {{ $val | quote }}

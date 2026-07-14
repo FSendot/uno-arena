@@ -10,6 +10,18 @@ command -v "${HELM}" >/dev/null 2>&1 || { echo "helm required" >&2; exit 1; }
 "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" >/dev/null
 
 kind_out="$("${HELM}" template ranking-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
+echo "${kind_out}" | grep -q 'cpu: 500m'
+echo "${kind_out}" | grep -q 'timeoutSeconds: 3'
+echo "${kind_out}" | grep -q 'failureThreshold: 6'
+echo "${kind_out}" | grep -q 'serviceAccountName: ranking'
+echo "${kind_out}" | grep -q 'serviceAccountName: ranking-leaderboard-snapshotter'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-scrape: service'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-scrape: pod'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-exposed: "true"'
+echo "${kind_out}" | grep -q 'name: metrics'
+echo "${kind_out}" | grep -q 'containerPort: 9090'
+test "$(echo "${kind_out}" | grep -c 'name: TELEMETRY_MODE')" -eq 2
+test "$(echo "${kind_out}" | grep -c 'name: POD_UID')" -eq 2
 echo "${kind_out}" | grep -q 'image: "uno-arena/ranking:local"'
 echo "${kind_out}" | grep -q 'imagePullPolicy: IfNotPresent'
 ! echo "${kind_out}" | grep -q 'image: "uno-arena/ranking@"'
@@ -55,6 +67,7 @@ snap_doc="$(echo "${kind_out}" | awk '/name: ranking-kind-leaderboard-snapshotte
 ! echo "${snap_doc}" | grep -q 'RANKING_ANALYTICS_BACKFILL_CURSOR_SECRET'
 ! echo "${snap_doc}" | grep -q 'RANKING_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
 ! echo "${snap_doc}" | grep -q 'KAFKA_'
+echo "${snap_doc}" | grep -q 'containerPort: 9090'
 
 staging_out="$("${HELM}" template ranking-staging "${CHART}" -f "${CHART}/values.yaml" -f "${CHART}/values.staging.yaml" \
   --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \

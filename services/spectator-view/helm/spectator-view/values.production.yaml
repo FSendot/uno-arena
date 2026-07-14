@@ -1,6 +1,7 @@
 replicaCount: 2
 
 env:
+  DEPLOYMENT_ENV: production
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/5
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
   KAFKA_CONSUMER_GROUP: spectator-view

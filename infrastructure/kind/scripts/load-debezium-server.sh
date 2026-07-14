@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Explicit/NETWORKED: node-native stage of Debezium Server 3.6.0.Final (ARM64 digest) into kind.
+# Explicit/NETWORKED: node-native stage of Debezium Server 3.6.0.Final (multiarch index) into kind.
 # Uses docker exec + crictl pull on the uno-arena control-plane node.
 # Does NOT use kind load (unreliable for these upstream OCI/multiarch images here).
 # Does not apply manifests or claim CDC delivery.
@@ -16,11 +16,9 @@ assert_kind_cluster_name
 assert_kind_context
 
 # Must match infrastructure/kind/manifests/80-debezium-server Deployment image.
-# Approved local ARM64 source digest for 3.6.0.Final
-# (multiarch index sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984).
 DEBEZIUM_SERVER_VERSION="${DEBEZIUM_SERVER_VERSION:-3.6.0.Final}"
-DEBEZIUM_SERVER_ARM64_DIGEST="${DEBEZIUM_SERVER_ARM64_DIGEST:-sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08}"
-DEBEZIUM_SERVER_SOURCE_IMAGE="${DEBEZIUM_SERVER_SOURCE_IMAGE:-quay.io/debezium/server:3.6.0.Final@sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08}"
+DEBEZIUM_SERVER_INDEX_DIGEST="${DEBEZIUM_SERVER_INDEX_DIGEST:-sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d}"
+DEBEZIUM_SERVER_SOURCE_IMAGE="${DEBEZIUM_SERVER_SOURCE_IMAGE:-quay.io/debezium/server:3.6.0.Final@sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d}"
 
 # Prior broken local runtime tag from kind-load staging (remove so crictl cannot reuse bad metadata).
 DEBEZIUM_SERVER_STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
@@ -46,6 +44,12 @@ if [[ "${#_cp_nodes[@]}" -ne 1 ]]; then
 fi
 KIND_NODE="${_cp_nodes[0]}"
 echo "kind node ${KIND_NODE} (cluster ${KIND_CLUSTER_NAME})"
+node_arch="$(docker exec "${KIND_NODE}" uname -m)"
+case "${node_arch}" in
+  x86_64|amd64) expected_arch="amd64" ;;
+  aarch64|arm64) expected_arch="arm64" ;;
+  *) echo "error: unsupported kind node architecture ${node_arch}" >&2; exit 1 ;;
+esac
 
 node_rmi_tolerate() {
   local ref="$1"
@@ -64,19 +68,20 @@ node_rmi_tolerate "${DEBEZIUM_SERVER_SOURCE_IMAGE}"
 echo "node-native crictl pull ${DEBEZIUM_SERVER_SOURCE_IMAGE}"
 docker exec "${KIND_NODE}" crictl pull "${DEBEZIUM_SERVER_SOURCE_IMAGE}"
 
-echo "verifying arm64 + exact source digest via crictl inspecti (fail-closed on kind-import aliases)"
-DIGEST_HEX="${DEBEZIUM_SERVER_ARM64_DIGEST#sha256:}"
+echo "verifying ${expected_arch} resolution + exact multiarch index via crictl inspecti (fail-closed on kind-import aliases)"
+DIGEST_HEX="${DEBEZIUM_SERVER_INDEX_DIGEST#sha256:}"
 docker exec "${KIND_NODE}" crictl inspecti "${DEBEZIUM_SERVER_SOURCE_IMAGE}" | python3 -c "
 import json, sys
 want_digest = sys.argv[1]
 want_ref = sys.argv[2]
+expected_arch = sys.argv[3]
 data = json.load(sys.stdin)
 status = data.get('status') or {}
 info = data.get('info') or {}
 spec = info.get('imageSpec') or info.get('image') or {}
 arch = (spec.get('architecture') or spec.get('Architecture') or '').lower()
-if arch != 'arm64':
-    raise SystemExit('architecture must be arm64, got %r' % (arch,))
+if arch != expected_arch:
+    raise SystemExit('architecture must be %s, got %r' % (expected_arch, arch))
 repo_digests = status.get('repoDigests') or []
 # Prior kind load poisons the node: even after scoped rmi, a native pull can reconstruct
 # docker.io/library/import-* repoDigests alongside the valid quay digest. Kubelet then
@@ -101,7 +106,7 @@ if repo_digests and not any(want_digest.lower() in d.lower() for d in repo_diges
     raise SystemExit('repoDigests missing exact digest %s: %s' % (want_digest, repo_digests))
 if not any('quay.io/debezium/server' in d and want_digest.lower() in d.lower() for d in repo_digests) and want_digest.lower() not in image_id:
     raise SystemExit('exact source digest/ref not available for %s' % want_ref)
-print('ok inspecti arch=arm64 digest=%s' % want_digest)
-" "${DIGEST_HEX}" "${DEBEZIUM_SERVER_SOURCE_IMAGE}"
+print('ok inspecti arch=%s index=%s' % (expected_arch, want_digest))
+" "${DIGEST_HEX}" "${DEBEZIUM_SERVER_SOURCE_IMAGE}" "${expected_arch}"
 
 echo "ok node-native-stage-debezium-server source=${DEBEZIUM_SERVER_SOURCE_IMAGE} node=${KIND_NODE}"

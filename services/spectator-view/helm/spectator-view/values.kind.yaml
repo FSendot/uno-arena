@@ -13,6 +13,19 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
 env:
   SERVICE_NAME: spectator-view
   DEPLOYMENT_ENV: local

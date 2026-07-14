@@ -1,0 +1,380 @@
+{{- $ns := include "uno-observability.namespace" . -}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: alloy-logs
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: alloy-logs, app.kubernetes.io/component: logs}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/name: alloy-logs}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: alloy-logs, app.kubernetes.io/component: logs}
+      annotations:
+        checksum/alloy-logs-config: {{ include (print $.Template.BasePath "/config-alloy.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: alloy-logs
+      automountServiceAccountToken: true
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+        # /var/log/pods is 0750 root:root on container-runtime nodes.
+        supplementalGroups: [0]
+      containers:
+        - name: alloy
+          image: {{ .Values.images.alloy | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+          ports:
+            - {name: http, containerPort: 12345}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            initialDelaySeconds: 5
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 473
+            runAsGroup: 473
+          resources: {{- toYaml .Values.resources.alloyLogs | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/alloy, readOnly: true}
+            - {name: data, mountPath: /var/lib/alloy}
+            - {name: pod-logs, mountPath: /var/log/pods, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: alloy-logs-config}
+        - name: data
+          emptyDir: {}
+        - name: pod-logs
+          hostPath: {path: /var/log/pods, type: Directory}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy-otlp
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: alloy-otlp, app.kubernetes.io/component: traces}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: alloy-otlp}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: alloy-otlp, app.kubernetes.io/component: traces}
+      annotations:
+        checksum/alloy-otlp-config: {{ include (print $.Template.BasePath "/config-alloy.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: alloy-otlp
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: alloy
+          image: {{ .Values.images.alloy | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+          ports:
+            - {name: http, containerPort: 12345}
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            initialDelaySeconds: 5
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 473
+            runAsGroup: 473
+          resources: {{- toYaml .Values.resources.alloyOtlp | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/alloy, readOnly: true}
+            - {name: data, mountPath: /var/lib/alloy}
+      volumes:
+        - name: config
+          configMap: {name: alloy-otlp-config}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: loki, app.kubernetes.io/component: logs}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: loki}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: loki, app.kubernetes.io/component: logs}
+      annotations:
+        checksum/loki-config: {{ include (print $.Template.BasePath "/config-loki.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: loki
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: loki
+          image: {{ .Values.images.loki | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["-config.file=/etc/loki/loki.yaml", "-config.expand-env=true"]
+          env:
+            - name: S3_ACCESS_KEY_ID
+              valueFrom: {secretKeyRef: {name: {{ .Values.storage.s3.existingSecret | quote }}, key: {{ .Values.storage.s3.accessKeyKey | quote }}}}
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: {{ .Values.storage.s3.existingSecret | quote }}, key: {{ .Values.storage.s3.secretKeyKey | quote }}}}
+          ports:
+            - {name: http, containerPort: 3100}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: 10
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 10001
+            runAsGroup: 10001
+          resources: {{- toYaml .Values.resources.loki | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/loki, readOnly: true}
+            - {name: work, mountPath: /var/loki}
+      volumes:
+        - name: config
+          configMap: {name: loki-config}
+        - name: work
+          emptyDir: {}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempo-wal
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: tempo}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.storage.tempoWal.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ .Values.storage.tempoWal.size }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: tempo, app.kubernetes.io/component: traces}
+spec:
+  strategy: {type: Recreate}
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: tempo}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: tempo, app.kubernetes.io/component: traces}
+      annotations:
+        checksum/tempo-config: {{ include (print $.Template.BasePath "/config-tempo.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: tempo
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: tempo
+          image: {{ .Values.images.tempo | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["-config.file=/etc/tempo/tempo.yaml", "-config.expand-env=true"]
+          env:
+            - name: S3_ACCESS_KEY_ID
+              valueFrom: {secretKeyRef: {name: {{ .Values.storage.s3.existingSecret | quote }}, key: {{ .Values.storage.s3.accessKeyKey | quote }}}}
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: {{ .Values.storage.s3.existingSecret | quote }}, key: {{ .Values.storage.s3.secretKeyKey | quote }}}}
+          ports:
+            - {name: http, containerPort: 3200}
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: 10
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 10001
+            runAsGroup: 10001
+          resources: {{- toYaml .Values.resources.tempo | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/tempo, readOnly: true}
+            - {name: wal, mountPath: /var/tempo}
+      volumes:
+        - name: config
+          configMap: {name: tempo-config}
+        - name: wal
+          persistentVolumeClaim: {claimName: tempo-wal}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: prometheus}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.storage.prometheus.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ .Values.storage.prometheus.size }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: prometheus, app.kubernetes.io/component: metrics}
+spec:
+  strategy: {type: Recreate}
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: prometheus}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: prometheus, app.kubernetes.io/component: metrics}
+    spec:
+      serviceAccountName: prometheus
+      automountServiceAccountToken: true
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: prometheus
+          image: {{ .Values.images.prometheus | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.storage.prometheus.retentionTime }}
+            - --storage.tsdb.retention.size={{ .Values.storage.prometheus.retentionSize }}
+            - --web.enable-lifecycle
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            initialDelaySeconds: 10
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 65534
+            runAsGroup: 65534
+          resources: {{- toYaml .Values.resources.prometheus | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus, readOnly: true}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-config}
+        - name: data
+          persistentVolumeClaim: {claimName: prometheus-data}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: kube-state-metrics, app.kubernetes.io/component: metrics}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: kube-state-metrics}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: kube-state-metrics, app.kubernetes.io/component: metrics}
+    spec:
+      serviceAccountName: kube-state-metrics
+      automountServiceAccountToken: true
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: kube-state-metrics
+          image: {{ .Values.images.kubeStateMetrics | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args: ["--port=8080", "--telemetry-port=8081", "--resources=pods,deployments"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: telemetry, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: telemetry}
+            initialDelaySeconds: 5
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 65534
+            runAsGroup: 65534
+          resources: {{- toYaml .Values.resources.kubeStateMetrics | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: grafana, app.kubernetes.io/component: visualization}
+spec:
+  replicas: 1
+  strategy:
+    type: {{ .Values.grafana.strategyType }}
+    {{- if eq .Values.grafana.strategyType "Recreate" }}
+    rollingUpdate: null
+    {{- end }}
+  selector:
+    matchLabels: {app.kubernetes.io/name: grafana}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: grafana, app.kubernetes.io/component: visualization}
+    spec:
+      serviceAccountName: grafana
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: {{ .Values.images.grafana | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - {name: GF_SERVER_HTTP_PORT, value: "3000"}
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "false"}
+            - {name: GF_USERS_ALLOW_SIGN_UP, value: "false"}
+            - {name: GF_PLUGINS_PREINSTALL_DISABLED, value: {{ .Values.grafana.preinstallDisabled | quote }}}
+            - {name: GF_SECURITY_ADMIN_USER, valueFrom: {secretKeyRef: {name: {{ .Values.grafana.existingAdminSecret | quote }}, key: {{ .Values.grafana.adminUserKey | quote }}}}}
+            - {name: GF_SECURITY_ADMIN_PASSWORD, valueFrom: {secretKeyRef: {name: {{ .Values.grafana.existingAdminSecret | quote }}, key: {{ .Values.grafana.adminPasswordKey | quote }}}}}
+          ports:
+            - {name: http, containerPort: 3000}
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            initialDelaySeconds: 10
+            timeoutSeconds: {{ .Values.probes.readinessTimeoutSeconds }}
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 472
+            runAsGroup: 472
+          resources: {{- toYaml .Values.resources.grafana | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/grafana}
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources, readOnly: true}
+            - {name: providers, mountPath: /etc/grafana/provisioning/dashboards, readOnly: true}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: datasources
+          configMap: {name: grafana-datasources}
+        - name: providers
+          configMap: {name: grafana-dashboard-provider}
+        - name: dashboards
+          projected:
+            sources:
+              - configMap: {name: grafana-business-dashboard}
+              - configMap: {name: grafana-cluster-dashboard}

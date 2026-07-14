@@ -11,6 +11,23 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+telemetry:
+  tracesSampler: parentbased_traceidratio
+  tracesSamplerArg: "0.001"
+
 env:
   SERVICE_NAME: room-gameplay
   DEPLOYMENT_ENV: local
@@ -39,6 +56,18 @@ topology:
     claimBatch: 4
     concurrency: 2
     readinessTimeoutSeconds: 60
+  runtime:
+    mutationQueueCapacity: 16
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    healthProbes:
+      timeoutSeconds: 10
+      failureThreshold: 6
   pgbouncer:
     replicaCount: 1
     maxClientConn: 100

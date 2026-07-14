@@ -1,0 +1,69 @@
+storage:
+  s3:
+    endpoint: http://minio.observability.svc.cluster.local:9000
+    region: us-east-1
+    forcePathStyle: true
+    insecure: true
+    existingSecret: minio-observability
+    lokiBucket: loki-logs
+    tempoBucket: tempo-traces
+  # The disposable kind node shares its container filesystem with the local
+  # engine's image cache and can begin above Loki 3.7's conservative 90% WAL
+  # threshold while still retaining several GiB of bounded acceptance headroom.
+  # Keep a fail-closed threshold rather than disabling disk protection.
+  lokiWal:
+    diskFullThreshold: 0.99
+  # Keep compaction maintenance outside the short single-node acceptance run.
+  tempoCompaction:
+    measureInterval: 1h
+    minCycleInterval: 1h
+    # Tempo requires measurement at least twice within the work-cache prune age.
+    pruneAge: 3h
+    # The scheduler measures once at startup. Keep that measurement from
+    # compacting the short-lived block set on this single-node lane.
+    minInputBlocks: 1000
+    maxInputBlocks: 1000
+  # Avoid tiny Parquet block churn while the long local acceptance suite runs.
+  # Ten minutes stays below the persistence probe's bounded object-store wait.
+  tempoLiveStore:
+    maxBlockDuration: 10m
+    # Make a completed S3 block discoverable inside the three-minute
+    # persistence acceptance budget without forcing more frequent block cuts.
+    blocklistPoll: 1m
+
+grafana:
+  existingAdminSecret: uno-arena-local-observability
+  strategyType: Recreate
+
+security:
+  # The kind acceptance lane proves strict Ambient mTLS and SPIFFE-scoped
+  # authorization. Production CNI NetworkPolicy remains enabled by default.
+  networkPoliciesEnabled: false
+
+# Preserve Service endpoints during brief CPU contention on the single-node
+# lane. Production retains the tighter chart default.
+probes:
+  readinessTimeoutSeconds: 10
+
+# The single-node kind lane co-locates all foundation, application, and
+# observability workloads. These requests are scheduling reservations for the
+# acceptance traffic only; production retains the chart defaults.
+resources:
+  alloyLogs:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  alloyOtlp:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: "2", memory: 512Mi}
+  loki:
+    requests: {cpu: 25m, memory: 128Mi}
+  tempo:
+    requests: {cpu: 25m, memory: 128Mi}
+    limits: {cpu: "2", memory: 2Gi}
+  prometheus:
+    requests: {cpu: 25m, memory: 128Mi}
+  kubeStateMetrics:
+    requests: {cpu: 10m, memory: 32Mi}
+  grafana:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 512Mi}

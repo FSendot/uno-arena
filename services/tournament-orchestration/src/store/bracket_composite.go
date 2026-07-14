@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -37,18 +37,18 @@ func (c *CompositeBracketPageLoader) LoadBracketPage(ctx context.Context, q Brac
 					return page, nil
 				}
 				if checkpointErr != nil {
-					log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"bracket_checkpoint_fallback","tournamentId":%q,"err":%q}`,
-						q.TournamentID, checkpointErr.Error())
+					slog.WarnContext(ctx, "bracket checkpoint fallback", "event", "bracket_checkpoint_fallback",
+						"tournamentId", q.TournamentID, "error", checkpointErr.Error())
 				} else {
-					log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"bracket_stale_fallback","tournamentId":%q,"redisVersion":%d,"postgresVersion":%d}`,
-						q.TournamentID, page.ProjectionVersion, authoritativeVersion)
+					slog.WarnContext(ctx, "stale bracket projection fallback", "event", "bracket_stale_fallback",
+						"tournamentId", q.TournamentID, "redisVersion", page.ProjectionVersion, "postgresVersion", authoritativeVersion)
 				}
 			} else {
 				return page, nil
 			}
 		} else {
-			log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"bracket_redis_fallback","tournamentId":%q,"err":%q}`,
-				q.TournamentID, err.Error())
+			slog.WarnContext(ctx, "Redis bracket fallback", "event", "bracket_redis_fallback",
+				"tournamentId", q.TournamentID, "error", err.Error())
 		}
 	}
 	return c.PG.LoadBracketPage(ctx, q)

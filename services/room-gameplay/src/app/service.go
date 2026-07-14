@@ -96,6 +96,8 @@ type CommandResult struct {
 
 // HandleCommand maps a catalog command onto Session/Room with GI append-before-commit.
 func (s *Service) HandleCommand(ctx context.Context, in CommandInput) CommandResult {
+	ctx, span := startContextSpan(ctx, "room-gameplay.command.handle")
+	defer span.End()
 	if s.durable() {
 		// Durable best-of-three continuation is persisted atomically with the
 		// completed game and claimed by the Room-owned timer worker. Never rely
@@ -886,6 +888,7 @@ func (s *Service) commitAccepted(
 		// Reservation already confirmed; do not cancel. Retry gets confirmed material and commits locally.
 		return CommandResult{Err: err}
 	}
+	RecordCommittedGameCompletion(ctx, req.Outbox)
 
 	// Async publish from pending outbox (errors leave entries pending for retry).
 	_, _ = s.DrainOutbox(ctx, 1)

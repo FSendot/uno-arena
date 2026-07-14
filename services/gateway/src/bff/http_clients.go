@@ -108,7 +108,7 @@ func (c *HTTPIdentityClient) ValidateSession(ctx context.Context, token string, 
 		return Principal{}, err
 	}
 	if out.PlayerID == "" || out.SessionID == "" {
-		return Principal{}, ErrUnauthorized
+		return Principal{}, fmt.Errorf("identity validation response omitted principal")
 	}
 	return Principal{
 		PlayerID:      out.PlayerID,

@@ -34,7 +34,7 @@ This repository contains the current UnoArena design package and the architectur
 
 - [ADR-0001. REST Command Envelope and SSE](./docs/adr/0001-rest-command-envelope-and-sse.md)
 - [ADR-0002. EventStoreDB for Game Integrity (superseded)](./docs/adr/0002-eventstoredb-for-game-integrity.md)
-- [ADR-0035. KurrentDB 26.0.3 LTS with Native ARM64 Local Image](./docs/adr/0035-kurrentdb-26-lts-with-native-arm64-local-image.md)
+- [ADR-0035. KurrentDB 26.0.3 LTS with Architecture-Selected Images](./docs/adr/0035-kurrentdb-26-lts-with-architecture-selected-images.md)
 - [ADR-0003. Kafka for Async Integration](./docs/adr/0003-kafka-for-async-integration.md)
 - [ADR-0004. Separate Physical Databases per Bounded Context](./docs/adr/0004-separate-physical-databases-per-bounded-context.md)
 - [ADR-0005. Redis as Acceleration and Projection Only](./docs/adr/0005-redis-as-acceleration-and-projection-only.md)
@@ -49,6 +49,9 @@ This repository contains the current UnoArena design package and the architectur
 - [ADR-0014. Async Contract Check: Room Gameplay to Spectator View](./docs/adr/0014-async-contract-check-room-gameplay-to-spectator-view.md)
 - [ADR-0040. Dedicated State-Machine Pod per Room](./docs/adr/0040-dedicated-state-machine-pod-per-room.md)
 - [ADR-0041. PgBouncer for Room Pod Transaction Pooling](./docs/adr/0041-pgbouncer-for-room-pod-transaction-pooling.md)
+- [ADR-0045. Kind as Empty-Cluster Deployment Acceptance](./docs/adr/0045-kind-as-empty-cluster-deployment-acceptance.md)
+- [ADR-0046. Loki TSDB on S3-Compatible Object Storage](./docs/adr/0046-loki-tsdb-on-s3-compatible-object-storage.md)
+- [ADR-0047. OpenTelemetry, Alloy, and Tempo for Distributed Tracing](./docs/adr/0047-opentelemetry-alloy-and-tempo-for-distributed-tracing.md)
 
 ## Change Tracking
 
@@ -140,7 +143,9 @@ make check
 make fmt-shared test-shared validate-yaml
 ```
 
-Verified runtime pins (as of 2026-07-11; see `.env.example` and service Dockerfiles/CI): Go `1.26.0` with toolchain `go1.26.5`; builders `golang:1.26.5-alpine3.24`; runtime/CI Alpine `3.24.1`; local infra `postgres:18.4-alpine3.24`, `apache/kafka:4.3.1`, native-ARM64 local `kurrentplatform/kurrentdb:26.0.3-experimental-arm64-10.0-noble` pinned by digest, `redis:8.8.0-alpine`, and `clickhouse/clickhouse-server:26.6.1.1193`. The stable AMD64 KurrentDB 26.0.3 LTS digest remains the non-local candidate. OpenAPI 3.0.3 / AsyncAPI 2.6.0 / JSON Schema draft stay unchanged.
+Verified runtime pins (as of 2026-07-13; see `.env.example`, service Dockerfiles/CI, and ADR-0035): Go `1.26.0` with toolchain `go1.26.5`; builders `golang:1.26.5-alpine3.24`; runtime/CI Alpine `3.24.1`; local infra `postgres:18.4-alpine3.24`, `apache/kafka:4.3.1`, architecture-selected KurrentDB 26.0.3 (stable LTS AMD64 or experimental local-only ARM64, each pinned by digest), `redis:8.8.0-alpine`, and `clickhouse/clickhouse-server:26.6.1.1193`. OpenAPI 3.0.3 / AsyncAPI 2.6.0 / JSON Schema draft stay unchanged.
+
+The observability implementation keeps that Go 1.26.5 build toolchain while pinning its current compatible source modules: OpenTelemetry `v1.44.0`, OTLP/gRPC exporter `v1.44.0`, Prometheus exporter `v0.66.0`, `otelhttp v0.69.0`, `kotel v1.7.0`, `redisotel v9.21.0`, `otelpgx v0.11.1`, and Prometheus client `v1.23.2`. Dependency language declarations are minimums; repository images are still built for the selected node architecture, independently of third-party OCI image pins.
 
 Local Compose topology uses two bridges: a non-internal **edge** network (`uno_edge`, only gateway) for host port publish, and an **internal private** network (`uno_private`, all services including gateway) for interservice traffic. Backends and infra must not attach to edge — a container on an internal-only network does not materialize `NetworkSettings.Ports` even when `HostConfig.PortBindings` is set. The capability overlay project-scopes both network names (`<project>_edge` / `<project>_private`) for `docker compose -p` isolation. Copy `.env.example` before overriding image tags. Postgres 18 uses named volumes `pg_*_data_v18` mounted at `/var/lib/postgresql`; prior PG16 volumes (`pg_*_data`) stay preserved and are not reused. Local KurrentDB uses native ARM64 26.0.3 storage at `/var/lib/kurrentdb`; the capability overlay still profiles it out (`architecture-kurrentdb`) because that lane intentionally uses GI memory:
 
@@ -166,7 +171,7 @@ make test-capability-stack
 # CAP_SKIP_UP=1 UNOARENA_API_URL=http://127.0.0.1:8080 make test-capability-stack
 ```
 
-Contracts live under `contracts/openapi/bff-v1.yaml` and `contracts/asyncapi/kafka-v1.yaml`. Shared stdlib helpers live under `shared/`. Context-owned migrations live under `services/*/migrations/`.
+Contracts live under `contracts/openapi/bff-v1.yaml` and `contracts/asyncapi/kafka-v1.yaml`. Shared stdlib helpers live under `shared/`; cross-service OpenTelemetry SDK/exporter/resource and `log/slog` JSON-handler bootstrap lives in the infrastructure-only `platform/telemetry` module. Context-owned instruments, spans, log events/fields, and recording seams remain inside their bounded-context services, and context-owned migrations live under `services/*/migrations/`.
 
 ### Cross-chart credential equality / producer-scope matrix
 

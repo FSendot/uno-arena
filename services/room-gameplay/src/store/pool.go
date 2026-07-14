@@ -52,6 +52,9 @@ func NewPool(ctx context.Context, dsn string) (*Pool, error) {
 		return nil, err
 	}
 	mainCfg = runtimePoolConfig(mainCfg)
+	if tracer := pgxTracer(); tracer != nil {
+		mainCfg.ConnConfig.Tracer = tracer
+	}
 	main, err := pgxpool.NewWithConfig(ctx, mainCfg)
 	if err != nil {
 		return nil, err
@@ -66,6 +69,9 @@ func NewPool(ctx context.Context, dsn string) (*Pool, error) {
 		return nil, err
 	}
 	intentCfg = intentPoolConfig(intentCfg)
+	if tracer := pgxTracer(); tracer != nil {
+		intentCfg.ConnConfig.Tracer = tracer
+	}
 	intent, err := pgxpool.NewWithConfig(ctx, intentCfg)
 	if err != nil {
 		main.Close()

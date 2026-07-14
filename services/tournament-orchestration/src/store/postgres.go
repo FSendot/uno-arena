@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/tournament-orchestration/domain"
 	"unoarena/shared/envelope"
 )
@@ -187,6 +188,7 @@ func insertCommandOutcome(ctx context.Context, tx pgx.Tx, req CommitRequest) err
 }
 
 func insertOutboxEvents(ctx context.Context, tx pgx.Tx, events []OutboxEvent) error {
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
 	for _, e := range events {
 		if e.EventID == "" {
 			continue
@@ -209,10 +211,12 @@ func insertOutboxEvents(ctx context.Context, tx pgx.Tx, events []OutboxEvent) er
 		}
 		_, err = tx.Exec(ctx, `
 			INSERT INTO outbox_events (
-				event_id, event_type, tournament_id, topic, partition_key, schema_version, payload, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				event_id, event_type, tournament_id, topic, partition_key, schema_version, payload,
+				traceparent, tracestate, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (event_id) DO NOTHING
-		`, e.EventID, e.EventType, tid, e.Topic, e.PartitionKey, sv, payload, created)
+		`, e.EventID, e.EventType, tid, e.Topic, e.PartitionKey, sv, payload,
+			nullIfEmpty(traceparent), nullIfEmpty(tracestate), created)
 		if err != nil {
 			return err
 		}

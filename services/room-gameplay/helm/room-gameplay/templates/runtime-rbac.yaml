@@ -16,7 +16,23 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: room-runtime
+  name: {{ .Release.Name }}-runtime
+  labels:
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-timer-worker
+  labels:
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-integrity-reconciler
   labels:
     app.kubernetes.io/part-of: {{ .Release.Name }}
 automountServiceAccountToken: false

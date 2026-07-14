@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,21 +15,45 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"unoarena/services/gateway/bff"
 	"unoarena/services/gateway/bff/store"
 )
 
 func main() {
-	svc := os.Getenv("SERVICE_NAME")
-	if svc == "" {
-		svc = "gateway"
+	if err := runGateway(); err != nil {
+		slog.ErrorContext(context.Background(), "gateway stopped", "event", "service_exit_failure", "error", err)
+		os.Exit(1)
 	}
+}
+
+func runGateway() error {
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+	telemetryRuntime, err := startGatewayTelemetry(rootCtx)
+	if err != nil {
+		return fmt.Errorf("start telemetry: %w", err)
+	}
+	slog.SetDefault(telemetryRuntime.Logger)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetryRuntime.Shutdown(shutdownCtx); err != nil {
+			telemetryRuntime.Logger.ErrorContext(shutdownCtx, "telemetry shutdown failed", "event", "telemetry_shutdown_failure", "error", err)
+		}
+	}()
 
 	cfg := loadGatewayConfig()
-	built, err := buildGatewayRuntime(cfg)
+	if err := validateGatewayAuditConfig(cfg.AuditLogPath); err != nil {
+		telemetryRuntime.Logger.ErrorContext(rootCtx, "gateway audit configuration failed", "event", "startup_failure", "error", err)
+		return err
+	}
+	client := gatewayHTTPClient(telemetryRuntime, &http.Client{Timeout: 5 * time.Second})
+	built, err := buildGatewayRuntimeWithTelemetry(cfg, client, newGatewayClientInstrumentation(telemetryRuntime))
 	if err != nil {
-		log.Fatalf(`{"level":"error","service":"%s","event":"startup_failed","error":%q}`, svc, err.Error())
+		telemetryRuntime.Logger.ErrorContext(rootCtx, "gateway runtime failed", "event", "startup_failure", "error", err)
+		return err
 	}
 	defer built.close()
 
@@ -38,33 +62,39 @@ func main() {
 		addr = ":" + v
 	}
 
-	rootCtx, rootCancel := context.WithCancel(context.Background())
-	defer rootCancel()
 	built.startWorkers(rootCtx)
 
-	httpSrv := &http.Server{Addr: addr, Handler: built.server.Handler()}
+	httpSrv := &http.Server{Addr: addr, Handler: gatewayHTTPHandler(telemetryRuntime, built.server.Handler())}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"%s","event":"startup","addr":"%s","mode":"%s","ready":%t,"redisURL":%t,"kafka":%t}`,
-			svc, addr, built.mode, cfg.StaticReady() || built.mode == "durable-redis", cfg.RedisURL != "", built.kafka != nil)
+		telemetryRuntime.Logger.InfoContext(rootCtx, "gateway started", "event", "service_started", "addr", addr,
+			"mode", built.mode, "ready", cfg.StaticReady() || built.mode == "durable-redis",
+			"redisConfigured", cfg.RedisURL != "", "kafkaConfigured", built.kafka != nil)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	var serveErr error
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			serveErr = fmt.Errorf("serve HTTP: %w", err)
 		}
 	case <-sigCh:
 	}
 
-	rootCancel()
-	built.stopWorkers()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
+	if err := httpSrv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown HTTP: %w", err)
+	}
+	rootCancel()
+	built.stopWorkers()
+	if serveErr != nil {
+		return serveErr
+	}
+	return nil
 }
 
 type gatewayConfig struct {
@@ -206,12 +236,12 @@ func (rt *gatewayRuntime) close() {
 func (rt *gatewayRuntime) startWorkers(parent context.Context) {
 	if rt.kafka != nil {
 		rt.kafka.start(parent)
-		log.Printf(`{"level":"info","service":"gateway","event":"kafka_consumer_started","group":%q,"topic":%q}`,
-			rt.kafka.consumer.cfg.Group, rt.kafka.consumer.cfg.Topic)
+		slog.InfoContext(parent, "Kafka consumer started", "event", "kafka_consumer_started",
+			"group", rt.kafka.consumer.cfg.Group, "topic", rt.kafka.consumer.cfg.Topic)
 	}
 	if rt.sub != nil {
 		rt.sub.start(parent)
-		log.Printf(`{"level":"info","service":"gateway","event":"si_subscriber_started"}`)
+		slog.InfoContext(parent, "session invalidation subscriber started", "event", "session_invalidation_subscriber_started")
 	}
 }
 
@@ -251,7 +281,15 @@ func buildServer(cfg gatewayConfig) (*bff.Server, string, error) {
 }
 
 func buildGatewayRuntime(cfg gatewayConfig) (*gatewayRuntime, error) {
-	auditSink, err := openAuditSink(cfg.AuditLogPath)
+	return buildGatewayRuntimeWithHTTPClient(cfg, nil)
+}
+
+func buildGatewayRuntimeWithHTTPClient(cfg gatewayConfig, httpClient *http.Client) (*gatewayRuntime, error) {
+	return buildGatewayRuntimeWithTelemetry(cfg, httpClient, gatewayClientInstrumentation{})
+}
+
+func buildGatewayRuntimeWithTelemetry(cfg gatewayConfig, httpClient *http.Client, instrumentation gatewayClientInstrumentation) (*gatewayRuntime, error) {
+	auditSink, err := openAuditSink(cfg.AuditLogPath, instrumentation.audit)
 	if err != nil {
 		return nil, fmt.Errorf("audit sink: %w", err)
 	}
@@ -280,7 +318,9 @@ func buildGatewayRuntime(cfg gatewayConfig) (*gatewayRuntime, error) {
 		}, nil
 	}
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
 	identity, room, tournament, spectator, reads := wireGatewayHTTPClients(cfg, httpClient)
 	probes := buildUpstreamProbes(cfg, httpClient)
 
@@ -311,7 +351,7 @@ func buildGatewayRuntime(cfg gatewayConfig) (*gatewayRuntime, error) {
 	}
 
 	if cfg.durableRedisConfigured() {
-		return buildDurableRedisRuntime(cfg, identity, room, tournament, spectator, reads, auditSink, probes)
+		return buildDurableRedisRuntime(cfg, identity, room, tournament, spectator, reads, auditSink, probes, instrumentation)
 	}
 
 	hub := bff.NewHub()
@@ -349,6 +389,7 @@ func buildDurableRedisRuntime(
 	reads bff.ReadModelClient,
 	auditSink bff.AuditSink,
 	probes []bff.UpstreamProbe,
+	instrumentation gatewayClientInstrumentation,
 ) (*gatewayRuntime, error) {
 	rateRDB, err := store.NewRedisFromURL(cfg.RedisURL)
 	if err != nil {
@@ -364,6 +405,16 @@ func buildDurableRedisRuntime(
 		_ = rateRDB.Close()
 		_ = playerRDB.Close()
 		return nil, fmt.Errorf("spectator redis: %w", err)
+	}
+	if instrumentation.redis != nil {
+		for _, client := range []redis.UniversalClient{rateRDB, playerRDB, spectatorRDB} {
+			if err := instrumentation.redis(client); err != nil {
+				_ = spectatorRDB.Close()
+				_ = playerRDB.Close()
+				_ = rateRDB.Close()
+				return nil, fmt.Errorf("instrument Redis: %w", err)
+			}
+		}
 	}
 
 	hub := bff.NewHub()
@@ -403,7 +454,7 @@ func buildDurableRedisRuntime(
 	}
 	ingester := &sessionInvalidationIngester{store: siStore, hub: hub}
 	if kafkaEnabled {
-		life, err := newSessionInvalidatedKafkaLifecycle(kafkaCfg, ingester, storeQuarantineAdapter{store: siStore})
+		life, err := newSessionInvalidatedKafkaLifecycle(kafkaCfg, ingester, storeQuarantineAdapter{store: siStore}, instrumentation.kafkaHooks...)
 		if err != nil {
 			rt.close()
 			return nil, err
@@ -522,8 +573,8 @@ type sessionInvalidatedKafkaLifecycle struct {
 	stoppedErr atomic.Value
 }
 
-func newSessionInvalidatedKafkaLifecycle(cfg SessionInvalidatedKafkaConfig, handler SessionInvalidatedIngester, quarantine AggregateQuarantineStore) (*sessionInvalidatedKafkaLifecycle, error) {
-	client, err := newFranzSessionInvalidatedClient(cfg)
+func newSessionInvalidatedKafkaLifecycle(cfg SessionInvalidatedKafkaConfig, handler SessionInvalidatedIngester, quarantine AggregateQuarantineStore, hooks ...kgo.Hook) (*sessionInvalidatedKafkaLifecycle, error) {
+	client, err := newFranzSessionInvalidatedClient(cfg, hooks...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
@@ -555,12 +606,12 @@ func (l *sessionInvalidatedKafkaLifecycle) start(parent context.Context) {
 		if err != nil {
 			l.healthy.Store(false)
 			l.stoppedErr.Store(err)
-			log.Printf(`{"level":"error","service":"gateway","event":"kafka_consumer_stopped","err":%q}`, sanitizeDLQErrorSummary(err.Error()))
+			slog.ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", sanitizeDLQErrorSummary(err.Error()))
 			return
 		}
 		l.healthy.Store(false)
 		l.stoppedErr.Store(fmt.Errorf("kafka consumer exited unexpectedly"))
-		log.Printf(`{"level":"error","service":"gateway","event":"kafka_consumer_stopped","err":"exited unexpectedly"}`)
+		slog.ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", "exited unexpectedly")
 	}()
 }
 
@@ -617,10 +668,10 @@ func (l *sessionInvalidationSubLifecycle) start(parent context.Context) {
 		}
 		l.healthy.Store(false)
 		if err != nil {
-			log.Printf(`{"level":"error","service":"gateway","event":"si_subscriber_stopped","err":%q}`, sanitizeDLQErrorSummary(err.Error()))
+			slog.ErrorContext(ctx, "session invalidation subscriber stopped", "event", "session_invalidation_subscriber_stopped", "error", sanitizeDLQErrorSummary(err.Error()))
 			return
 		}
-		log.Printf(`{"level":"error","service":"gateway","event":"si_subscriber_stopped","err":"exited unexpectedly"}`)
+		slog.ErrorContext(ctx, "session invalidation subscriber stopped", "event", "session_invalidation_subscriber_stopped", "error", "exited unexpectedly")
 	}()
 }
 
@@ -692,8 +743,11 @@ func wireGatewayHTTPClients(cfg gatewayConfig, httpClient *http.Client) (
 	return identity, room, tournament, spectator, reads
 }
 
-func openAuditSink(path string) (bff.AuditSink, error) {
+func openAuditSink(path string, handler ...slog.Handler) (bff.AuditSink, error) {
 	if strings.TrimSpace(path) == "" {
+		if len(handler) > 0 && handler[0] != nil {
+			return bff.NewSlogAudit(handler[0]), nil
+		}
 		return bff.NewStderrJSONLAudit(), nil
 	}
 	return bff.OpenJSONLAudit(path)

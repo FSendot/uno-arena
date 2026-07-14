@@ -11,9 +11,24 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
 env:
   SERVICE_NAME: game-integrity
   DEPLOYMENT_ENV: local
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "0.001"
   KURRENTDB_URL: kurrentdb://kurrentdb.uno-arena.svc.cluster.local:2113?tls=false
   KAFKA_BROKERS: kafka.uno-arena.svc.cluster.local:9092
   GAME_INTEGRITY_ENVELOPE_PROVIDER: dev

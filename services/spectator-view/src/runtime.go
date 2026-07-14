@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync/atomic"
 
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 
 	"unoarena/services/spectator-view/store"
@@ -51,12 +51,12 @@ func (l *spectatorSafeKafkaLifecycle) start(parent context.Context) {
 		if err != nil {
 			l.healthy.Store(false)
 			l.stoppedErr.Store(err)
-			log.Printf(`{"level":"error","service":"spectator-view","event":"kafka_consumer_stopped","err":%q}`, sanitizeLogErr(err))
+			processLogger().ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", sanitizeLogErr(err))
 			return
 		}
 		l.healthy.Store(false)
 		l.stoppedErr.Store(fmt.Errorf("kafka consumer exited unexpectedly"))
-		log.Printf(`{"level":"error","service":"spectator-view","event":"kafka_consumer_stopped","err":"exited unexpectedly"}`)
+		processLogger().ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", "exited unexpectedly")
 	}()
 }
 
@@ -139,6 +139,14 @@ func wireSpectatorRuntime() (spectatorRuntime, error) {
 		rdb, err := store.NewRedisFromURL(redisURL)
 		if err != nil {
 			return spectatorRuntime{}, fmt.Errorf("redis client: %w", err)
+		}
+		if err := redisotel.InstrumentTracing(rdb,
+			redisotel.WithTracerProvider(processTracerProvider()),
+			redisotel.WithDBStatement(false),
+			redisotel.WithCallerEnabled(false),
+		); err != nil {
+			_ = rdb.Close()
+			return spectatorRuntime{}, fmt.Errorf("instrument redis: %w", err)
 		}
 		rs := store.NewRedisProjectionStore(rdb, keyPrefix)
 		if n, ok, err := store.ParseStreamMaxLenEnv(os.Getenv("SPECTATOR_REDIS_STREAM_MAXLEN")); err != nil {

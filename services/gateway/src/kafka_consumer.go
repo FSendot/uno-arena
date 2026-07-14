@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"unoarena/services/gateway/bff/store"
 )
 
@@ -19,6 +21,7 @@ type ConsumerRecord struct {
 	Offset    int64
 	Key       []byte
 	Value     []byte
+	Context   context.Context
 }
 
 // DLQFailureMeta is sanitized operational metadata published with a DLQ record.
@@ -313,6 +316,9 @@ func (c *SessionInvalidatedKafkaConsumer) ProcessBatch(ctx context.Context, recs
 }
 
 func (c *SessionInvalidatedKafkaConsumer) processOne(ctx context.Context, rec ConsumerRecord) error {
+	if rec.Context != nil {
+		ctx = trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(rec.Context))
+	}
 	key := strings.TrimSpace(string(rec.Key))
 	sourceTopic := firstNonEmpty(rec.Topic, c.cfg.Topic)
 	quarantineKey := trustworthyPlayerAggregateKey(key)

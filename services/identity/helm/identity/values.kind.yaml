@@ -10,9 +10,24 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
 env:
   SERVICE_NAME: identity
   DEPLOYMENT_ENV: local
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "0.001"
   # Writer DSN is secret-mapped; OIDC issuer uses in-cluster service DNS.
   OIDC_ISSUER_URL: http://keycloak.uno-arena.svc.cluster.local:8080/realms/unoarena
   # Token endpoint reachable from Identity pods (same cluster DNS).

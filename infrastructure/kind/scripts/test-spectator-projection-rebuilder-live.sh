@@ -33,6 +33,7 @@ REDIS_DB=5
 
 PF_PID=""
 PF_LOG=""
+CREATE_RESPONSE_FILE=""
 ROOM_LOCAL_PORT=""
 ROOM_CREATED=0
 IDENTITY_PLAYER_ID=""
@@ -104,6 +105,7 @@ SQL
     wait "${PF_PID}" 2>/dev/null
   fi
   [[ -z "${PF_LOG}" ]] || rm -f "${PF_LOG}"
+  [[ -z "${CREATE_RESPONSE_FILE}" ]] || rm -f "${CREATE_RESPONSE_FILE}"
   return "${rc}"
 }
 trap cleanup EXIT
@@ -155,10 +157,26 @@ create_body="$(jq -cn \
   --arg cid "${COMMAND_ID}" --arg room "${ROOM_ID}" \
   '{commandId:$cid,type:"CreateRoom",schemaVersion:1,payload:{roomId:$room,visibility:"public"}}')"
 ROOM_CREATED=1
-create_response="$(curl -fsS -X POST "http://127.0.0.1:${ROOM_LOCAL_PORT}/v1/commands" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer ${token}" \
-  -H "X-Command-Id: ${COMMAND_ID}" -H "X-Correlation-Id: corr-${SUFFIX}" -d "${create_body}")" \
-  || die "failed to create Room recovery fixture"
+CREATE_RESPONSE_FILE="$(mktemp "${TMPDIR:-/tmp}/spectator-rebuilder-create.XXXXXX")"
+create_code=""
+create_response=""
+# The command ID makes CreateRoom safe to retry when the Gateway temporarily
+# loses a Room endpoint during local rollout convergence. Retry only transport
+# and gateway-availability statuses; application responses remain fail-closed.
+for _ in $(seq 1 10); do
+  create_code="$(curl -sS -o "${CREATE_RESPONSE_FILE}" -w '%{http_code}' -X POST \
+    "http://127.0.0.1:${ROOM_LOCAL_PORT}/v1/commands" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer ${token}" \
+    -H "X-Command-Id: ${COMMAND_ID}" -H "X-Correlation-Id: corr-${SUFFIX}" -d "${create_body}" || true)"
+  create_response="$(cat "${CREATE_RESPONSE_FILE}")"
+  [[ "${create_code}" =~ ^2[0-9][0-9]$ ]] && break
+  case "${create_code}" in
+    000|502|503|504) sleep 2 ;;
+    *) die "Room recovery fixture failed status=${create_code} body=${create_response}" ;;
+  esac
+done
+[[ "${create_code}" =~ ^2[0-9][0-9]$ ]] \
+  || die "failed to create Room recovery fixture after bounded retries status=${create_code} body=${create_response}"
 [[ "$(jq -r '.status // empty' <<<"${create_response}")" == "accepted" ]] \
   || die "Room fixture rejected: ${create_response}"
 
@@ -186,15 +204,34 @@ metadata:
   labels:
     app: spectator-projection-rebuilder-live-test
     uno-arena.local/live-test: "true"
+    app.kubernetes.io/name: spectator-view
+    unoarena.io/component: projection-rebuilder
+    unoarena.io/metrics-exposed: "true"
+    unoarena.io/metrics-scrape: pod
 spec:
+  serviceAccountName: spectator-view-projection-rebuilder
+  automountServiceAccountToken: false
   restartPolicy: Never
   terminationGracePeriodSeconds: 5
   containers:
     - name: projection-rebuilder
       image: uno-arena/spectator-view:local
       imagePullPolicy: IfNotPresent
+      ports: [{name: metrics, containerPort: 9090}]
       env:
         - {name: WORKER_ROLE, value: spectator-projection-rebuilder}
+        - {name: TELEMETRY_MODE, value: required}
+        - {name: SERVICE_NAME, value: spectator-view}
+        - {name: DEPLOYMENT_ENV, value: kind}
+        - {name: SERVICE_VERSION, value: local}
+        - {name: UNOARENA_COMPONENT, value: projection-rebuilder}
+        - {name: METRICS_ADDR, value: ":9090"}
+        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://alloy-otlp.observability.svc.cluster.local:4317}
+        - {name: OTEL_EXPORTER_OTLP_PROTOCOL, value: grpc}
+        - {name: OTEL_TRACES_SAMPLER, value: parentbased_always_on}
+        - {name: OTEL_GO_X_OBSERVABILITY, value: "true"}
+        - name: POD_UID
+          valueFrom: {fieldRef: {fieldPath: metadata.uid}}
         - {name: REDIS_URL, value: redis://redis.uno-arena.svc.cluster.local:6379/${REDIS_DB}}
         - {name: SPECTATOR_REDIS_KEY_PREFIX, value: "${REDIS_PREFIX}"}
         - {name: KAFKA_BROKERS, value: kafka.uno-arena.svc.cluster.local:9092}
@@ -213,7 +250,7 @@ YAML
 kubectl -n "${KIND_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Running "pod/${POD}" --timeout=60s >/dev/null \
   || { kubectl -n "${KIND_NAMESPACE}" describe "pod/${POD}"; die "rebuilder Pod did not start"; }
 deadline=$((SECONDS + 60))
-until kubectl -n "${KIND_NAMESPACE}" logs "${POD}" 2>/dev/null | grep -q projection_rebuilder_startup; do
+until kubectl -n "${KIND_NAMESPACE}" logs "${POD}" 2>/dev/null | grep -q projection_rebuilder_started; do
   (( SECONDS < deadline )) || { kubectl -n "${KIND_NAMESPACE}" logs "${POD}" >&2; die "rebuilder did not report startup"; }
   sleep 1
 done

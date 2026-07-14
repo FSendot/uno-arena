@@ -1,0 +1,18 @@
+storage:
+  s3:
+    endpoint: ""
+    region: ""
+    forcePathStyle: false
+    insecure: false
+    existingSecret: uno-arena-observability-s3
+    lokiBucket: ""
+    tempoBucket: ""
+
+grafana:
+  existingAdminSecret: uno-arena-observability-grafana
+
+prometheus:
+  scrapeInterval: 30s
+  evaluationInterval: 30s
+  scrapeTimeout: 10s
+

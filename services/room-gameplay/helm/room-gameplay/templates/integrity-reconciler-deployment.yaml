@@ -16,15 +16,23 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-integrity-reconciler
+        app.kubernetes.io/name: room-gameplay
         app.kubernetes.io/part-of: {{ .Release.Name }}
         unoarena.io/component: room-integrity-reconciler
+        unoarena.io/metrics-scrape: pod
+        unoarena.io/metrics-exposed: "true"
     spec:
+      serviceAccountName: {{ .Release.Name }}-integrity-reconciler
       automountServiceAccountToken: false
       containers:
         - name: integrity-reconciler
           image: {{ include "room-gameplay.image" . | quote }}
           imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            {{- include "room-gameplay.telemetryEnv" (dict "root" . "component" "room-integrity-reconciler") | nindent 12 }}
             - name: WORKER_ROLE
               value: "room-integrity-reconciler"
             - name: POD_NAME

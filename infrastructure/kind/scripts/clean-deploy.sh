@@ -36,14 +36,17 @@ done
 
 steps=(
   validate.sh
+  verify-portable-images.sh
   reset.sh
   create-cluster.sh
+  install-istio.sh
   build-load-bootstrap.sh
   build-load-services.sh
   load-debezium-connect.sh
   load-debezium-server.sh
   apply.sh
   wait.sh
+  deploy-observability.sh
   deploy-services.sh
 )
 if [[ "${skip_probes}" == false ]]; then
@@ -62,15 +65,15 @@ fi
 [[ "${KIND_CLUSTER_NAME}" == "uno-arena" ]] || die "clean deployment is pinned to cluster uno-arena"
 [[ "${KIND_CONTEXT_NAME}" == "kind-uno-arena" ]] || die "clean deployment is pinned to context kind-uno-arena"
 
-# Fail before deleting the existing disposable cluster when the host cannot run
-# the selected ARM64-only local stack or a required deployment tool is absent.
+# Fail before deleting the existing disposable cluster when the host has no
+# reviewed KurrentDB image or a required deployment tool is absent.
 for command in bash curl docker helm kind kubectl ruby; do
   require_cmd "${command}"
 done
 docker_arch="$(docker info --format '{{.Architecture}}')"
 case "${docker_arch}" in
-  aarch64|arm64) ;;
-  *) die "Docker architecture '${docker_arch}' is unsupported: local KurrentDB is ARM64-only" ;;
+  x86_64|amd64|aarch64|arm64) ;;
+  *) die "Docker architecture '${docker_arch}' has no reviewed KurrentDB 26.0.3 image" ;;
 esac
 
 for step in "${steps[@]}"; do

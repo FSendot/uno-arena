@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/exaring/otelpgx"
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"unoarena/services/ranking/store"
 )
 
@@ -56,12 +57,12 @@ func (l *gameCompletedKafkaLifecycle) start(parent context.Context) {
 		if err != nil {
 			l.healthy.Store(false)
 			l.stoppedErr.Store(err)
-			log.Printf(`{"level":"error","service":"ranking","event":"kafka_consumer_stopped","err":%q}`, sanitizeLogErr(err))
+			processLogger().ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", sanitizeLogErr(err))
 			return
 		}
 		l.healthy.Store(false)
 		l.stoppedErr.Store(fmt.Errorf("kafka consumer exited unexpectedly"))
-		log.Printf(`{"level":"error","service":"ranking","event":"kafka_consumer_stopped","err":"exited unexpectedly"}`)
+		processLogger().ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", "exited unexpectedly")
 	}()
 }
 
@@ -172,7 +173,13 @@ func wireRankingRuntime() (rankingRuntime, error) {
 				analyticsBackfillCredential: analyticsCred,
 			}, nil
 		}
-		pool, err := store.NewPool(context.Background(), dbURL)
+		pool, err := store.NewPoolWithTracer(context.Background(), dbURL, otelpgx.NewTracer(
+			otelpgx.WithTracerProvider(processTracerProvider()),
+			otelpgx.WithMeterProvider(processMeterProvider()),
+			otelpgx.WithSpanNameFunc(func(string) string { return "ranking.postgres.query" }),
+			otelpgx.WithDisableQuerySpanNamePrefix(),
+			otelpgx.WithDisableSQLStatementInAttributes(),
+		))
 		if err != nil {
 			return rankingRuntime{}, fmt.Errorf("database pool: %w", err)
 		}
@@ -180,6 +187,15 @@ func wireRankingRuntime() (rankingRuntime, error) {
 		if err != nil {
 			pool.Close()
 			return rankingRuntime{}, fmt.Errorf("redis client: %w", err)
+		}
+		if err := redisotel.InstrumentTracing(rdb,
+			redisotel.WithTracerProvider(processTracerProvider()),
+			redisotel.WithDBStatement(false),
+			redisotel.WithCallerEnabled(false),
+		); err != nil {
+			_ = rdb.Close()
+			pool.Close()
+			return rankingRuntime{}, fmt.Errorf("instrument redis: %w", err)
 		}
 		lb := store.NewRedisLeaderboardStore(rdb, "")
 		if err := lb.LoadScripts(context.Background()); err != nil {
@@ -192,7 +208,7 @@ func wireRankingRuntime() (rankingRuntime, error) {
 			pool.Close()
 			return rankingRuntime{}, fmt.Errorf("redis ping: %w", err)
 		}
-		rs := store.NewRankingStore(pool.Pool)
+		rs := store.NewRankingStoreWithTracer(pool.Pool, processTracerProvider())
 		exp := store.DefaultSchemaExpectation()
 		app := newDurableApp(rs).withRedis(lb)
 		backfill := newDurableAnalyticsBackfillStore(store.NewAnalyticsBackfillStore(pool.Pool))
@@ -274,11 +290,17 @@ func wireLeaderboardSnapshotterRuntime(dbURL string) (rankingRuntime, error) {
 	if strings.TrimSpace(dbURL) == "" {
 		return rankingRuntime{}, fmt.Errorf("WORKER_ROLE=%s requires DATABASE_URL", workerRoleLeaderboardSnapshotter)
 	}
-	pool, err := store.NewPool(context.Background(), dbURL)
+	pool, err := store.NewPoolWithTracer(context.Background(), dbURL, otelpgx.NewTracer(
+		otelpgx.WithTracerProvider(processTracerProvider()),
+		otelpgx.WithMeterProvider(processMeterProvider()),
+		otelpgx.WithSpanNameFunc(func(string) string { return "ranking.postgres.query" }),
+		otelpgx.WithDisableQuerySpanNamePrefix(),
+		otelpgx.WithDisableSQLStatementInAttributes(),
+	))
 	if err != nil {
 		return rankingRuntime{}, fmt.Errorf("database pool: %w", err)
 	}
-	rs := store.NewRankingStore(pool.Pool)
+	rs := store.NewRankingStoreWithTracer(pool.Pool, processTracerProvider())
 	exp := store.DefaultSchemaExpectation()
 	return rankingRuntime{
 		app:       newDurableApp(rs),

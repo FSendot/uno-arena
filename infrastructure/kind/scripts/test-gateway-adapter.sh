@@ -24,7 +24,7 @@ echo "note: SessionInvalidated Kafka consumer wired; /ready proves durable Redis
 
 ready=0
 for _ in $(seq 1 90); do
-  code="$(curl -sS -o /tmp/gateway-ready.json -w '%{http_code}' "${GATEWAY_BASE_URL}/ready" || true)"
+  code="$(curl --max-time 5 -sS -o /tmp/gateway-ready.json -w '%{http_code}' "${GATEWAY_BASE_URL}/ready" || true)"
   if [[ "${code}" == "200" ]]; then
     ready=1
     break
@@ -34,7 +34,7 @@ done
 [[ "${ready}" == "1" ]] || die "/ready never became 200 (last=$(cat /tmp/gateway-ready.json 2>/dev/null || true))"
 
 # Health must stay up independently of upstream probe set.
-health="$(curl -sS -o /tmp/gateway-health.json -w '%{http_code}' "${GATEWAY_BASE_URL}/health" || true)"
+health="$(curl --max-time 5 -sS -o /tmp/gateway-health.json -w '%{http_code}' "${GATEWAY_BASE_URL}/health" || true)"
 [[ "${health}" == "200" ]] || die "/health want 200 got ${health}"
 
 echo "ok kind-test-gateway-adapter (SessionInvalidated Kafka wired; durable Redis ready)"

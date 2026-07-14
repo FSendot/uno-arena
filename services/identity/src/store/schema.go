@@ -17,7 +17,7 @@ const (
 	ExpectedBootstrapVersion = "001_init"
 	// ExpectedSchemaChecksum is SHA-256 of services/identity/migrations/001_init.sql bytes.
 	// Override via IDENTITY_SCHEMA_CHECKSUM when operators fingerprint a different artifact.
-	ExpectedSchemaChecksum = "4c1d0df7c7e09122ab7bc00c1f54f0784e4e196da76d8c2feace8da1bb966719"
+	ExpectedSchemaChecksum = "edc0dff02cf714320e7a67aed8c1f4d2dbfd9e22d522ab75d148ffbaffd942de"
 )
 
 // SchemaExpectation holds the exact version/checksum VerifySchema requires.

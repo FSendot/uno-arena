@@ -1,5 +1,5 @@
 # Debezium Kafka Connect 3.6.0.Final — Phase 1 durable Kafka CDC (ADR-0016).
-# Workload pins the exact quay.io ARM64 digest; imagePullPolicy Never so kubelet
+# Workload pins the exact quay.io multi-architecture index; imagePullPolicy Never so kubelet
 # never registry-pulls — make kind-load-debezium-connect (node-native crictl pull)
 # is mandatory before pods can start. kind load is not used for this image.
 # Connect internal topics (connect-configs/offsets/status) are created by
@@ -36,11 +36,9 @@ metadata:
     uno-arena.local/debezium-role: kafka-connect
 data:
   # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
-  # Multiarch index (non-ARM notes): quay.io/debezium/connect@sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
-  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
+  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
   IMAGE_VERSION: 3.6.0.Final
-  ARM64_DIGEST: sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
-  MULTIARCH_INDEX_DIGEST: sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
+  MULTIARCH_INDEX_DIGEST: sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
   # Shared Outbox Event Router field contract (column names match migrations).
   OUTBOX_ROUTER_NOTES: |
     route.by.field=topic
@@ -48,7 +46,7 @@ data:
     table.field.event.id=event_id
     table.field.event.key=partition_key
     table.field.event.payload=payload
-    table.fields.additional.placement=event_type:header:type
+    table.fields.additional.placement=event_type:header:type,traceparent:header:traceparent,tracestate:header:tracestate
     table.expand.json.payload=true (schema-disabled canonical payload objects)
     Kafka record timestamp uses the connector source time. Canonical occurredAt
     remains inside each JSON payload; Postgres timestamptz is not an INT64 SMT field.
@@ -81,7 +79,7 @@ data:
       "transforms.outbox.table.expand.json.payload": "true",
       "transforms.outbox.route.by.field": "topic",
       "transforms.outbox.route.topic.replacement": "${routedByValue}",
-      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type,traceparent:header:traceparent,tracestate:header:tracestate",
       "transforms.outbox.table.op.invalid.behavior": "warn"
     }
   connector-room-integration-outbox.json: |
@@ -113,7 +111,7 @@ data:
       "transforms.outbox.table.expand.json.payload": "true",
       "transforms.outbox.route.by.field": "topic",
       "transforms.outbox.route.topic.replacement": "${routedByValue}",
-      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type,traceparent:header:traceparent,tracestate:header:tracestate",
       "transforms.outbox.table.op.invalid.behavior": "warn"
     }
   connector-tournament-outbox.json: |
@@ -145,7 +143,7 @@ data:
       "transforms.outbox.table.expand.json.payload": "true",
       "transforms.outbox.route.by.field": "topic",
       "transforms.outbox.route.topic.replacement": "${routedByValue}",
-      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type,traceparent:header:traceparent,tracestate:header:tracestate",
       "transforms.outbox.table.op.invalid.behavior": "warn"
     }
   connector-ranking-outbox.json: |
@@ -177,7 +175,7 @@ data:
       "transforms.outbox.table.expand.json.payload": "true",
       "transforms.outbox.route.by.field": "topic",
       "transforms.outbox.route.topic.replacement": "${routedByValue}",
-      "transforms.outbox.table.fields.additional.placement": "event_type:header:type",
+      "transforms.outbox.table.fields.additional.placement": "event_type:header:type,traceparent:header:traceparent,tracestate:header:tracestate",
       "transforms.outbox.table.op.invalid.behavior": "warn"
     }
 ---
@@ -207,8 +205,8 @@ spec:
       enableServiceLinks: false
       containers:
         - name: connect
-          # Exact quay ARM64 digest; Never = node must already hold it (node-native loader).
-          image: quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
+          # Exact quay multiarch index; Never = node must already hold its resolved child.
+          image: quay.io/debezium/connect:3.6.0.Final@sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
           imagePullPolicy: Never
           ports:
             - containerPort: 8083
@@ -240,6 +238,11 @@ spec:
               value: "0.0.0.0"
             - name: ADVERTISED_HOST_NAME
               value: debezium-connect.uno-arena.svc.cluster.local
+            # The bundled Debezium plugins all publish ServiceLoader metadata.
+            # Avoid Kafka Connect's legacy reflective second scan, which can
+            # exceed the local liveness budget under single-node contention.
+            - name: CONNECT_PLUGIN_DISCOVERY
+              value: service_load
           volumeMounts:
             - name: templates
               mountPath: /kafka/uno-arena-templates
@@ -251,7 +254,7 @@ spec:
                 - -c
                 - curl -sf http://127.0.0.1:8083/ | grep -q version
             initialDelaySeconds: 20
-            periodSeconds: 10
+            periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 18
           livenessProbe:
@@ -261,7 +264,7 @@ spec:
                 - -c
                 - curl -sf http://127.0.0.1:8083/ | grep -q version
             initialDelaySeconds: 40
-            periodSeconds: 20
+            periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 6
           resources:

@@ -51,6 +51,12 @@ type roomRuntimeConfig struct {
 	RuntimeControllerConcurrency int
 	RuntimeControllerCadence     time.Duration
 	RuntimeReadinessTimeout      time.Duration
+	RuntimeCPURequest            string
+	RuntimeMemoryRequest         string
+	RuntimeCPULimit              string
+	RuntimeMemoryLimit           string
+	RuntimeProbeTimeoutSeconds   int
+	RuntimeProbeFailureThreshold int
 	IntegrityReconcilerBatch     int
 	IntegrityReconcilerLease     time.Duration
 	IntegrityReconcilerInterval  time.Duration
@@ -156,6 +162,12 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 		RuntimeControllerConcurrency: envInt("ROOM_RUNTIME_CONTROLLER_CONCURRENCY", 4),
 		RuntimeControllerCadence:     time.Duration(envInt("ROOM_RUNTIME_CONTROLLER_CADENCE_MILLIS", 1000)) * time.Millisecond,
 		RuntimeReadinessTimeout:      time.Duration(envInt("ROOM_RUNTIME_READINESS_TIMEOUT_SECONDS", 60)) * time.Second,
+		RuntimeCPURequest:            firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_CPU_REQUEST"), "10m"),
+		RuntimeMemoryRequest:         firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_MEMORY_REQUEST"), "32Mi"),
+		RuntimeCPULimit:              firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_CPU_LIMIT"), "250m"),
+		RuntimeMemoryLimit:           firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_MEMORY_LIMIT"), "256Mi"),
+		RuntimeProbeTimeoutSeconds:   envInt("ROOM_RUNTIME_PROBE_TIMEOUT_SECONDS", 1),
+		RuntimeProbeFailureThreshold: envInt("ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD", 3),
 		IntegrityReconcilerBatch:     envInt("ROOM_INTEGRITY_RECONCILER_CLAIM_BATCH", 32),
 		IntegrityReconcilerLease:     time.Duration(envInt("ROOM_INTEGRITY_RECONCILER_LEASE_SECONDS", 60)) * time.Second,
 		IntegrityReconcilerInterval:  time.Duration(envInt("ROOM_INTEGRITY_RECONCILER_INTERVAL_MILLIS", 2000)) * time.Millisecond,
@@ -327,7 +339,9 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 
 	sessions := store.NewSessionStoreWithPools(pool.Main, pool.Intent).WithTimers(timers)
 	var auditSink app.AuditSink = app.NewStderrJSONLAuditSink()
-	if cfg.AuditLogPath != "" {
+	if telemetryRequired() && roomProcessTelemetry != nil {
+		auditSink = app.NewSlogAuditSink(roomProcessTelemetry.Handler)
+	} else if cfg.AuditLogPath != "" {
 		sink, err := app.OpenJSONLAuditSink(cfg.AuditLogPath)
 		if err != nil {
 			pool.Close()
@@ -383,6 +397,10 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 			return nil
 		},
 	}, nil
+}
+
+func telemetryRequired() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("TELEMETRY_MODE")), "required")
 }
 
 func roomDurableMissing(cfg roomRuntimeConfig) []string {

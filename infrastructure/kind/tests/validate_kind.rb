@@ -21,7 +21,8 @@ DOCKERIGNORE = File.join(ROOT, ".dockerignore")
 
 require_relative "../../bootstrap/lib/fingerprint"
 
-KURRENT_DIGEST = "sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e"
+KURRENT_ARM_DIGEST = "sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e"
+KURRENT_AMD_DIGEST = "sha256:b4d0665a78269cd7184971c4d1fad38265277901f3d3730d89dcfba8f3d37fe9"
 EXPECTED_BOOTSTRAP_JOBS = {
   "bootstrap-postgres-identity" => "identity",
   "bootstrap-postgres-room-gameplay" => "room-gameplay",
@@ -122,12 +123,15 @@ images_cm = File.read(File.join(MANIFESTS, "01-local-secrets.yaml"))
   fail_collect(failures, "images ConfigMap missing #{value}") unless images_cm.include?(value)
 end
 
-fail_collect(failures, "Kurrent ARM digest missing from .env.example") unless env.include?(KURRENT_DIGEST)
-fail_collect(failures, "Kurrent ARM digest missing from compose") unless compose.include?(KURRENT_DIGEST)
+fail_collect(failures, "Kurrent ARM digest missing from .env.example") unless env.include?(KURRENT_ARM_DIGEST)
+fail_collect(failures, "Kurrent ARM digest missing from compose") unless compose.include?(KURRENT_ARM_DIGEST)
 
 kurrent_manifest = File.read(File.join(MANIFESTS, "40-kurrentdb/kurrentdb.yaml"))
-fail_collect(failures, "Kurrent manifest missing ARM digest pin") unless kurrent_manifest.include?(KURRENT_DIGEST)
-fail_collect(failures, "Kurrent manifest missing experimental ARM tag") unless kurrent_manifest.include?("26.0.3-experimental-arm64")
+fail_collect(failures, "Kurrent manifest must defer architecture selection") unless kurrent_manifest.include?("__KURRENTDB_IMAGE_BY_NODE_ARCH__")
+apply_text = File.read(File.join(KIND, "scripts/apply.sh"))
+fail_collect(failures, "Kurrent apply selection missing reviewed ARM digest") unless apply_text.include?(KURRENT_ARM_DIGEST)
+fail_collect(failures, "Kurrent apply selection missing reviewed AMD digest") unless apply_text.include?(KURRENT_AMD_DIGEST)
+fail_collect(failures, "Kurrent image ConfigMap must defer architecture selection") unless images_cm.include?("__KURRENTDB_IMAGE_BY_NODE_ARCH__")
 fail_collect(failures, "Kurrent readiness must use supported /health/live") unless kurrent_manifest.match?(%r{readinessProbe:[\s\S]*?path:\s*/health/live})
 fail_collect(failures, "Kurrent liveness must be /health/live") unless kurrent_manifest.match?(%r{livenessProbe:[\s\S]*?path:\s*/health/live})
 fail_collect(failures, "Kurrent missing data mount /var/lib/kurrentdb") unless kurrent_manifest.include?("/var/lib/kurrentdb")
@@ -186,15 +190,15 @@ fail_collect(failures, "missing test-redis-aof-structure.sh") unless File.file?(
 puts "ok redis-local-aof"
 
 # --- Debezium Server (Room realtime → Redis); structure only, no delivery claim ---
-DEBEZIUM_SERVER_ARM_DIGEST = "sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08"
-DEBEZIUM_SERVER_SOURCE_IMAGE = "quay.io/debezium/server:3.6.0.Final@#{DEBEZIUM_SERVER_ARM_DIGEST}"
+DEBEZIUM_SERVER_INDEX_DIGEST = "sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d"
+DEBEZIUM_SERVER_SOURCE_IMAGE = "quay.io/debezium/server:3.6.0.Final@#{DEBEZIUM_SERVER_INDEX_DIGEST}"
 DEBEZIUM_SERVER_STALE_TAG = "docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 DEBEZIUM_SERVER_SHORT_STALE = "uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 debezium_server_path = File.join(MANIFESTS, "80-debezium-server/debezium-server-room-realtime.yaml")
 fail_collect(failures, "missing Debezium Server manifest") unless File.file?(debezium_server_path)
 ds_text = File.read(debezium_server_path)
 fail_collect(failures, "Debezium Server must use exact source #{DEBEZIUM_SERVER_SOURCE_IMAGE}") unless ds_text.include?(DEBEZIUM_SERVER_SOURCE_IMAGE)
-fail_collect(failures, "Debezium Server must record ARM64 source digest #{DEBEZIUM_SERVER_ARM_DIGEST}") unless ds_text.include?(DEBEZIUM_SERVER_ARM_DIGEST)
+fail_collect(failures, "Debezium Server must record multiarch index #{DEBEZIUM_SERVER_INDEX_DIGEST}") unless ds_text.include?(DEBEZIUM_SERVER_INDEX_DIGEST)
 fail_collect(failures, "Debezium Server must use imagePullPolicy Never") unless ds_text.include?("imagePullPolicy: Never")
 fail_collect(failures, "Debezium Server must not use IfNotPresent") if ds_text.include?("imagePullPolicy: IfNotPresent")
 ds_images = ds_text.scan(/^\s+image:\s+(\S+)\s*$/).flatten
@@ -232,12 +236,13 @@ fail_collect(failures, "missing test-debezium-server-structure.sh") unless File.
 fail_collect(failures, "missing load-debezium-server.sh") unless File.file?(ds_load)
 fail_collect(failures, "missing status-debezium-server.sh") unless File.file?(ds_status)
 ds_load_text = File.read(ds_load)
-fail_collect(failures, "Debezium Server loader must record ARM64 source digest") unless ds_load_text.include?(DEBEZIUM_SERVER_ARM_DIGEST.delete_prefix("sha256:"))
+fail_collect(failures, "Debezium Server loader must record multiarch index") unless ds_load_text.include?(DEBEZIUM_SERVER_INDEX_DIGEST.delete_prefix("sha256:"))
 fail_collect(failures, "Debezium Server loader must stage exact source image") unless ds_load_text.include?(DEBEZIUM_SERVER_SOURCE_IMAGE)
 fail_collect(failures, "Debezium Server loader must docker exec into kind node") unless ds_load_text.include?("docker exec")
 fail_collect(failures, "Debezium Server loader must crictl pull") unless ds_load_text.include?("crictl pull")
 fail_collect(failures, "Debezium Server loader must verify via crictl inspecti") unless ds_load_text.include?("crictl inspecti")
-fail_collect(failures, "Debezium Server loader must verify arm64") unless ds_load_text.include?("arm64")
+fail_collect(failures, "Debezium Server loader must verify amd64") unless ds_load_text.include?('expected_arch="amd64"')
+fail_collect(failures, "Debezium Server loader must verify arm64") unless ds_load_text.include?('expected_arch="arm64"')
 fail_collect(failures, "Debezium Server loader must not kind load") if ds_load_text.match?(/kind\s+load\s+docker-image/)
 fail_collect(failures, "Debezium Server loader must remove stale runtime tag") unless ds_load_text.include?(DEBEZIUM_SERVER_STALE_TAG)
 fail_collect(failures, "Debezium Server loader must fail closed on docker.io/library/import-") unless ds_load_text.include?("docker.io/library/import-")
@@ -249,9 +254,8 @@ fail_collect(failures, "Debezium Server loader must not encode ctr content / con
 puts "ok debezium-server-room-realtime"
 
 # --- Debezium Kafka Connect (four outbox routers); structure only, no delivery claim ---
-DEBEZIUM_CONNECT_ARM_DIGEST = "sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70"
-DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7"
-DEBEZIUM_CONNECT_SOURCE_IMAGE = "quay.io/debezium/connect:3.6.0.Final@#{DEBEZIUM_CONNECT_ARM_DIGEST}"
+DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455"
+DEBEZIUM_CONNECT_SOURCE_IMAGE = "quay.io/debezium/connect:3.6.0.Final@#{DEBEZIUM_CONNECT_MULTIARCH_DIGEST}"
 DEBEZIUM_CONNECT_STALE_TAG = "docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 DEBEZIUM_CONNECT_SHORT_STALE = "uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 debezium_connect_path = File.join(MANIFESTS, "80-debezium/connect.yaml")
@@ -261,10 +265,9 @@ fail_collect(failures, "missing Debezium connector registration Job") unless Fil
 dc_text = File.read(debezium_connect_path)
 dr_text = File.read(debezium_register_path)
 fail_collect(failures, "Debezium Connect must use exact source #{DEBEZIUM_CONNECT_SOURCE_IMAGE}") unless dc_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
-fail_collect(failures, "Debezium Connect must record ARM64 source digest #{DEBEZIUM_CONNECT_ARM_DIGEST}") unless dc_text.include?(DEBEZIUM_CONNECT_ARM_DIGEST)
 fail_collect(failures, "Debezium Connect must document multiarch index #{DEBEZIUM_CONNECT_MULTIARCH_DIGEST}") unless dc_text.include?(DEBEZIUM_CONNECT_MULTIARCH_DIGEST)
 fail_collect(failures, "Debezium Connect register Job must use same exact source") unless dr_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
-fail_collect(failures, "Debezium Connect register Job must record ARM64 source digest") unless dr_text.include?(DEBEZIUM_CONNECT_ARM_DIGEST)
+fail_collect(failures, "Debezium Connect register Job must record multiarch index") unless dr_text.include?(DEBEZIUM_CONNECT_MULTIARCH_DIGEST)
 fail_collect(failures, "Debezium Connect must use 3.6.0.Final") unless dc_text.include?("3.6.0.Final")
 fail_collect(failures, "Debezium Connect must use imagePullPolicy Never") unless dc_text.include?("imagePullPolicy: Never")
 fail_collect(failures, "Debezium Connect register Job must use imagePullPolicy Never") unless dr_text.include?("imagePullPolicy: Never")
@@ -363,12 +366,13 @@ fail_collect(failures, "missing test-debezium-connect-structure.sh") unless File
 fail_collect(failures, "missing load-debezium-connect.sh") unless File.file?(dc_load)
 fail_collect(failures, "missing test-debezium-connectors.sh") unless File.file?(dc_status)
 dc_load_text = File.read(dc_load)
-fail_collect(failures, "Debezium Connect loader must record ARM64 source digest") unless dc_load_text.include?(DEBEZIUM_CONNECT_ARM_DIGEST.delete_prefix("sha256:"))
+fail_collect(failures, "Debezium Connect loader must record multiarch index") unless dc_load_text.include?(DEBEZIUM_CONNECT_MULTIARCH_DIGEST.delete_prefix("sha256:"))
 fail_collect(failures, "Debezium Connect loader must stage exact source image") unless dc_load_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
 fail_collect(failures, "Debezium Connect loader must docker exec into kind node") unless dc_load_text.include?("docker exec")
 fail_collect(failures, "Debezium Connect loader must crictl pull") unless dc_load_text.include?("crictl pull")
 fail_collect(failures, "Debezium Connect loader must verify via crictl inspecti") unless dc_load_text.include?("crictl inspecti")
-fail_collect(failures, "Debezium Connect loader must verify arm64") unless dc_load_text.include?("arm64")
+fail_collect(failures, "Debezium Connect loader must verify amd64") unless dc_load_text.include?('expected_arch="amd64"')
+fail_collect(failures, "Debezium Connect loader must verify arm64") unless dc_load_text.include?('expected_arch="arm64"')
 fail_collect(failures, "Debezium Connect loader must not kind load") if dc_load_text.match?(/kind\s+load\s+docker-image/)
 fail_collect(failures, "Debezium Connect loader must remove stale runtime tag") unless dc_load_text.include?(DEBEZIUM_CONNECT_STALE_TAG)
 fail_collect(failures, "Debezium Connect loader must fail closed on docker.io/library/import-") unless dc_load_text.include?("docker.io/library/import-")
@@ -673,7 +677,9 @@ if helm_ok
     fail_collect(failures, "helm template spectator rebuilder enable flip failed: #{spec_rebuilder.lines.first}")
   end
   fail_collect(failures, "spectator rebuilder template must include WORKER_ROLE") unless spec_rebuilder.include?("spectator-projection-rebuilder")
-  fail_collect(failures, "spectator rebuilder must not expose containerPort") if spec_rebuilder.match?(/projection-rebuilder[\s\S]*?containerPort:\s*8080/)
+  spec_rebuilder_ports = spec_rebuilder.match(/- name: projection-rebuilder[\s\S]*?ports:\s*([\s\S]*?)\n\s*env:/)&.captures&.first.to_s
+  fail_collect(failures, "spectator rebuilder must expose only the private metrics port") unless spec_rebuilder_ports.match?(/name:\s*metrics[\s\S]*?containerPort:\s*9090/)
+  fail_collect(failures, "spectator rebuilder must not expose the application port") if spec_rebuilder_ports.match?(/containerPort:\s*8080/)
   fail_collect(failures, "spectator rebuilder must not use readinessProbe") if spec_rebuilder.match?(/name: projection-rebuilder[\s\S]*?readinessProbe:/)
   fail_collect(failures, "spectator rebuilder must not mount SPECTATOR_VIEW_INTERNAL_CREDENTIAL") if spec_rebuilder.match?(/name: projection-rebuilder[\s\S]*?SPECTATOR_VIEW_INTERNAL_CREDENTIAL/)
   fail_collect(failures, "spectator rebuilder must mount ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL") unless spec_rebuilder.include?("ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL")
@@ -1138,14 +1144,20 @@ puts "ok kafka-local-policy"
 # --- emptyDir / disposable policy ---
 each_manifest(MANIFESTS) do |path, doc|
   next unless doc.is_a?(Hash) && doc["kind"] == "Deployment"
+  # Application datastores remain disposable emptyDir. The sole reviewed local
+  # persistence exception is MinIO's observability object store, whose 5 GiB PVC
+  # survives pod replacement but is deleted with the kind cluster.
+  minio_observability = path.end_with?("/90-observability-storage/minio.yaml") && doc.dig("metadata", "name") == "minio"
   vols = doc.dig("spec", "template", "spec", "volumes") || []
   vols.each do |v|
-    fail_collect(failures, "PVC not allowed in #{path} volume #{v['name']}") if v.key?("persistentVolumeClaim")
+    if v.key?("persistentVolumeClaim") && !(minio_observability && v["name"] == "data" && v.dig("persistentVolumeClaim", "claimName") == "minio-data")
+      fail_collect(failures, "PVC not allowed in #{path} volume #{v['name']}")
+    end
     fail_collect(failures, "hostPath not allowed in #{path} volume #{v['name']}") if v.key?("hostPath")
   end
   vols.each do |v|
     next unless %w[data].include?(v["name"])
-    fail_collect(failures, "data volume must be emptyDir in #{path}") unless v.key?("emptyDir")
+    fail_collect(failures, "data volume must be emptyDir in #{path}") unless v.key?("emptyDir") || minio_observability
   end
 end
 puts "ok emptydir-policy"

@@ -56,3 +56,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

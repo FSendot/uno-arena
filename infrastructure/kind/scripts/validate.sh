@@ -18,6 +18,7 @@ bash "${REPO_ROOT}/infrastructure/bootstrap/tests/cdc_sql_integration_test.sh"
 ruby "${SCRIPT_DIR}/render-kafka-topics.rb" >/dev/null
 ruby "${KIND_DIR}/tests/kafka_retention_dlq_test.rb"
 ruby "${KIND_DIR}/tests/validate_kind.rb"
+bash "${SCRIPT_DIR}/test-observability-structure.sh"
 
 # Shell / Ruby syntax checks (offline).
 require_cmd bash
@@ -34,6 +35,13 @@ bash -n "${SCRIPT_DIR}/deploy-game-integrity.sh"
 bash -n "${SCRIPT_DIR}/deploy-services.sh"
 bash -n "${SCRIPT_DIR}/run-live-probes.sh"
 bash -n "${SCRIPT_DIR}/clean-deploy.sh"
+bash -n "${SCRIPT_DIR}/verify-portable-images.sh"
+bash -n "${SCRIPT_DIR}/install-istio.sh"
+bash -n "${SCRIPT_DIR}/deploy-observability.sh"
+bash -n "${SCRIPT_DIR}/wait-observability.sh"
+bash -n "${SCRIPT_DIR}/port-forward-grafana.sh"
+bash -n "${SCRIPT_DIR}/test-observability-structure.sh"
+bash -n "${SCRIPT_DIR}/test-observability-live.sh"
 bash -n "${SCRIPT_DIR}/test-clean-deployment-structure.sh"
 bash -n "${SCRIPT_DIR}/test-game-integrity-adapter.sh"
 bash -n "${SCRIPT_DIR}/test-game-integrity-adapter-structure.sh"

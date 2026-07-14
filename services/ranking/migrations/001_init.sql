@@ -238,6 +238,8 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     partition_key TEXT NOT NULL,
     schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
     payload JSONB NOT NULL,
+    traceparent TEXT,
+    tracestate TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (event_id)
 );

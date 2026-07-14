@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -73,8 +73,8 @@ func (w *LeaderboardSnapshotterWorker) Stop() {
 	select {
 	case <-done:
 	case <-time.After(w.stopGrace):
-		log.Printf(`{"level":"warn","service":"ranking","event":"leaderboard_snapshotter_stop_grace_elapsed","graceMs":%d}`,
-			w.stopGrace.Milliseconds())
+		processLogger().WarnContext(context.Background(), "snapshotter stop grace elapsed",
+			"event", "leaderboard_snapshotter_stop_grace_elapsed", "graceMs", w.stopGrace.Milliseconds())
 	}
 }
 
@@ -106,14 +106,16 @@ func (w *LeaderboardSnapshotterWorker) tick() {
 	defer cancel()
 	res, err := w.pub.PublishNextDirtyLeaderboardSnapshot(ctx, w.cooldown)
 	if err != nil {
-		log.Printf(`{"level":"warn","service":"ranking","event":"leaderboard_snapshot_publish_failed","err":%q}`, err.Error())
+		processLogger().WarnContext(ctx, "leaderboard snapshot publication failed",
+			"event", "leaderboard_snapshot_publish_failed", "error", err.Error())
 		return
 	}
 	if !res.Published {
 		return
 	}
-	log.Printf(`{"level":"info","service":"ranking","event":"leaderboard_snapshot_published","boardType":%q,"snapshotId":%q,"dirtyVersion":%d,"entries":%d}`,
-		string(res.BoardType), res.SnapshotID, res.ClaimedDirty, res.EntryCount)
+	processLogger().InfoContext(ctx, "leaderboard snapshot published",
+		"event", "leaderboard_snapshot_published", "boardType", string(res.BoardType),
+		"snapshotId", res.SnapshotID, "dirtyVersion", res.ClaimedDirty, "entries", res.EntryCount)
 }
 
 func snapshotterCooldownFromEnv() time.Duration {
@@ -139,16 +141,16 @@ func shutdownLeaderboardSnapshotter(stop func(), closePool func()) {
 	}
 }
 
-func runLeaderboardSnapshotterWorker(rt rankingRuntime) {
+func runLeaderboardSnapshotterWorker(rt rankingRuntime) error {
 	if rt.store == nil {
-		log.Fatal("leaderboard snapshotter requires durable store")
+		return fmt.Errorf("leaderboard snapshotter requires durable store")
 	}
 	if rt.durableReady != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := rt.durableReady(ctx)
 		cancel()
 		if err != nil {
-			log.Fatalf("leaderboard snapshotter schema readiness: %v", err)
+			return fmt.Errorf("leaderboard snapshotter schema readiness: %w", err)
 		}
 	}
 	worker := NewLeaderboardSnapshotterWorker(rt.store)
@@ -166,13 +168,14 @@ func runLeaderboardSnapshotterWorker(rt rankingRuntime) {
 	// Single cleanup: Stop (≤35s grace) then pool close. Avoids LIFO defer closing DB first.
 	defer shutdownLeaderboardSnapshotter(worker.Stop, closePool)
 
-	log.Printf(`{"level":"info","service":"ranking","event":"leaderboard_snapshotter_startup","mode":%q,"cooldownMs":%d}`,
-		rt.mode, worker.cooldown.Milliseconds())
+	processLogger().InfoContext(context.Background(), "leaderboard snapshotter started",
+		"event", "leaderboard_snapshotter_started", "mode", rt.mode, "cooldownMs", worker.cooldown.Milliseconds())
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Printf(`{"level":"info","service":"ranking","event":"leaderboard_snapshotter_shutdown"}`)
+	processLogger().InfoContext(context.Background(), "leaderboard snapshotter stopping", "event", "leaderboard_snapshotter_stopping")
 	// Signal path: stop/wait before pool close; defer is a no-op safety net (Stop + Once).
 	shutdownLeaderboardSnapshotter(worker.Stop, closePool)
+	return nil
 }

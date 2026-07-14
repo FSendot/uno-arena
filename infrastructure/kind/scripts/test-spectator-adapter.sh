@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Explicit live Spectator durable adapter acceptance against kind (ready + ingest + replay).
-# Kafka consumer remains PENDING. HTTP internal ingest is the test/ops bridge.
+# The Kafka consumer is wired; this focused adapter probe deliberately uses the
+# HTTP test/ops bridge and does not claim live Kafka delivery.
 # Spectator pod replacement can retain Redis projection while Redis stays up; that does
 # not prove Redis process durability. Same-pod Redis PID 1 restart durability is covered
 # by kind Redis AOF (`make kind-test-redis-aof`), not by this adapter. Redis remains
@@ -28,7 +29,7 @@ GID="kind-adapter-$(date +%s)"
 ROOM="room-${GID}"
 
 echo "Spectator base: ${SPECTATOR_BASE_URL}"
-echo "note: Kafka consumer for room.spectator-safe.events remains PENDING"
+echo "note: room.spectator-safe.events consumer is wired; this focused probe uses the HTTP test/ops bridge"
 
 ready=0
 for _ in $(seq 1 60); do
@@ -67,4 +68,4 @@ snap="$(curl -sS "${SPECTATOR_BASE_URL}/v1/spectator/rooms/${ROOM}/snapshot")"
 seq="$(jq -r '.sequence // empty' <<<"${snap}")"
 [[ "${seq}" == "1" ]] || die "snapshot sequence want 1 got ${seq}: ${snap}"
 
-echo "ok kind-test-spectator-adapter room=${ROOM} (Kafka PENDING)"
+echo "ok kind-test-spectator-adapter room=${ROOM} (HTTP bridge path; Kafka delivery not exercised here)"

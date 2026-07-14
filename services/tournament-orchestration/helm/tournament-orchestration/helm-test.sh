@@ -10,6 +10,9 @@ command -v "${HELM}" >/dev/null 2>&1 || { echo "helm required" >&2; exit 1; }
 "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" >/dev/null
 
 kind_out="$("${HELM}" template tournament-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
+echo "${kind_out}" | grep -q 'cpu: 500m'
+echo "${kind_out}" | grep -q 'timeoutSeconds: 3'
+echo "${kind_out}" | grep -q 'failureThreshold: 6'
 echo "${kind_out}" | grep -q 'image: "uno-arena/tournament-orchestration:local"'
 echo "${kind_out}" | grep -q 'imagePullPolicy: IfNotPresent'
 ! echo "${kind_out}" | grep -q 'image: "uno-arena/tournament-orchestration@"'
@@ -49,7 +52,7 @@ echo "${kind_out}" | grep -q 'name: TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET'
 echo "${kind_out}" | grep -q 'key: "tournament-analytics-backfill-cursor-secret"'
 test "$(echo "${kind_out}" | grep -c 'name: TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET')" -eq 1
 test "$(echo "${kind_out}" | grep -c 'name: TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL')" -eq 1
-worker_out="$(echo "${kind_out}" | awk '/name: tournament-kind-provisioning-worker/{p=1} p{print} /^---$/{if(p&&seen++){exit}}')"
+worker_out="$(echo "${kind_out}" | awk 'p && /^---$/ {exit} /# Source: tournament-orchestration\/templates\/provisioning-worker-deployment.yaml/{p=1} p{print}')"
 ! echo "${worker_out}" | grep -q 'TOURNAMENT_BRACKET_CURSOR_SECRET'
 ! echo "${worker_out}" | grep -q 'TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET'
 ! echo "${worker_out}" | grep -q 'TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
@@ -58,7 +61,7 @@ echo "${worker_out}" | grep -q 'name: REDIS_URL'
 echo "${worker_out}" | grep -q 'name: TOURNAMENT_INTERNAL_CREDENTIAL'
 echo "${worker_out}" | grep -q 'name: SERVICE_CREDENTIAL'
 echo "${worker_out}" | grep -q 'name: ROOM_SERVICE_CREDENTIAL'
-seed_out="$(echo "${kind_out}" | awk '/name: tournament-kind-seeding-worker/{p=1} p{print} /^---$/{if(p&&seen++){exit}}')"
+seed_out="$(echo "${kind_out}" | awk 'p && /^---$/ {exit} /# Source: tournament-orchestration\/templates\/seeding-worker-deployment.yaml/{p=1} p{print}')"
 ! echo "${seed_out}" | grep -q 'TOURNAMENT_BRACKET_CURSOR_SECRET'
 ! echo "${seed_out}" | grep -q 'TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET'
 ! echo "${seed_out}" | grep -q 'TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'
@@ -72,11 +75,7 @@ echo "${seed_out}" | grep -q 'name: REDIS_URL'
 test "$(echo "${seed_out}" | grep -c 'secretKeyRef')" -eq 1
 echo "${seed_out}" | grep -q 'tournament-seeding'
 # Completion worker is emitted before the API Deployment; extract one document only.
-comp_out="$(echo "${kind_out}" | awk '
-  /^---$/ { if (in_doc) exit; next }
-  /name: tournament-kind-completion-worker$/ { in_doc=1 }
-  in_doc { print }
-')"
+comp_out="$(echo "${kind_out}" | awk 'p && /^---$/ {exit} /# Source: tournament-orchestration\/templates\/completion-worker-deployment.yaml/{p=1} p{print}')"
 ! echo "${comp_out}" | grep -q 'TOURNAMENT_BRACKET_CURSOR_SECRET'
 ! echo "${comp_out}" | grep -q 'TOURNAMENT_ANALYTICS_BACKFILL_CURSOR_SECRET'
 ! echo "${comp_out}" | grep -q 'TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL'

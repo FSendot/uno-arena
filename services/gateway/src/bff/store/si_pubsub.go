@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
@@ -55,7 +55,7 @@ func (s *SessionInvalidationSubscriber) Run(ctx context.Context) error {
 			}
 			var n SessionInvalidationNotify
 			if err := json.Unmarshal([]byte(msg.Payload), &n); err != nil {
-				log.Printf(`{"level":"warn","service":"gateway","event":"si_notify_decode_failed","error":%q}`, err.Error())
+				slog.WarnContext(ctx, "session invalidation notification decode failed", "event", "session_invalidation_decode_failed", "error", err)
 				continue
 			}
 			n.EventID = strings.TrimSpace(n.EventID)
@@ -64,7 +64,7 @@ func (s *SessionInvalidationSubscriber) Run(ctx context.Context) error {
 				continue
 			}
 			if err := s.handler(ctx, n); err != nil {
-				log.Printf(`{"level":"warn","service":"gateway","event":"si_notify_apply_failed","error":%q}`, err.Error())
+				slog.WarnContext(ctx, "session invalidation notification apply failed", "event", "session_invalidation_apply_failed", "error", err)
 			}
 		}
 	}

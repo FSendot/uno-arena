@@ -8,6 +8,15 @@ image:
 # Peer URLs use Service port 8080 (cluster DNS).
 env:
   SERVICE_NAME: gateway
+  DEPLOYMENT_ENV: production
+  UNOARENA_COMPONENT: api
+  TELEMETRY_MODE: required
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy-otlp.observability.svc.cluster.local:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "0.001"
+  OTEL_GO_X_OBSERVABILITY: "true"
+  METRICS_ADDR: ":9090"
   IDENTITY_URL: http://identity:8080
   ROOM_GAMEPLAY_URL: http://room-gameplay:8080
   TOURNAMENT_URL: http://tournament-orchestration:8080
@@ -53,3 +62,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

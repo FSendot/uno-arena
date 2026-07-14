@@ -9,7 +9,8 @@ trap 'kill "${PID:-}" 2>/dev/null || true; wait "${PID:-}" 2>/dev/null || true; 
 
 python3 "$FAKE" >"$TMP/url" 2>"$TMP/fake.err" &
 PID=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/url" ] && break; sleep .05; done
+for _ in {1..50}; do [ -s "$TMP/url" ] && break; sleep .1; done
+[ -s "$TMP/url" ] || { cat "$TMP/fake.err" >&2; echo "fake gateway did not start" >&2; exit 1; }
 export UNOARENA_API_URL="$(tr -d '\n' <"$TMP/url")"
 export UNOARENA_SESSION_FILE="$TMP/session.json"
 
@@ -52,7 +53,7 @@ assert any(line["action"] == "pass" and line["result"] == "ok" for line in lines
 PY
 echo 'ok - JSON interactive pass emits JSONL only'
 
-(sleep .3; printf 'quit\n') | "$CLI" play --casual --token tok-sse >"$TMP/sse-refresh.out" 2>"$TMP/sse-refresh.err"
+(sleep 1; printf 'quit\n') | "$CLI" play --casual --token tok-sse >"$TMP/sse-refresh.out" 2>"$TMP/sse-refresh.err"
 grep -q 'Discard: B9' "$TMP/sse-refresh.out"
 echo 'ok - turn-changing SSE refreshes and re-renders the authoritative board'
 
@@ -121,6 +122,23 @@ assert lines[0]["action"] == "tournament_register" and lines[0]["result"] == "ok
 assert lines[-1]["action"] == "summary" and lines[-1]["result"] == "ok", lines
 PY
 echo 'ok - tournament bot registers and follows its authenticated assignment'
+
+"$CLI" bot --tournament tournament-1 --token tok-tourney-unknown --seed 7 \
+  --max-actions 1 --max-wait 2 --poll-interval .01 >"$TMP/tournament-unknown.jsonl"
+python3 - "$TMP/tournament-unknown.jsonl" <<'PY'
+import json, sys
+lines=[json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert lines[0]["action"] == "tournament_register" and lines[0]["result"] == "ok", lines
+assert lines[-1]["action"] == "summary" and lines[-1]["result"] == "ok", lines
+PY
+curl --silent --show-error "$UNOARENA_API_URL/__requests" | python3 -c '
+import json, sys
+reqs=json.load(sys.stdin)["requests"]
+posts=[r for r in reqs if r["path"]=="/v1/commands" and r.get("authorization")=="Bearer tok-tourney-unknown"]
+registrations=[r for r in posts if json.loads(r["body"]).get("type")=="RegisterPlayer"]
+assert len(registrations) == 1, registrations
+'
+echo 'ok - tournament bot reconciles an unknown registration result without replay'
 
 UNOARENA_ROOM_START_TIMEOUT_SECONDS=2 "$CLI" bot --tournament tournament-1 --token tok-tourney-starting \
   --seed 7 --max-actions 1 --max-wait 2 --poll-interval .01 >"$TMP/tournament-starting.jsonl"
@@ -230,8 +248,91 @@ assert not mod.play_bot_room(
     SimpleNamespace(max_wait=1, seed=1, max_actions=10, poll_interval=.01),
     mod.Metrics(player="u"),
 )
+class UnknownThenCompletedGateway:
+    def __init__(self, code):
+        self.code = code
+        self.commands = 0
+        self.snapshots = 0
+        self.room_start_retry = mod.RoomStartRetryPolicy(timeout_seconds=60)
+    def snapshot(self, _room):
+        self.snapshots += 1
+        if self.snapshots == 1:
+            return {"roomId": "unknown-room", "status": "in_progress", "sequenceNumber": 7,
+                    "hostId": "host", "game": {"currentPlayer": "p", "activeColor": "red",
+                    "discardTop": {"face": "4"}}, "hand": [{"id": "r4", "color": "red", "face": "4"}]}
+        return {"roomId": "unknown-room", "status": "completed", "sequenceNumber": 8,
+                "hostId": "host", "game": {}, "hand": []}
+    def command(self, *_args):
+        self.commands += 1
+        raise mod.ClientError(f"HTTP {self.code}", self.code)
+for code in (502, 503):
+    unknown = UnknownThenCompletedGateway(code)
+    assert mod.play_bot_room(
+        unknown, "unknown-room", "p", "u",
+        SimpleNamespace(max_wait=1, seed=1, max_actions=10, poll_interval=.01),
+        mod.Metrics(player="u"),
+    )
+    assert unknown.commands == 1, (code, unknown.commands)
+
+# Reconciliation uses the configured safe-read budget rather than a fixed
+# short window. Model a runtime replacement whose authoritative sequence does
+# not advance until more than ten virtual seconds after the unknown outcome.
+class DelayedAdvanceGateway:
+    def __init__(self):
+        self.room_start_retry = mod.RoomStartRetryPolicy(timeout_seconds=60)
+        self.snapshots = 0
+    def snapshot(self, _room):
+        self.snapshots += 1
+        sequence = 8 if self.snapshots >= 12 else 7
+        return {"roomId": "delayed-room", "status": "in_progress", "sequenceNumber": sequence,
+                "hostId": "host", "game": {}, "hand": []}
+
+real_monotonic, real_sleep = mod.time.monotonic, mod.time.sleep
+virtual_now = [0.0]
+mod.time.monotonic = lambda: virtual_now[0]
+mod.time.sleep = lambda seconds: virtual_now.__setitem__(0, virtual_now[0] + seconds)
+try:
+    delayed = DelayedAdvanceGateway()
+    reconciled = mod.recover_unknown_bot_outcome(
+        delayed, "delayed-room", mod.ClientError("HTTP 502", 502), 7,
+        deadline=120, poll_interval=1,
+    )
+    assert reconciled and reconciled["sequenceNumber"] == 8, reconciled
+    assert virtual_now[0] > 10, virtual_now[0]
+finally:
+    mod.time.monotonic, mod.time.sleep = real_monotonic, real_sleep
+
+gateway = mod.Gateway("http://unused")
+gateway.room_start_retry = mod.RoomStartRetryPolicy(
+    timeout_seconds=1, interval_cap_seconds=.001, jitter_seconds=0,
+)
+attempts = 0
+def transient_read(method, path):
+    global attempts
+    attempts += 1
+    if attempts < 3:
+        raise mod.ClientError("HTTP 502", 502)
+    return {"roomId": "safe-read", "status": "completed"}, "corr", 200
+gateway.request = transient_read
+snapshot, _, _ = gateway.safe_read("/v1/rooms/safe-read/snapshot")
+assert snapshot["status"] == "completed" and attempts == 3, (snapshot, attempts)
+
+# Bot setup starts with an authenticated identity GET. It is just as safe to
+# retry as snapshots and assignments, and a transient Gateway failure must not
+# abort an otherwise healthy tournament flow.
+attempts = 0
+def transient_whoami(method, path):
+    global attempts
+    attempts += 1
+    assert (method, path) == ("GET", "/v1/auth/whoami")
+    if attempts < 3:
+        raise mod.ClientError("HTTP 502", 502)
+    return {"playerId": "safe-player", "username": "safe-user"}, "corr", 200
+gateway.request = transient_whoami
+who = gateway.whoami()
+assert who == {"playerId": "safe-player", "username": "safe-user"} and attempts == 3, (who, attempts)
 PY
-echo 'ok - bot resolves penalties, enforces wild-draw-four legality, and fails cancelled rooms'
+echo 'ok - bot resolves penalties, enforces wild-draw-four legality, fails cancelled rooms, reconciles unknown outcomes without replay, and retries transient setup/read failures'
 
 python3 - "${ROOT}/lib/game_client.py" <<'PY'
 import importlib.util, pathlib, random, sys

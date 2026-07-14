@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -178,7 +178,7 @@ func (s *RedisLeaderboardStore) reconcileBeginRebuild(
 	defer cancel()
 	m, liveGen, rebuilding, err := s.readMeta(ctx, boardType)
 	if err != nil {
-		log.Printf(`{"level":"error","service":"ranking","event":"leaderboard_begin_reconcile_failed","err":%q}`, err.Error())
+		slog.ErrorContext(ctx, "leaderboard begin reconcile failed", "event", "leaderboard_begin_reconcile_failed", "error", err.Error())
 		return false, nil
 	}
 	if rebuilding == newGen && m.RebuildToken == token {
@@ -198,7 +198,7 @@ func (s *RedisLeaderboardStore) abortRebuildBestEffort(parent context.Context, b
 	defer cancel()
 	err := s.abortRebuild(ctx, boardType, gen, token)
 	if err != nil {
-		log.Printf(`{"level":"error","service":"ranking","event":"leaderboard_rebuild_abort_failed","err":%q}`, err.Error())
+		slog.ErrorContext(ctx, "leaderboard rebuild abort failed", "event", "leaderboard_rebuild_abort_failed", "error", err.Error())
 	}
 	return err
 }

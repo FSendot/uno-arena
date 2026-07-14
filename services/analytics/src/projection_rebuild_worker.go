@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -68,6 +67,7 @@ func wireProjectionRebuildWorker() (projectionRebuildWorkerRuntime, error) {
 
 	clientCH, err := store.NewClient(store.Config{
 		URL: chURL, User: chUser, Password: chPass, Database: chDB,
+		HTTPClient: tracedHTTPClient(30 * time.Second),
 	})
 	if err != nil {
 		return projectionRebuildWorkerRuntime{}, fmt.Errorf("clickhouse client: %w", err)
@@ -90,6 +90,7 @@ func wireProjectionRebuildWorker() (projectionRebuildWorkerRuntime, error) {
 	exec := &StoreBackedAnalyticsProjectionRebuildExecutor{
 		Store: chs,
 		Backfill: &HTTPAnalyticsBackfillClients{
+			HTTP:    tracedHTTPClient(30 * time.Second),
 			RoomURL: roomURL, RoomCred: roomCred,
 			TournURL: tournURL, TournCred: tournCred,
 			RankURL: rankURL, RankCred: rankCred,
@@ -121,16 +122,16 @@ func (rt projectionRebuildWorkerRuntime) close() {
 }
 
 // runProjectionRebuildWorker runs the long-lived rebuild consumer without HTTP.
-func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) {
+func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) error {
 	if rt.consumer == nil {
-		log.Fatal("projection rebuild worker requires consumer")
+		return fmt.Errorf("projection rebuild worker requires consumer")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	defer rt.close()
 
-	log.Printf(`{"level":"info","service":"analytics","event":"projection_rebuilder_startup","mode":%q,"group":%q,"topic":%q}`,
-		rt.mode, rt.consumer.cfg.Group, rt.consumer.cfg.Topic)
+	processLogger().InfoContext(ctx, "projection rebuilder started", "event", "projection_rebuilder_started",
+		"mode", rt.mode, "group", rt.consumer.cfg.Group, "topic", rt.consumer.cfg.Topic)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -140,7 +141,7 @@ func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) {
 	select {
 	case err := <-errCh:
 		if err != nil && ctx.Err() == nil {
-			log.Fatalf(`{"level":"error","service":"analytics","event":"projection_rebuilder_stopped","error":%q}`, err.Error())
+			return fmt.Errorf("projection rebuilder stopped: %w", err)
 		}
 	case <-ctx.Done():
 		select {
@@ -148,4 +149,5 @@ func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) {
 		case <-time.After(10 * time.Second):
 		}
 	}
+	return nil
 }

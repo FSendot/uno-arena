@@ -62,7 +62,7 @@ func (s *Service) completeTournamentDifferential(ctx context.Context, req Comman
 		return prior, nil
 	}
 	decision := domain.DecideCompleteTournament(uow.CompleteContext(), cmd)
-	return s.commitLifecycleComplete(uow, req, decision, tournamentID, correlationID)
+	return s.commitLifecycleComplete(ctx, uow, req, decision, tournamentID, correlationID)
 }
 
 func (s *Service) cancelTournamentDifferential(ctx context.Context, req CommandRequest, tournamentID, correlationID string) (envelope.Result, error) {
@@ -85,10 +85,11 @@ func (s *Service) cancelTournamentDifferential(ctx context.Context, req CommandR
 		return prior, nil
 	}
 	decision := domain.DecideCancelTournament(uow.CancelContext(), cmd)
-	return s.commitLifecycleCancel(uow, req, decision, tournamentID, correlationID)
+	return s.commitLifecycleCancel(ctx, uow, req, decision, tournamentID, correlationID)
 }
 
 func (s *Service) commitLifecycleComplete(
+	ctx context.Context,
 	uow LifecycleUnitOfWork,
 	req CommandRequest,
 	decision domain.CompleteTournamentDecision,
@@ -98,6 +99,11 @@ func (s *Service) commitLifecycleComplete(
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(LifecycleCommitRequest{
 			TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 			CorrelationID: correlationID, Outcome: res, Complete: decision,
@@ -105,11 +111,6 @@ func (s *Service) commitLifecycleComplete(
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalLifecycleOutcome(req.CommandID, res), nil
@@ -154,6 +155,7 @@ func (s *Service) commitLifecycleComplete(
 		}
 		return envelope.Result{}, err
 	}
+	recordCommittedTournamentCompletion(context.Background(), out)
 	if projectionChangedFromOutcome(out) {
 		s.refreshBracketBestEffort(context.Background(), scopeSummaryOnly(tournamentID))
 	}
@@ -161,6 +163,7 @@ func (s *Service) commitLifecycleComplete(
 }
 
 func (s *Service) commitLifecycleCancel(
+	ctx context.Context,
 	uow LifecycleUnitOfWork,
 	req CommandRequest,
 	decision domain.CancelTournamentDecision,
@@ -170,6 +173,11 @@ func (s *Service) commitLifecycleCancel(
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(LifecycleCommitRequest{
 			TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 			CorrelationID: correlationID, Outcome: res, Cancel: decision,
@@ -177,11 +185,6 @@ func (s *Service) commitLifecycleCancel(
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalLifecycleOutcome(req.CommandID, res), nil
@@ -252,7 +255,7 @@ func (s *Service) canonicalLifecycleOutcome(commandID string, fallback envelope.
 
 func (s *Service) rejectLifecycle(ctx context.Context, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID == "" {
-		return s.reject(req, correlationID, tournamentID, reason)
+		return s.reject(ctx, req, correlationID, tournamentID, reason)
 	}
 	uow, err := s.lifecycle.BeginStandaloneCommand(ctx, req.CommandID)
 	if err != nil {
@@ -266,6 +269,11 @@ func (s *Service) rejectLifecycle(ctx context.Context, req CommandRequest, corre
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(LifecycleCommitRequest{
 		TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 		CorrelationID: correlationID, Outcome: res,
@@ -275,11 +283,6 @@ func (s *Service) rejectLifecycle(ctx context.Context, req CommandRequest, corre
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalLifecycleOutcome(req.CommandID, res), nil
@@ -302,9 +305,9 @@ func (s *Service) persistLifecycleRejectStandalone(
 	}
 	switch req.Type {
 	case CmdCompleteTournament:
-		return s.commitLifecycleComplete(uow, req, complete, tournamentID, correlationID)
+		return s.commitLifecycleComplete(ctx, uow, req, complete, tournamentID, correlationID)
 	case CmdCancelTournament:
-		return s.commitLifecycleCancel(uow, req, cancel, tournamentID, correlationID)
+		return s.commitLifecycleCancel(ctx, uow, req, cancel, tournamentID, correlationID)
 	default:
 		return envelope.Result{}, fmt.Errorf("unsupported lifecycle command %s", req.Type)
 	}

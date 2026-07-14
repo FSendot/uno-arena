@@ -3,6 +3,7 @@ go 1.26.0
 toolchain go1.26.5
 
 use (
+	./platform/telemetry
 	./services/analytics/src
 	./services/game-integrity/src
 	./services/gateway/src

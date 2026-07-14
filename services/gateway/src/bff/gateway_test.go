@@ -115,6 +115,19 @@ func TestRouting_CreateRoomToRoomBackend(t *testing.T) {
 	}
 }
 
+func TestCommandIdentityDependencyFailureIsNotFalseUnauthorized(t *testing.T) {
+	h := newHarness(t)
+	h.identity.FailNext = true
+	body := []byte(`{"commandId":"cmd_identity_down","type":"CreateRoom","schemaVersion":1,"payload":{}}`)
+	w := h.do(http.MethodPost, "/v1/commands", body, h.authHeaders())
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if h.room.DispatchCount() != 0 {
+		t.Fatalf("identity failure must stop before dispatch, got %d", h.room.DispatchCount())
+	}
+}
+
 func TestRouting_PlayCardRoomScoped(t *testing.T) {
 	h := newHarness(t)
 	body := []byte(`{"commandId":"cmd_play","type":"PlayCard","expectedSequenceNumber":3,"schemaVersion":1,"payload":{"roomId":"room_9","cardId":"red-7"}}`)

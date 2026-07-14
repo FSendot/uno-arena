@@ -68,14 +68,14 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers t
 - `completed`/`cancelled` Room state and terminal runtime status commit together. Pod deletion is subsequent and disposable; terminal snapshots/results remain durable and readable without recreating an executor.
 - All Room state and outbox rows commit in Room Gameplay's context-owned Postgres database. Native table partitioning and indexes may use `roomId` to control hot-table size and access paths.
 - Room-owned PgBouncer uses transaction-pooling mode between dedicated room pods and the same physical database. Room pods use lazy zero-minimum, one-maximum client pools with short idle lifetime; transaction-scoped locks and atomic state/outbox commits remain unchanged.
-- PgBouncer capacity is explicit per environment: replicas and client admission are sized against active runtimes, while default plus reserve backend pools are bounded against Room Postgres connection capacity. Staging/production require SCRAM-SHA-256, end-to-end database TLS, and strict mesh mTLS; kind retains a lightweight disposable profile.
+- PgBouncer capacity is explicit per environment: replicas and client admission are sized against active runtimes, while default plus reserve backend pools are bounded against Room Postgres connection capacity. Staging/production require SCRAM-SHA-256 and end-to-end application-layer database TLS. Every Kubernetes environment uses strict mesh mTLS; kind retains a lightweight disposable database-TLS/credential profile without permitting plaintext east-west mesh transport.
 - Timer deadlines are durable in Postgres, not Redis.
 - Non-terminal game completion writes `next_game_continuations` in the same Room transaction. Existing Room timer workers claim bounded Postgres batches with visibility leases and deterministic identities; successful next-game commit deletes the row, while expired leases and retryable failures remain recoverable without client redelivery.
 - Redis can accelerate dispatch, but it cannot define room truth.
 - Redis scheduling uses sorted-set buckets partitioned by stable `roomId` hash and timer family. Lua claims move due entries into visibility-leased in-flight sets; workers acknowledge success/stale outcomes and a reaper retries expired leases.
 - Redis scheduling indexes are rebuilt from open Postgres deadlines after loss. Rebuild and ordinary duplicate delivery use the same stable timer identities and Room-side revalidation.
 - Room Postgres snapshots, deadlines, dedupe state, and outboxes recover through context PITR; Redis timers and feeds are rebuilt/reconciled after restore.
-- Only the `room-timer` role rebuilds the Redis timer index, guarded by a context-wide rebuild lease. Only bounded `room-integrity-reconciler` replicas claim Game Integrity repair markers with `FOR UPDATE SKIP LOCKED`; dedicated room runtimes and routers perform neither global operation.
+- Only the `room-timer` role rebuilds the Redis timer index, guarded by a context-wide rebuild lease. Each timer worker snapshots a Postgres-owned completion generation before claiming; successful completion increments that generation atomically, so sibling workers observe the completed cohort without comparing pod clocks. Only bounded `room-integrity-reconciler` replicas claim Game Integrity repair markers with `FOR UPDATE SKIP LOCKED`; dedicated room runtimes and routers perform neither global operation.
 - The outbox bridges committed room state to downstream consumers.
 - Room Gameplay owns one database connection pool, one Kafka-bound Debezium connector, and one separate Redis-bound Debezium Server pipeline for its context-owned Postgres database.
 - Room's integration and realtime outboxes rotate and reclaim independently. Each sealed partition requires proof from its own pipeline offset; progress in one pipeline cannot authorize cleanup in the other.
@@ -234,7 +234,7 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers t
 | --- | --- | --- | --- |
 | Identity | One context-owned HA Postgres database cluster | Redis | Identity/session/ACL truth stays inside the Identity persistence boundary; authoritative validation uses the writer endpoint |
 | Room Gameplay | One context-owned HA Postgres database cluster | Redis, integration/realtime outboxes | Room truth stays inside the Room Gameplay persistence boundary; Redis is non-authoritative |
-| Game Integrity | KurrentDB 26.0.3 LTS | none | Append-only by design; native ARM64 experimental image is local-only |
+| Game Integrity | KurrentDB 26.0.3 LTS | none | Append-only by design; deployment selects reviewed AMD64/ARM64 digests, and the experimental ARM64 image is local-only |
 | Tournament Orchestration | One context-owned HA Postgres database cluster | Redis | Redis holds bracket projection |
 | Ranking | One context-owned HA Postgres database cluster | Redis | Async updates, cacheable reads |
 | Spectator View | Redis projection | none | Rebuilt from safe facts; not source of domain truth |

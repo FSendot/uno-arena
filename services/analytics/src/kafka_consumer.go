@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+
 	"unoarena/services/analytics/domain"
 )
 
@@ -19,6 +21,8 @@ type ConsumerRecord struct {
 	Offset    int64
 	Key       []byte
 	Value     []byte
+	Headers   map[string]string
+	Context   context.Context
 }
 
 // topicPartition identifies a Kafka topic-partition for serial offset processing.
@@ -293,6 +297,13 @@ func (c *AnalyticsKafkaConsumer) ProcessBatch(ctx context.Context, recs []Consum
 }
 
 func (c *AnalyticsKafkaConsumer) processOne(ctx context.Context, rec ConsumerRecord) error {
+	if rec.Context != nil {
+		ctx = rec.Context
+	} else {
+		ctx = processPropagator().Extract(ctx, propagation.MapCarrier(rec.Headers))
+	}
+	ctx, span := processTracerProvider().Tracer("unoarena/services/analytics").Start(ctx, "analytics.kafka.process")
+	defer span.End()
 	sourceTopic := strings.TrimSpace(rec.Topic)
 	evt, err := ParseAnalyticsRecord(rec)
 	if err != nil {

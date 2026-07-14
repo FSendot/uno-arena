@@ -1,0 +1,105 @@
+namespaceOverride: observability
+applicationNamespace: uno-arena
+
+images:
+  alloy: grafana/alloy@sha256:4f6ddc56ffdcf8a6316748fc5162972e20cb301523cac1bb4a31957df733ae9b
+  loki: grafana/loki@sha256:70b9f699fc9bb868b62f1cfd4f787dfa50242f1fd92e6089787d5d7daea75fe8
+  tempo: grafana/tempo@sha256:cda87c212d8c584dc0b89e337e7ed648a5100feb657e5d528480ee4fa03dbbe3
+  prometheus: prom/prometheus@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893
+  kubeStateMetrics: registry.k8s.io/kube-state-metrics/kube-state-metrics@sha256:85108987d044b18a098126732f98602df408888c0f7d456241f5abefb9744bc1
+  grafana: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+  pullPolicy: IfNotPresent
+
+storage:
+  s3:
+    endpoint: ""
+    region: ""
+    forcePathStyle: false
+    insecure: false
+    existingSecret: uno-arena-observability-s3
+    accessKeyKey: access-key-id
+    secretKeyKey: secret-access-key
+    lokiBucket: ""
+    tempoBucket: ""
+  lokiRetention: 24h
+  lokiWal:
+    diskFullThreshold: 0.9
+  tempoRetention: 24h
+  tempoCompaction:
+    measureInterval: 1m
+    minCycleInterval: 30s
+    pruneAge: 1h
+    minInputBlocks: 2
+    maxInputBlocks: 4
+  tempoLiveStore:
+    maxBlockDuration: 30s
+    blocklistPoll: 5m
+  tempoWal:
+    size: 1Gi
+    storageClassName: ""
+  prometheus:
+    size: 5Gi
+    storageClassName: ""
+    retentionTime: 24h
+    retentionSize: 4GB
+
+prometheus:
+  scrapeInterval: 15s
+  evaluationInterval: 15s
+  scrapeTimeout: 5s
+
+probes:
+  readinessTimeoutSeconds: 3
+
+grafana:
+  existingAdminSecret: uno-arena-observability-grafana
+  adminUserKey: admin-user
+  adminPasswordKey: admin-password
+  strategyType: RollingUpdate
+  preinstallDisabled: true
+
+security:
+  ambientRequired: true
+  networkPoliciesEnabled: true
+  applicationServiceAccounts:
+    - identity
+    - gateway
+    - room-gameplay-router
+    - room-gameplay-runtime-controller
+    - room-gameplay-runtime
+    - room-gameplay-timer-worker
+    - room-gameplay-integrity-reconciler
+    - game-integrity
+    - tournament-orchestration
+    - tournament-orchestration-seeding-worker
+    - tournament-orchestration-provisioning-worker
+    - tournament-orchestration-completion-worker
+    - ranking
+    - ranking-leaderboard-snapshotter
+    - spectator-view
+    - spectator-view-projection-rebuilder
+    - analytics
+    - analytics-projection-rebuilder
+
+resources:
+  alloyLogs:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+  alloyOtlp:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  loki:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  tempo:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  prometheus:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  kubeStateMetrics:
+    requests: {cpu: 20m, memory: 64Mi}
+    limits: {cpu: 200m, memory: 256Mi}
+  grafana:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}

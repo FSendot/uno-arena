@@ -104,7 +104,7 @@ func (s *Service) TryCompleteReadyRound(ctx context.Context, tournamentID string
 		return envelope.Result{}, &CompleteRoundNotReadyError{Reason: reason}
 	}
 	// Only success / already-done may persist the deterministic worker command outcome.
-	return s.commitCompleteRoundOutcome(uow, req, decision, tournamentID, cmdID)
+	return s.commitCompleteRoundOutcome(ctx, uow, req, decision, tournamentID, cmdID)
 }
 
 func (s *Service) completeRoundDifferential(ctx context.Context, req CommandRequest, tournamentID string, roundNumber int, correlationID string) (envelope.Result, error) {
@@ -132,10 +132,11 @@ func (s *Service) completeRoundDifferential(ctx context.Context, req CommandRequ
 		return prior, nil
 	}
 	decision := domain.DecideCompleteRound(uow.Loaded(), completeCmd)
-	return s.commitCompleteRoundOutcome(uow, req, decision, tournamentID, correlationID)
+	return s.commitCompleteRoundOutcome(ctx, uow, req, decision, tournamentID, correlationID)
 }
 
 func (s *Service) commitCompleteRoundOutcome(
+	ctx context.Context,
 	uow CompleteRoundUnitOfWork,
 	req CommandRequest,
 	decision domain.CompleteRoundDecision,
@@ -145,6 +146,11 @@ func (s *Service) commitCompleteRoundOutcome(
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(CompleteRoundCommitRequest{
 			TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 			CorrelationID: correlationID, Outcome: res, Decision: decision,
@@ -152,11 +158,6 @@ func (s *Service) commitCompleteRoundOutcome(
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalCompleteRoundOutcome(req.CommandID, res), nil
@@ -201,6 +202,7 @@ func (s *Service) commitCompleteRoundOutcome(
 		}
 		return envelope.Result{}, err
 	}
+	recordCommittedTournamentCompletion(context.Background(), out)
 	if projectionChangedFromOutcome(out) {
 		// CompleteRound bumps public round status; pending next-round slots stay invisible.
 		s.refreshBracketBestEffort(context.Background(), scopeSummaryOnly(tournamentID))
@@ -227,7 +229,7 @@ func (s *Service) canonicalCompleteRoundOutcome(commandID string, fallback envel
 
 func (s *Service) rejectCompleteRound(ctx context.Context, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID == "" {
-		return s.reject(req, correlationID, tournamentID, reason)
+		return s.reject(ctx, req, correlationID, tournamentID, reason)
 	}
 	uow, err := s.completeRounds.BeginStandaloneCommand(ctx, req.CommandID)
 	if err != nil {
@@ -241,6 +243,11 @@ func (s *Service) rejectCompleteRound(ctx context.Context, req CommandRequest, c
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(CompleteRoundCommitRequest{
 		TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 		CorrelationID: correlationID, Outcome: res,
@@ -249,11 +256,6 @@ func (s *Service) rejectCompleteRound(ctx context.Context, req CommandRequest, c
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalCompleteRoundOutcome(req.CommandID, res), nil
@@ -273,5 +275,5 @@ func (s *Service) persistCompleteRoundRejectStandalone(
 	if prior, ok := uow.LookupOutcome(req.CommandID); ok {
 		return prior, nil
 	}
-	return s.commitCompleteRoundOutcome(uow, req, decision, tournamentID, correlationID)
+	return s.commitCompleteRoundOutcome(ctx, uow, req, decision, tournamentID, correlationID)
 }

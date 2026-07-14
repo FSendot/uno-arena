@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/room-gameplay/app"
 	"unoarena/services/room-gameplay/domain"
 )
@@ -148,6 +149,7 @@ func (s *SessionStore) ClaimRuntimeAssignments(ctx context.Context, owner string
 }
 
 func (s *SessionStore) MarkRuntimePodReady(ctx context.Context, roomID string, generation int64, ip string) error {
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return wrapUnavailable(err)
@@ -169,7 +171,7 @@ func (s *SessionStore) MarkRuntimePodReady(ctx context.Context, roomID string, g
 	_, err = tx.Exec(ctx, `
 		INSERT INTO integration_outbox_events (
 			event_id, event_type, topic, partition_key, schema_version, room_id,
-			payload, correlation_id, occurred_at
+			payload, correlation_id, traceparent, tracestate, occurred_at
 		)
 		SELECT
 			'room-runtime-ready:' || r.room_id,
@@ -184,13 +186,13 @@ func (s *SessionStore) MarkRuntimePodReady(ctx context.Context, roomID string, g
 				'tournamentId', r.tournament_id,
 				'roundNumber', r.round_number,
 				'slotId', r.slot_id,
-				'generation', $2
+				'generation', $2::bigint
 			),
-			'room-runtime-ready:' || r.room_id, now()
+			'room-runtime-ready:' || r.room_id, $3, $4, now()
 		FROM rooms r
 		WHERE r.room_id = $1 AND r.room_type = 'tournament'
 		ON CONFLICT (event_id) DO NOTHING
-	`, roomID, generation)
+	`, roomID, generation, nullIfEmpty(traceparent), nullIfEmpty(tracestate))
 	if err != nil {
 		return wrapUnavailable(err)
 	}

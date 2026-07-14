@@ -9,6 +9,14 @@ image:
 
 env:
   SERVICE_NAME: game-integrity
+  UNOARENA_COMPONENT: api
+  TELEMETRY_MODE: required
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy-otlp.observability.svc.cluster.local:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "0.001"
+  OTEL_GO_X_OBSERVABILITY: "true"
+  METRICS_ADDR: ":9090"
   # Durable KurrentDB adapter (ADR-0035). Master key is never inlined here.
   KURRENTDB_URL: kurrentdb://kurrentdb:2113?tls=false
   KAFKA_BROKERS: kafka:9092
@@ -35,3 +43,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

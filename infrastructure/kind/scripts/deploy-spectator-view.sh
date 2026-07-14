@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Explicit: helm upgrade --install Spectator View into kind (no static duplicate Deployment).
-# Requires local Redis + image loaded. Kafka consumer remains PENDING.
+# Requires local Redis + image loaded. The chart wires the spectator-safe Kafka consumer.
 # Never exposes Spectator publicly (ClusterIP only via chart Service).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

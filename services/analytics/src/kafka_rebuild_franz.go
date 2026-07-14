@@ -43,9 +43,10 @@ func (c *franzAnalyticsRebuildClient) PublishRebuildRequest(ctx context.Context,
 		return fmt.Errorf("rebuild kafka client not configured")
 	}
 	rec := &kgo.Record{
-		Topic: c.cfg.Topic,
-		Key:   []byte(key),
-		Value: append([]byte(nil), value...),
+		Topic:   c.cfg.Topic,
+		Key:     []byte(key),
+		Value:   append([]byte(nil), value...),
+		Context: ctx,
 	}
 	results := c.inner.cl.ProduceSync(ctx, rec)
 	if err := results.FirstErr(); err != nil {

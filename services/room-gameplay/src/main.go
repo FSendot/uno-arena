@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"unoarena/services/room-gameplay/app"
@@ -724,44 +726,80 @@ func (w *OutboxRetryWorker) loop() {
 }
 
 func main() {
+	if err := runRoomProcess(); err != nil {
+		if roomProcessTelemetry != nil {
+			roomProcessTelemetry.Logger.Error("room process stopped", "event", "process_stopped", "error", err.Error())
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(1)
+	}
+}
+
+func runRoomProcess() error {
+	telemetryRuntime, err := startRoomTelemetry(context.Background())
+	if err != nil {
+		return fmt.Errorf("room telemetry: %w", err)
+	}
+	defer shutdownRoomTelemetry(telemetryRuntime)
+	store.ConfigureTelemetry(telemetryRuntime.TracerProvider, telemetryRuntime.MeterProvider)
+
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	cfg := loadRoomRuntimeConfig()
 	if cfg.WorkerRole == "room-runtime-controller" {
-		pool, err := store.NewPool(context.Background(), cfg.DatabaseURL)
+		pool, err := store.NewPool(rootCtx, cfg.DatabaseURL)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		defer pool.Close()
 		kube, err := kubeClientFromEnvironment(cfg)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		controller := NewRuntimeController(store.NewSessionStore(pool.Main), kube, cfg.RuntimeControllerOwner, cfg.RuntimeImage, cfg.RuntimeRouterCredential)
 		controller.ConfigureLimits(cfg.RuntimeControllerClaimBatch, cfg.RuntimeControllerConcurrency, cfg.RuntimeReadinessTimeout)
+		controller.ConfigureRuntimePodProfile(runtimePodProfile{
+			CPURequest: cfg.RuntimeCPURequest, MemoryRequest: cfg.RuntimeMemoryRequest,
+			CPULimit: cfg.RuntimeCPULimit, MemoryLimit: cfg.RuntimeMemoryLimit,
+			ProbeTimeoutSeconds: cfg.RuntimeProbeTimeoutSeconds, ProbeFailureThreshold: cfg.RuntimeProbeFailureThreshold,
+		})
 		controller.ConfigureRuntimePod(cfg.RuntimeSecretName, cfg.RuntimeSecretEnv, map[string]string{
 			"SERVICE_NAME": cfg.ServiceName, "DEPLOYMENT_ENV": cfg.DeploymentEnv,
+			"TELEMETRY_MODE": os.Getenv("TELEMETRY_MODE"), "SERVICE_VERSION": os.Getenv("SERVICE_VERSION"),
+			"UNOARENA_COMPONENT": "room-runtime", "OTEL_EXPORTER_OTLP_ENDPOINT": os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+			"OTEL_EXPORTER_OTLP_PROTOCOL": os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"), "OTEL_TRACES_SAMPLER": os.Getenv("OTEL_TRACES_SAMPLER"),
+			"OTEL_TRACES_SAMPLER_ARG": os.Getenv("OTEL_TRACES_SAMPLER_ARG"), "OTEL_GO_X_OBSERVABILITY": os.Getenv("OTEL_GO_X_OBSERVABILITY"),
+			"METRICS_ADDR": os.Getenv("METRICS_ADDR"),
 			"IDENTITY_URL": cfg.IdentityURL, "GAME_INTEGRITY_URL": cfg.GameIntegrityURL,
 			"REDIS_URL": cfg.RedisURL, "GATEWAY_URL": cfg.GatewayURL,
 			"SPECTATOR_VIEW_URL": cfg.SpectatorURL, "RANKING_URL": cfg.RankingURL,
 			"ANALYTICS_URL": cfg.AnalyticsURL, "TOURNAMENT_URL": cfg.TournamentURL,
 			"ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY": strconv.Itoa(cfg.RuntimeQueueCapacity),
 		})
-		log.Printf(`{"level":"info","service":"%s","event":"room_runtime_controller_startup"}`, cfg.ServiceName)
+		slog.InfoContext(rootCtx, "room runtime controller started", "event", "room_runtime_controller_startup")
 		cadence := boundedRuntimeControllerCadence(cfg.RuntimeControllerCadence)
+		ticker := time.NewTicker(cadence)
+		defer ticker.Stop()
 		for {
-			if err := controller.ReconcileOnce(context.Background()); err != nil {
-				log.Printf(`{"level":"error","service":"%s","event":"room_runtime_controller_reconcile","error":%q}`, cfg.ServiceName, err.Error())
+			if err := controller.ReconcileOnce(rootCtx); err != nil && rootCtx.Err() == nil {
+				slog.ErrorContext(rootCtx, "room runtime reconciliation failed", "event", "room_runtime_controller_reconcile_failed", "error", err.Error())
 			}
-			time.Sleep(cadence)
+			select {
+			case <-rootCtx.Done():
+				return nil
+			case <-ticker.C:
+			}
 		}
 	}
 	wired, err := wireRoomRuntime(cfg)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if cfg.WorkerRole == "room-timer" {
 		if wired.Mode != "durable" || wired.Timers == nil {
-			log.Fatal("WORKER_ROLE=room-timer requires durable mode with Redis timers")
+			return errors.New("WORKER_ROLE=room-timer requires durable mode with Redis timers")
 		}
 		continuations := store.NewNextGameContinuationQueue(wired.Pool.Main)
 		rebuilder := NewTimerIndexRebuildWorker(wired.Sessions, cfg.RuntimeControllerOwner, func(ctx context.Context) error {
@@ -772,20 +810,22 @@ func main() {
 		tw := NewTimerWorkerWithContinuations(wired.Timers, continuations, cfg.RoomGameplayURL, cfg.TimerCredential)
 		tw.Start()
 		defer tw.Stop()
-		log.Printf(`{"level":"info","service":"%s","event":"timer_worker_startup","mode":%q}`, cfg.ServiceName, wired.Mode)
-		select {}
+		slog.InfoContext(rootCtx, "timer worker started", "event", "timer_worker_startup", "mode", wired.Mode)
+		<-rootCtx.Done()
+		return nil
 	}
 
 	if cfg.WorkerRole == "room-integrity-reconciler" {
 		if wired.Mode != "durable" || wired.Sessions == nil || wired.Deps.Integrity == nil {
-			log.Fatal("WORKER_ROLE=room-integrity-reconciler requires durable Room Postgres and Game Integrity")
+			return errors.New("WORKER_ROLE=room-integrity-reconciler requires durable Room Postgres and Game Integrity")
 		}
 		rw := NewReconciliationWorker(wired.Sessions, wired.Deps.Integrity, wired.Deps.Deals)
 		rw.Configure(cfg.RuntimeControllerOwner, cfg.IntegrityReconcilerBatch, cfg.IntegrityReconcilerLease, cfg.IntegrityReconcilerInterval)
 		rw.Start()
 		defer rw.Stop()
-		log.Printf(`{"level":"info","service":"%s","event":"room_integrity_reconciler_startup","mode":%q}`, cfg.ServiceName, wired.Mode)
-		select {}
+		slog.InfoContext(rootCtx, "room integrity reconciler started", "event", "room_integrity_reconciler_startup", "mode", wired.Mode)
+		<-rootCtx.Done()
+		return nil
 	}
 
 	// Capability-only: OutboxRetryWorker + MultiDestinationPublisher drain.
@@ -799,7 +839,7 @@ func main() {
 	srv := NewServerWithScopedCreds(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.SpectatorRecoveryCredential, cfg.AnalyticsBackfillCredential, cfg.ServiceName)
 	if cfg.WorkerRole == "room-runtime" {
 		if cfg.RuntimeRoomID == "" || cfg.RuntimeGeneration < 1 || cfg.RuntimeRouterCredential == "" {
-			log.Fatal("room-runtime requires ROOM_RUNTIME_ROOM_ID, ROOM_RUNTIME_GENERATION, and ROOM_RUNTIME_ROUTER_CREDENTIAL")
+			return errors.New("room-runtime requires ROOM_RUNTIME_ROOM_ID, ROOM_RUNTIME_GENERATION, and ROOM_RUNTIME_ROUTER_CREDENTIAL")
 		}
 		srv.ConfigureDedicatedRuntime(cfg.RuntimeRoomID, cfg.RuntimeGeneration, cfg.RuntimeRouterCredential, cfg.RuntimeQueueCapacity)
 	}
@@ -808,30 +848,52 @@ func main() {
 	if cfg.WorkerRole == "room-router" {
 		kube, err := kubeClientFromEnvironment(cfg)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		directory := NewPodDirectory()
-		refreshPodDirectory(context.Background(), directory, kube)
+		refreshPodDirectory(rootCtx, directory, kube)
 		go func() {
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
-			for range ticker.C {
-				refreshPodDirectory(context.Background(), directory, kube)
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-ticker.C:
+					refreshPodDirectory(rootCtx, directory, kube)
+				}
 			}
 		}()
 		router := NewRoomRouter(directory, cfg.RuntimeRouterCredential, nil)
-		handler := NewStableRoomHandler(srv, router)
-		log.Printf(`{"level":"info","service":"%s","event":"room_router_startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
-		log.Fatal(http.ListenAndServe(":8080", handler))
+		handler := roomHTTPHandler(telemetryRuntime, NewStableRoomHandler(srv, router))
+		slog.InfoContext(rootCtx, "room router started", "event", "room_router_startup", "mode", wired.Mode, "ready", wired.Ready)
+		return serveRoomHTTP(rootCtx, handler)
 	}
-	log.Printf(`{"level":"info","service":"%s","event":"startup","mode":%q,"ready":%t}`, cfg.ServiceName, wired.Mode, wired.Ready)
-	log.Fatal(http.ListenAndServe(":8080", srv.routes()))
+	slog.InfoContext(rootCtx, "room process started", "event", "startup", "mode", wired.Mode, "ready", wired.Ready)
+	return serveRoomHTTP(rootCtx, roomHTTPHandler(telemetryRuntime, srv.routes()))
+}
+
+func serveRoomHTTP(ctx context.Context, handler http.Handler) error {
+	server := &http.Server{Addr: ":8080", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe() }()
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	}
 }
 
 func refreshPodDirectory(ctx context.Context, directory *PodDirectory, kube KubePodClient) {
 	pods, err := kube.List(ctx)
 	if err != nil {
-		log.Printf(`{"level":"warn","event":"room_router_directory_refresh","error":%q}`, err.Error())
+		slog.WarnContext(ctx, "room router directory refresh failed", "event", "room_router_directory_refresh_failed", "error", err.Error())
 		return
 	}
 	directory.Replace(pods)

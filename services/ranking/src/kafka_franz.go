@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/plugin/kotel"
 )
 
 const (
@@ -45,6 +46,10 @@ func newFranzRankingClient(cfg RankingKafkaConfig) (*franzRankingClient, error) 
 		}
 	}
 	cl, err := kgo.NewClient(
+		kgo.WithHooks(kotel.NewKotel(kotel.WithTracer(kotel.NewTracer(
+			kotel.TracerProvider(processTracerProvider()),
+			kotel.TracerPropagator(processPropagator()),
+		))).Hooks()...),
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(topics...),
@@ -83,6 +88,8 @@ func (c *franzRankingClient) Poll(ctx context.Context) ([]ConsumerRecord, error)
 }
 
 func (c *franzRankingClient) Commit(ctx context.Context, rec ConsumerRecord) error {
+	ctx, span := processTracerProvider().Tracer("unoarena/services/ranking").Start(ctx, "ranking.kafka.commit")
+	defer span.End()
 	kr := &kgo.Record{
 		Topic:     rec.Topic,
 		Partition: rec.Partition,
@@ -107,6 +114,7 @@ func (c *franzRankingClient) PublishDLQ(ctx context.Context, original ConsumerRe
 		Key:     append([]byte(nil), original.Key...),
 		Value:   append([]byte(nil), original.Value...),
 		Headers: dlqHeaders(meta),
+		Context: ctx,
 	}
 	results := c.cl.ProduceSync(ctx, rec)
 	if err := results.FirstErr(); err != nil {
@@ -121,13 +129,21 @@ func (c *franzRankingClient) Close() error {
 }
 
 func consumerRecordFromKgo(r *kgo.Record) ConsumerRecord {
-	return ConsumerRecord{
+	rec := ConsumerRecord{
 		Topic:     r.Topic,
 		Partition: r.Partition,
 		Offset:    r.Offset,
 		Key:       append([]byte(nil), r.Key...),
 		Value:     append([]byte(nil), r.Value...),
+		Context:   r.Context,
 	}
+	if len(r.Headers) > 0 {
+		rec.Headers = make(map[string]string, len(r.Headers))
+		for _, header := range r.Headers {
+			rec.Headers[header.Key] = string(header.Value)
+		}
+	}
+	return rec
 }
 
 func dlqHeaders(meta DLQFailureMeta) []kgo.RecordHeader {

@@ -1,5 +1,6 @@
-# KurrentDB 26.0.3 experimental ARM64 — local-only (ADR-0035). No schema Job.
-# Digest-pinned. No PVC/backup/HA claim.
+# KurrentDB 26.0.3 architecture-selected local deployment (ADR-0035). No schema Job.
+# apply.sh replaces the image placeholder with the reviewed AMD64 or ARM64 digest.
+# No PVC/backup/HA claim.
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,7 +10,7 @@ metadata:
     app.kubernetes.io/name: kurrentdb
     app.kubernetes.io/part-of: uno-arena
     uno-arena.local/non-production: "true"
-    uno-arena.local/kurrentdb-arm-experimental: "true"
+    uno-arena.local/kurrentdb-architecture-selected: "true"
 spec:
   type: ClusterIP
   selector:
@@ -28,7 +29,7 @@ metadata:
     app.kubernetes.io/name: kurrentdb
     app.kubernetes.io/part-of: uno-arena
     uno-arena.local/non-production: "true"
-    uno-arena.local/kurrentdb-arm-experimental: "true"
+    uno-arena.local/kurrentdb-architecture-selected: "true"
 spec:
   replicas: 1
   selector:
@@ -47,7 +48,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: kurrentdb
-          image: kurrentplatform/kurrentdb:26.0.3-experimental-arm64-10.0-noble@sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e
+          image: __KURRENTDB_IMAGE_BY_NODE_ARCH__
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 2113

@@ -28,16 +28,19 @@ Gateway / BFF and must not introduce direct microservice access.
 | `UNOARENA_API_URL` | Yes (except `countdown`, or `logout` when no local session exists) | Gateway/BFF base URL. The CLI never calls microservices directly. |
 | `UNOARENA_TOKEN` | No | Default bearer token when `--token` is omitted (after `--token`, before session file) |
 | `UNOARENA_SESSION_FILE` | No | Session file path. Default: `${XDG_STATE_HOME:-$HOME/.local/state}/unoarena/session.json` |
-| `UNOARENA_ROOM_START_TIMEOUT_SECONDS` | No | Total retry budget for safe `503 room_starting` snapshot/assignment reads. Default: `60`; each retry honors `Retry-After` with jitter and a five-second interval cap. |
+| `UNOARENA_ROOM_START_TIMEOUT_SECONDS` | No | Total retry/observation budget for safe snapshot/assignment reads during `503 room_starting`, transient `502`/`504`/timeout failures, or reconciliation of an unknown bot mutation outcome. Default: `60`; each retry honors `Retry-After` with jitter and a five-second interval cap. |
 
 Token resolution for one-shot utilities: `--token` → `UNOARENA_TOKEN` → session file.
 Corrupt or group/world-readable session files fail closed.
 
 Room creation and assignment are asynchronous to dedicated runtime admission.
 Only player-snapshot and tournament-assignment GETs retry a structured
-`503 room_starting`; the bounded policy honors `Retry-After`, adds jitter, and
-caps each interval at five seconds. Exhaustion is a structured nonzero failure.
-The client never automatically retries a mutation or any unknown outcome.
+`503 room_starting` or transient `502`/`504`/timeout; the bounded policy honors
+`Retry-After`, adds jitter, and caps each interval at five seconds. Exhaustion
+is a nonzero failure. The client never automatically retries a mutation. After
+an unknown bot mutation outcome, it uses only bounded authoritative snapshot
+reads and resumes only after terminal state or a committed sequence advance;
+unchanged state remains a nonzero failure.
 
 ## Invocation
 
@@ -187,6 +190,14 @@ The exit status is zero for a completed/bounded successful run. Recoverable
 rejections remain visible in action records and metrics but do not fail a run
 that reconciles and reaches its terminal success condition; authentication,
 assignment, timeout, or unrecovered gameplay failures remain non-zero.
+After a command transport `502`, `503`, `504`, or timeout leaves the outcome
+unknown, the headless bot boundedly observes authoritative snapshots for up to
+ten seconds (and never beyond its overall run deadline). It continues only if
+the Room is terminal or its sequence has advanced beyond the submitted
+sequence, including progress committed by a peer or Room-owned timer. It never
+replays the failed mutation envelope against unchanged state; if observation
+cannot establish progress or the room never reaches a terminal state, the run
+remains non-zero.
 
 Tournament bots register themselves, poll the authenticated per-player
 assignment resource, join each newly assigned room, and run the same gameplay
@@ -273,8 +284,9 @@ make test-client-checkpoint
 ```
 
 The suite includes focused Stage B coverage for canonical board rendering,
-interactive JSONL, stale-command reconciliation, reproducible bot actions,
-final summaries, and versioned room command envelopes.
+interactive JSONL, stale-command reconciliation, delayed authoritative advance
+after unknown outcomes without mutation replay, reproducible bot actions, final
+summaries, and versioned room command envelopes.
 
 Dockerfile packaging structure (no build/pull):
 

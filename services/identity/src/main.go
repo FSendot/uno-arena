@@ -5,7 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -484,8 +485,8 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 }
 
 func logRequest(r *http.Request, path string) {
-	log.Printf(`{"level":"info","service":"identity","event":"request","path":%q,"correlationId":%q}`,
-		path, r.Header.Get("X-Correlation-Id"))
+	slog.InfoContext(r.Context(), "HTTP request completed", "event", "request_completed",
+		"path", path, "correlationId", r.Header.Get("X-Correlation-Id"))
 }
 
 // newDefaultService preserves checkpoint helper used by existing tests.
@@ -502,10 +503,35 @@ func defaultOutboxRetryConfig() OutboxRetryConfig {
 }
 
 func main() {
-	cred := os.Getenv("IDENTITY_INTERNAL_CREDENTIAL")
-	rt, err := wireIdentityRuntime()
+	if err := runIdentity(); err != nil {
+		slog.ErrorContext(context.Background(), "identity stopped", "event", "service_exit_failure", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runIdentity() error {
+	rootCtx := context.Background()
+	telemetryRuntime, playerMetrics, err := startIdentityTelemetry(rootCtx)
 	if err != nil {
-		log.Fatalf("identity runtime: %v", err)
+		return fmt.Errorf("start telemetry: %w", err)
+	}
+	slog.SetDefault(telemetryRuntime.Logger)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetryRuntime.Shutdown(shutdownCtx); err != nil {
+			telemetryRuntime.Logger.ErrorContext(shutdownCtx, "telemetry shutdown failed", "event", "telemetry_shutdown_failure", "error", err)
+		}
+	}()
+
+	cred := os.Getenv("IDENTITY_INTERNAL_CREDENTIAL")
+	rt, err := wireIdentityRuntimeWithTelemetry(playerMetrics, identityHTTPClient(telemetryRuntime), identityPGXTracer(telemetryRuntime))
+	if err != nil {
+		telemetryRuntime.Logger.ErrorContext(rootCtx, "identity runtime failed", "event", "startup_failure", "error", err)
+		return err
+	}
+	if rt.pool != nil {
+		defer rt.pool.Close()
 	}
 	// Never silently convert misconfigured → memory. Memory only via
 	// IDENTITY_CAPABILITY_MODE=true + non-prod inside wireIdentityRuntime.
@@ -517,32 +543,34 @@ func main() {
 	if rt.mode == "capability" && rt.ready {
 		worker = NewOutboxRetryWorker(rt.svc, defaultOutboxRetryConfig())
 		worker.Start()
+		defer worker.Stop()
 	}
 
-	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
+	httpSrv := &http.Server{Addr: ":8080", Handler: identityHTTPHandler(telemetryRuntime, srv.routes())}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"identity","event":"startup","mode":%q,"ready":%t}`, rt.mode, rt.ready)
+		telemetryRuntime.Logger.InfoContext(rootCtx, "identity started", "event", "service_started", "mode", rt.mode, "ready", rt.ready)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	var serveErr error
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			serveErr = fmt.Errorf("serve HTTP: %w", err)
 		}
 	case <-sigCh:
 	}
 
-	if worker != nil {
-		worker.Stop()
-	}
-	if rt.pool != nil {
-		rt.pool.Close()
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
+	if err := httpSrv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown HTTP: %w", err)
+	}
+	if serveErr != nil {
+		return serveErr
+	}
+	return nil
 }

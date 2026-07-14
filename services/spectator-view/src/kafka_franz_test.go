@@ -3,7 +3,19 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+func TestConsumerRecordFromKgoPreservesTraceContextHeaders(t *testing.T) {
+	rec := consumerRecordFromKgo(&kgo.Record{Headers: []kgo.RecordHeader{
+		{Key: "traceparent", Value: []byte("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")},
+		{Key: "tracestate", Value: []byte("vendor=value")},
+	}})
+	if rec.Headers["traceparent"] == "" || rec.Headers["tracestate"] != "vendor=value" {
+		t.Fatalf("trace headers not preserved: %#v", rec.Headers)
+	}
+}
 
 func TestDLQHeaders_SanitizedOperationalMetadata(t *testing.T) {
 	meta := DLQFailureMeta{

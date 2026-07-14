@@ -46,7 +46,7 @@ func NewHTTPRoomSpectatorRecoveryClient(baseURL, credential string) *HTTPRoomSpe
 	return &HTTPRoomSpectatorRecoveryClient{
 		BaseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		Credential: strings.TrimSpace(credential),
-		HTTPClient: &http.Client{Timeout: 15 * time.Second},
+		HTTPClient: tracedHTTPClient(15 * time.Second),
 	}
 }
 

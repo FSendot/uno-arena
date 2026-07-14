@@ -21,11 +21,12 @@ type Client struct {
 
 // Config holds ClickHouse HTTP connection settings.
 type Config struct {
-	URL      string // e.g. http://clickhouse:8123
-	User     string
-	Password string
-	Database string
-	Timeout  time.Duration
+	URL        string // e.g. http://clickhouse:8123
+	User       string
+	Password   string
+	Database   string
+	Timeout    time.Duration
+	HTTPClient *http.Client
 }
 
 // NewClient constructs a ClickHouse HTTP client. Database must be non-empty.
@@ -53,12 +54,16 @@ func NewClient(cfg Config) (*Client, error) {
 		timeout = 30 * time.Second
 	}
 	base := strings.TrimRight(u.Scheme+"://"+u.Host, "/")
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: timeout}
+	}
 	return &Client{
 		baseURL:  base,
 		user:     cfg.User,
 		password: cfg.Password,
 		database: db,
-		http:     &http.Client{Timeout: timeout},
+		http:     httpClient,
 	}, nil
 }
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+
 	"unoarena/services/analytics/domain"
 	"unoarena/services/analytics/store"
 )
@@ -344,6 +346,13 @@ func (c *AnalyticsProjectionRebuildKafkaConsumer) ProcessBatch(ctx context.Conte
 }
 
 func (c *AnalyticsProjectionRebuildKafkaConsumer) processOne(ctx context.Context, rec ConsumerRecord) error {
+	if rec.Context != nil {
+		ctx = rec.Context
+	} else {
+		ctx = processPropagator().Extract(ctx, propagation.MapCarrier(rec.Headers))
+	}
+	ctx, span := processTracerProvider().Tracer("unoarena/services/analytics").Start(ctx, "analytics.projection-rebuild.process")
+	defer span.End()
 	sourceTopic := firstNonEmpty(rec.Topic, c.cfg.Topic)
 	key := strings.TrimSpace(string(rec.Key))
 

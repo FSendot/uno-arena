@@ -12,6 +12,7 @@ import (
 
 // ConsumerRecord is a narrow Kafka record view for Tournament unit tests.
 type ConsumerRecord struct {
+	Context   context.Context
 	Topic     string
 	Partition int32
 	Offset    int64
@@ -289,6 +290,11 @@ func (c *MatchCompletedKafkaConsumer) ProcessBatch(ctx context.Context, recs []C
 }
 
 func (c *MatchCompletedKafkaConsumer) processOne(ctx context.Context, rec ConsumerRecord) error {
+	if rec.Context != nil {
+		ctx = contextWithTournamentSpan(ctx, rec.Context)
+	}
+	ctx, span := startTournamentSpan(ctx, "tournament-orchestration.kafka.process")
+	defer span.End()
 	key := strings.TrimSpace(string(rec.Key))
 	sourceTopic := firstNonEmpty(rec.Topic, c.cfg.Topic)
 

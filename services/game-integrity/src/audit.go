@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -77,11 +78,17 @@ func (m *MemoryAuditRecorder) Snapshot() []DecryptAuditRecord {
 // KurrentAuditRecorder appends audit events to a dedicated Kurrent stream.
 type KurrentAuditRecorder struct {
 	client *kurrentdb.Client
+	tracer trace.Tracer
 }
 
 func (a *KurrentAuditRecorder) Record(ctx context.Context, rec DecryptAuditRecord) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("audit recorder unwired")
+	}
+	if a.tracer != nil {
+		var span trace.Span
+		ctx, span = a.tracer.Start(ctx, "game-integrity.kurrent.audit_append", trace.WithSpanKind(trace.SpanKindClient))
+		defer span.End()
 	}
 	body, err := json.Marshal(rec)
 	if err != nil {

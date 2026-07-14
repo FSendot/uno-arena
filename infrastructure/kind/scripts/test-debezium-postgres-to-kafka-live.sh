@@ -119,4 +119,4 @@ for field, want in required.items():
 print("ok matched Kafka key + canonical envelope fields")
 PY
 
-echo "ok test-debezium-postgres-to-kafka-live (Postgres outbox → Kafka observed; consumers still PENDING)"
+echo "ok test-debezium-postgres-to-kafka-live (Postgres outbox → Kafka observed; consumer delivery is outside this producer-path probe)"

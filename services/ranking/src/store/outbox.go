@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/ranking/domain"
 )
 
@@ -93,6 +94,14 @@ func loadOutcomeResponse(ctx context.Context, tx pgx.Tx, kind, key string) (doma
 }
 
 func insertOutboxEvents(ctx context.Context, tx pgx.Tx, events []OutboxEvent) error {
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
+	var storedTraceparent, storedTracestate any
+	if traceparent != "" {
+		storedTraceparent = traceparent
+	}
+	if tracestate != "" {
+		storedTracestate = tracestate
+	}
 	for _, e := range events {
 		if e.EventID == "" {
 			continue
@@ -115,10 +124,12 @@ func insertOutboxEvents(ctx context.Context, tx pgx.Tx, events []OutboxEvent) er
 		}
 		_, err = tx.Exec(ctx, `
 			INSERT INTO outbox_events (
-				event_id, event_type, player_id, topic, partition_key, schema_version, payload, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				event_id, event_type, player_id, topic, partition_key, schema_version, payload,
+				traceparent, tracestate, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (event_id) DO NOTHING
-		`, e.EventID, e.EventType, player, e.Topic, e.PartitionKey, sv, payload, created)
+		`, e.EventID, e.EventType, player, e.Topic, e.PartitionKey, sv, payload,
+			storedTraceparent, storedTracestate, created)
 		if err != nil {
 			return wrapUnavailable(err)
 		}

@@ -10,6 +10,19 @@ command -v "${HELM}" >/dev/null 2>&1 || { echo "helm required" >&2; exit 1; }
 "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" >/dev/null
 
 kind_out="$("${HELM}" template identity-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
+echo "${kind_out}" | grep -q 'cpu: 500m'
+echo "${kind_out}" | grep -q 'timeoutSeconds: 3'
+echo "${kind_out}" | grep -q 'failureThreshold: 6'
+echo "${kind_out}" | grep -q 'serviceAccountName: identity'
+echo "${kind_out}" | grep -q 'automountServiceAccountToken: false'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-exposed: "true"'
+echo "${kind_out}" | grep -q 'unoarena.io/component: api'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-scrape: service'
+echo "${kind_out}" | grep -q 'containerPort: 9090'
+echo "${kind_out}" | grep -q 'port: 9090'
+echo "${kind_out}" | grep -q 'name: SERVICE_VERSION'
+echo "${kind_out}" | grep -q 'name: POD_UID'
+echo "${kind_out}" | grep -q 'name: TELEMETRY_MODE'
 echo "${kind_out}" | grep -q 'image: "uno-arena/identity:local"'
 echo "${kind_out}" | grep -q 'imagePullPolicy: IfNotPresent'
 ! echo "${kind_out}" | grep -q 'image: "uno-arena/identity@"'

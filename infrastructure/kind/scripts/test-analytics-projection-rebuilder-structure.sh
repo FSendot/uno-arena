@@ -21,6 +21,7 @@ MIG="${REPO_ROOT}/services/analytics/migrations/001_init.sql"
 RENDER="${SCRIPT_DIR}/render-kafka-topics.rb"
 PLAN="${REPO_ROOT}/infrastructure/kind/generated/kafka-topic-plan.yaml"
 CREATE="${REPO_ROOT}/infrastructure/kind/generated/kafka-create-topics.sh"
+LIVE="${SCRIPT_DIR}/test-analytics-projection-rebuilder-live.sh"
 
 check "${SRC}/main.go" "workerRoleAnalyticsProjectionRebuilder"
 check "${SRC}/main.go" "wireProjectionRebuildWorker"
@@ -47,8 +48,10 @@ check "${CHART}/templates/projection-rebuilder-deployment.yaml" "RANKING_URL"
   || { echo "FAIL: rebuilder template must not inject ANALYTICS_OPS_CREDENTIAL" >&2; fail=1; }
 ! grep -q 'readinessProbe' "${CHART}/templates/projection-rebuilder-deployment.yaml" \
   || { echo "FAIL: rebuilder template must not define readinessProbe" >&2; fail=1; }
-! grep -q 'containerPort' "${CHART}/templates/projection-rebuilder-deployment.yaml" \
-  || { echo "FAIL: rebuilder template must not expose ports" >&2; fail=1; }
+grep -q 'containerPort: 9090' "${CHART}/templates/projection-rebuilder-deployment.yaml" \
+  || { echo "FAIL: rebuilder template must expose private metrics port 9090" >&2; fail=1; }
+! grep -q 'containerPort: 8080' "${CHART}/templates/projection-rebuilder-deployment.yaml" \
+  || { echo "FAIL: rebuilder template must not expose application port 8080" >&2; fail=1; }
 
 check "${CHART}/values.yaml" "enabled: false"
 check "${CHART}/values.staging.yaml" "enabled: false"
@@ -58,6 +61,8 @@ if ! grep -A6 '^projectionRebuilder:' "${CHART}/values.kind.yaml" | grep -q 'ena
   fail=1
 fi
 check "${CHART}/values.kind.yaml" "analytics.projection.rebuild_requested"
+check "${LIVE}" "KIND_ANALYTICS_QUERY_RETRIES:-5"
+check "${LIVE}" "ClickHouse read failed after"
 
 check "${RENDER}" "KIND_REBUILD_REQUEST_PARTITIONS"
 check "${RENDER}" "analytics.projection.rebuild_requested"
@@ -95,8 +100,10 @@ if command -v helm >/dev/null 2>&1; then
   echo "${reb_dep}" | grep -q 'WORKER_ROLE'
   ! echo "${reb_dep}" | grep -q 'ANALYTICS_OPS_CREDENTIAL' \
     || { echo "FAIL: rendered rebuilder must not include ops credential" >&2; fail=1; }
-  ! echo "${reb_dep}" | grep -q 'containerPort' \
-    || { echo "FAIL: rendered rebuilder must not expose ports" >&2; fail=1; }
+  echo "${reb_dep}" | grep -q 'containerPort: 9090' \
+    || { echo "FAIL: rendered rebuilder must expose private metrics port 9090" >&2; fail=1; }
+  ! echo "${reb_dep}" | grep -q 'containerPort: 8080' \
+    || { echo "FAIL: rendered rebuilder must not expose application port 8080" >&2; fail=1; }
   ! echo "${reb_dep}" | grep -q 'readinessProbe' \
     || { echo "FAIL: rendered rebuilder must not define readinessProbe" >&2; fail=1; }
 fi

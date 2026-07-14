@@ -294,7 +294,7 @@ func (s *RankingStore) ApplyTournamentPerformance(ctx context.Context, req Tourn
 		s.FailNextCommits--
 		return TournamentPerformanceResult{}, wrapUnavailable(fmt.Errorf("injected commit failure"))
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitTransaction(ctx, tx); err != nil {
 		return TournamentPerformanceResult{}, wrapUnavailable(err)
 	}
 	return result, nil

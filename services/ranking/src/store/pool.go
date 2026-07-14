@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,10 +25,16 @@ func NewPoolFromEnv(ctx context.Context) (*Pool, error) {
 
 // NewPool opens a writer-only pgxpool from dsn.
 func NewPool(ctx context.Context, dsn string) (*Pool, error) {
+	return NewPoolWithTracer(ctx, dsn, nil)
+}
+
+// NewPoolWithTracer opens a pool with an explicit process-owned query tracer.
+func NewPoolWithTracer(ctx context.Context, dsn string, tracer pgx.QueryTracer) (*Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
+	cfg.ConnConfig.Tracer = tracer
 	p, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err

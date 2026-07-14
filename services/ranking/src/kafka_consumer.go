@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+
 	"unoarena/services/ranking/domain"
 	"unoarena/services/ranking/store"
 )
@@ -20,6 +22,8 @@ type ConsumerRecord struct {
 	Offset    int64
 	Key       []byte
 	Value     []byte
+	Headers   map[string]string
+	Context   context.Context
 }
 
 // DLQFailureMeta is sanitized operational metadata published with a DLQ record.
@@ -331,6 +335,13 @@ func (c *GameCompletedKafkaConsumer) ProcessBatch(ctx context.Context, recs []Co
 }
 
 func (c *GameCompletedKafkaConsumer) processOne(ctx context.Context, rec ConsumerRecord) error {
+	if rec.Context != nil {
+		ctx = rec.Context
+	} else {
+		ctx = processPropagator().Extract(ctx, propagation.MapCarrier(rec.Headers))
+	}
+	ctx, span := processTracerProvider().Tracer("unoarena/services/ranking").Start(ctx, "ranking.kafka.process")
+	defer span.End()
 	sourceTopic := firstNonEmpty(rec.Topic, c.cfg.Topic, DefaultGameCompletedTopic)
 	switch c.cfg.classifyTopic(sourceTopic) {
 	case topicKindPlayersAdvanced:

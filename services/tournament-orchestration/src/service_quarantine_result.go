@@ -65,10 +65,11 @@ func (s *Service) submitCommandQuarantineResultDifferential(ctx context.Context,
 		return prior, nil
 	}
 	decision := domain.DecideQuarantineTournamentResult(uow.Loaded(), cmd)
-	return s.commitQuarantineResult(uow, req, decision, cmd, tournamentID, correlationID)
+	return s.commitQuarantineResult(ctx, uow, req, decision, cmd, tournamentID, correlationID)
 }
 
 func (s *Service) commitQuarantineResult(
+	ctx context.Context,
 	uow QuarantineResultUnitOfWork,
 	req CommandRequest,
 	decision domain.QuarantineTournamentResultDecision,
@@ -79,6 +80,11 @@ func (s *Service) commitQuarantineResult(
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(QuarantineResultCommitRequest{
 			TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 			CorrelationID: correlationID, Outcome: res, Decision: decision, Command: cmd,
@@ -86,11 +92,6 @@ func (s *Service) commitQuarantineResult(
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalQuarantineResultOutcome(req.CommandID, res), nil
@@ -159,7 +160,9 @@ func (s *Service) rejectQuarantineResult(ctx context.Context, req CommandRequest
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
 		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
 			WithTournament(tournamentID)
-		_ = s.audit.RecordRejection(rec)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		return res, nil
 	}
 	uow, err := s.quarantineResults.BeginStandaloneCommand(ctx, req.CommandID)
@@ -171,6 +174,11 @@ func (s *Service) rejectQuarantineResult(ctx context.Context, req CommandRequest
 		return prior, nil
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(QuarantineResultCommitRequest{
 		TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 		CorrelationID: correlationID, Outcome: res,
@@ -179,11 +187,6 @@ func (s *Service) rejectQuarantineResult(ctx context.Context, req CommandRequest
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalQuarantineResultOutcome(req.CommandID, res), nil
@@ -209,6 +212,11 @@ func (s *Service) persistQuarantineResultRejectStandalone(
 		return prior, nil
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(QuarantineResultCommitRequest{
 		TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 		CorrelationID: correlationID, Outcome: res, Decision: decision,
@@ -216,11 +224,6 @@ func (s *Service) persistQuarantineResultRejectStandalone(
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalQuarantineResultOutcome(req.CommandID, res), nil

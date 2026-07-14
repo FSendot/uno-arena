@@ -5,7 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -473,23 +474,40 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 }
 
 func logRequest(r *http.Request, path string) {
-	log.Printf(`{"level":"info","service":"analytics","event":"request","path":%q,"correlationId":%q}`,
-		path, r.Header.Get("X-Correlation-Id"))
+	route := r.Pattern
+	if route == "" {
+		route = path
+	}
+	processLogger().InfoContext(r.Context(), "request completed",
+		"event", "http_request_completed", "route", route,
+		"correlationId", r.Header.Get("X-Correlation-Id"))
 }
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("analytics stopped", "event", "process_stopped", "error", err.Error())
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	telemetryRuntime, err := startProcessTelemetry(context.Background())
+	if err != nil {
+		return fmt.Errorf("start telemetry: %w", err)
+	}
+	defer shutdownProcessTelemetry(telemetryRuntime)
+
 	if workerRoleFromEnv() == workerRoleAnalyticsProjectionRebuilder {
 		rt, err := wireProjectionRebuildWorker()
 		if err != nil {
-			log.Fatalf(`{"level":"error","service":"analytics","event":"projection_rebuilder_startup_failed","error":%q}`, err.Error())
+			return fmt.Errorf("projection rebuilder startup: %w", err)
 		}
-		runProjectionRebuildWorker(rt)
-		return
+		return runProjectionRebuildWorker(rt)
 	}
 
 	rt, err := wireAnalyticsRuntime()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	srv := NewServer(rt.app, rt.creds)
 	srv.mode = rt.mode
@@ -506,14 +524,14 @@ func main() {
 	defer rootCancel()
 	if rt.kafka != nil {
 		rt.kafka.start(rootCtx)
-		log.Printf(`{"level":"info","service":"analytics","event":"kafka_consumer_started","group":%q,"topics":%q}`,
-			rt.kafka.consumer.cfg.Group, strings.Join(rt.kafka.consumer.cfg.Topics, ","))
+		processLogger().InfoContext(rootCtx, "Kafka consumer started", "event", "kafka_consumer_started",
+			"group", rt.kafka.consumer.cfg.Group, "topics", strings.Join(rt.kafka.consumer.cfg.Topics, ","))
 	}
 
-	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
+	httpSrv := &http.Server{Addr: ":8080", Handler: tracedHTTPHandler(srv.routes())}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"analytics","event":"startup","mode":%q}`, rt.mode)
+		processLogger().InfoContext(rootCtx, "analytics started", "event", "service_started", "mode", rt.mode)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -522,7 +540,7 @@ func main() {
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			return fmt.Errorf("HTTP server: %w", err)
 		}
 	case <-sigCh:
 	}
@@ -533,5 +551,8 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
+	if err := httpSrv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown HTTP server: %w", err)
+	}
+	return nil
 }

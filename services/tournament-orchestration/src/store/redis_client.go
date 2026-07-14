@@ -13,7 +13,12 @@ func NewRedisFromURL(redisURL string) (*redis.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse redis url: %w", err)
 	}
-	return redis.NewClient(opt), nil
+	client := redis.NewClient(opt)
+	if err := instrumentRedis(client); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("instrument redis: %w", err)
+	}
+	return client, nil
 }
 
 // PingRedis verifies connectivity.

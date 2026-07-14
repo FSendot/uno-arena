@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/room-gameplay/app"
 	"unoarena/services/room-gameplay/domain"
 	"unoarena/services/room-gameplay/game"
@@ -335,6 +336,9 @@ func syncDeadlines(ctx context.Context, tx pgx.Tx, sess *domain.Session) error {
 }
 
 func insertDualOutboxes(ctx context.Context, tx pgx.Tx, entry app.OutboxEntry) error {
+	ctx, span := startStoreSpan(ctx, "room-gameplay.outbox.persist")
+	defer span.End()
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
 	for _, ev := range entry.Events {
 		kind, err := app.ClassifyOutboxEvent(ev)
 		if err != nil {
@@ -365,12 +369,13 @@ func insertDualOutboxes(ctx context.Context, tx pgx.Tx, entry app.OutboxEntry) e
 				INSERT INTO realtime_outbox_events (
 					event_id, event_type, topic, target_stream, partition_key, schema_version,
 					room_id, player_id, session_id, sequence_number, integrity_log_offset,
-					payload, correlation_id, causation_id, occurred_at
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+					payload, correlation_id, causation_id, traceparent, tracestate, occurred_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 				ON CONFLICT (event_id) DO NOTHING
 			`, ev.EventID, ev.EventType, ev.Topic, targetStream, entry.RoomID, ev.SchemaVersion,
 				entry.RoomID, nullIfEmpty(ev.PlayerID), nullIfEmpty(ev.SessionID), ev.SequenceNumber, entry.LogOffset,
-				payload, nullIfEmpty(ev.CorrelationID), nullIfEmpty(ev.CausationID), occurred)
+				payload, nullIfEmpty(ev.CorrelationID), nullIfEmpty(ev.CausationID),
+				nullIfEmpty(traceparent), nullIfEmpty(tracestate), occurred)
 			if err != nil {
 				return err
 			}
@@ -378,11 +383,13 @@ func insertDualOutboxes(ctx context.Context, tx pgx.Tx, entry app.OutboxEntry) e
 			_, err := tx.Exec(ctx, `
 				INSERT INTO integration_outbox_events (
 					event_id, event_type, topic, partition_key, schema_version, room_id,
-					integrity_log_offset, payload, correlation_id, causation_id, occurred_at
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+					integrity_log_offset, payload, correlation_id, causation_id,
+					traceparent, tracestate, occurred_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 				ON CONFLICT (event_id) DO NOTHING
 			`, ev.EventID, ev.EventType, ev.Topic, entry.RoomID, ev.SchemaVersion, entry.RoomID,
-				entry.LogOffset, payload, nullIfEmpty(ev.CorrelationID), nullIfEmpty(ev.CausationID), occurred)
+				entry.LogOffset, payload, nullIfEmpty(ev.CorrelationID), nullIfEmpty(ev.CausationID),
+				nullIfEmpty(traceparent), nullIfEmpty(tracestate), occurred)
 			if err != nil {
 				return err
 			}

@@ -376,11 +376,12 @@ CREATE TABLE IF NOT EXISTS room_maintenance_leases (
     lease_owner TEXT,
     lease_until TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
+    completion_generation BIGINT NOT NULL DEFAULT 0 CHECK (completion_generation >= 0),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 COMMENT ON TABLE room_maintenance_leases IS
-    'Room-context leases for global maintenance such as Redis timer-index rebuild; never acquired by dedicated runtimes or routers.';
+    'Room-context leases for global maintenance such as Redis timer-index rebuild; completion generations fence sibling workers without comparing host clocks; never acquired by dedicated runtimes or routers.';
 
 -- ---------------------------------------------------------------------------
 -- Integration outbox (lock order #14; Kafka via Debezium Outbox Event Router). NO published_at.
@@ -398,6 +399,8 @@ CREATE TABLE IF NOT EXISTS integration_outbox_events (
     payload JSONB NOT NULL,
     correlation_id TEXT,
     causation_id TEXT,
+    traceparent TEXT,
+    tracestate TEXT,
     occurred_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (event_id)
@@ -436,6 +439,8 @@ CREATE TABLE IF NOT EXISTS realtime_outbox_events (
     payload JSONB NOT NULL,
     correlation_id TEXT,
     causation_id TEXT,
+    traceparent TEXT,
+    tracestate TEXT,
     occurred_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (event_id)

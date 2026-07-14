@@ -124,14 +124,29 @@ func TestPodDirectoryRoutesOnlyReadyMatchingGeneration(t *testing.T) {
 	}
 }
 
+func TestPodDirectoryWaitsForNetworkWarmupAfterKubeReady(t *testing.T) {
+	d := NewPodDirectory()
+	pod := runtimePod{RoomHash: runtimeRoomHash("r-warm"), Generation: 1, IP: "10.0.0.9", Ready: true, ReadyAt: time.Now()}
+	d.Replace([]runtimePod{pod})
+	if _, ok := d.LookupCurrent("r-warm"); ok {
+		t.Fatal("fresh Kube Ready pod must not route before network warmup")
+	}
+	pod.ReadyAt = time.Now().Add(-runtimePodNetworkWarmup - time.Second)
+	d.Replace([]runtimePod{pod})
+	if _, ok := d.LookupCurrent("r-warm"); !ok {
+		t.Fatal("warmed Ready pod must route")
+	}
+}
+
 func TestKubernetesPodStatusDecodesReadyEndpoint(t *testing.T) {
 	created := "2026-07-13T10:00:00Z"
+	readyAt := "2026-07-13T10:00:05Z"
 	var raw kubePod
-	if err := json.Unmarshal([]byte(`{"metadata":{"name":"room-x","creationTimestamp":"`+created+`","labels":{"unoarena.io/room-hash":"abc","unoarena.io/room-generation":"2"}},"status":{"podIP":"10.0.0.2","phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}`), &raw); err != nil {
+	if err := json.Unmarshal([]byte(`{"metadata":{"name":"room-x","creationTimestamp":"`+created+`","labels":{"unoarena.io/room-hash":"abc","unoarena.io/room-generation":"2"}},"status":{"podIP":"10.0.0.2","phase":"Running","conditions":[{"type":"Ready","status":"True","lastTransitionTime":"`+readyAt+`"}]}}`), &raw); err != nil {
 		t.Fatal(err)
 	}
 	pod := podFromKube(raw)
-	if !pod.Ready || pod.IP != "10.0.0.2" || pod.Phase != "Running" || pod.Generation != 2 || pod.CreatedAt.Format(time.RFC3339) != created {
+	if !pod.Ready || pod.IP != "10.0.0.2" || pod.Phase != "Running" || pod.Generation != 2 || pod.CreatedAt.Format(time.RFC3339) != created || pod.ReadyAt.Format(time.RFC3339) != readyAt {
 		t.Fatalf("decoded pod = %#v", pod)
 	}
 }
@@ -354,6 +369,98 @@ func TestKubeCreateTreatsTypedAlreadyExistsAsIdempotent(t *testing.T) {
 	}
 }
 
+func TestKubeCreateAddsRuntimeTelemetryContract(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	client := newKubeHTTPClient(srv.URL, "test", "", nil)
+	err := client.Create(context.Background(), runtimePodSpec{
+		RoomID: "r1", Generation: 1, Name: "room-r1-g1", Image: "room:test",
+		Env: map[string]string{"TELEMETRY_MODE": "required", "UNOARENA_COMPONENT": "room-runtime", "METRICS_ADDR": ":9090"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := body["metadata"].(map[string]any)
+	labels := metadata["labels"].(map[string]any)
+	if labels["unoarena.io/metrics-scrape"] != "pod" || labels["unoarena.io/metrics-exposed"] != "true" {
+		t.Fatalf("telemetry labels = %#v", labels)
+	}
+	spec := body["spec"].(map[string]any)
+	if spec["serviceAccountName"] != "room-gameplay-runtime" || spec["automountServiceAccountToken"] != false {
+		t.Fatalf("runtime identity = %#v", spec)
+	}
+	container := spec["containers"].([]any)[0].(map[string]any)
+	ports := container["ports"].([]any)
+	foundMetrics := false
+	for _, raw := range ports {
+		port := raw.(map[string]any)
+		if port["name"] == "metrics" && port["containerPort"] == float64(9090) {
+			foundMetrics = true
+		}
+	}
+	if !foundMetrics {
+		t.Fatalf("runtime ports = %#v", ports)
+	}
+	env := container["env"].([]any)
+	foundUID := false
+	for _, raw := range env {
+		entry := raw.(map[string]any)
+		if entry["name"] == "POD_UID" {
+			foundUID = true
+		}
+	}
+	if !foundUID {
+		t.Fatalf("runtime env lacks POD_UID: %#v", env)
+	}
+	resources := container["resources"].(map[string]any)
+	limits := resources["limits"].(map[string]any)
+	if limits["cpu"] != "250m" || limits["memory"] != "256Mi" {
+		t.Fatalf("runtime default limits = %#v", limits)
+	}
+	liveness := container["livenessProbe"].(map[string]any)
+	if liveness["timeoutSeconds"] != float64(1) || liveness["failureThreshold"] != float64(3) {
+		t.Fatalf("runtime default liveness = %#v", liveness)
+	}
+}
+
+func TestKubeCreateUsesConfiguredRuntimePodProfile(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	client := newKubeHTTPClient(srv.URL, "test", "", nil)
+	err := client.Create(context.Background(), runtimePodSpec{
+		RoomID: "r1", Generation: 1, Name: "room-r1-g1", Image: "room:test",
+		Profile: runtimePodProfile{CPURequest: "20m", MemoryRequest: "48Mi", CPULimit: "500m", MemoryLimit: "384Mi", ProbeTimeoutSeconds: 3, ProbeFailureThreshold: 6},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := body["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	resources := container["resources"].(map[string]any)
+	requests := resources["requests"].(map[string]any)
+	limits := resources["limits"].(map[string]any)
+	if requests["cpu"] != "20m" || requests["memory"] != "48Mi" || limits["cpu"] != "500m" || limits["memory"] != "384Mi" {
+		t.Fatalf("runtime resources = %#v", resources)
+	}
+	for _, probeName := range []string{"readinessProbe", "livenessProbe"} {
+		probe := container[probeName].(map[string]any)
+		if probe["timeoutSeconds"] != float64(3) || probe["failureThreshold"] != float64(6) {
+			t.Fatalf("%s = %#v", probeName, probe)
+		}
+	}
+}
+
 func TestRuntimeControllerCadenceDefaultsAndClamps(t *testing.T) {
 	for _, tc := range []struct {
 		in, want time.Duration
@@ -374,9 +481,17 @@ func TestRuntimeControllerConfigurationLoadsAdmissionControls(t *testing.T) {
 	t.Setenv("ROOM_RUNTIME_CONTROLLER_CONCURRENCY", "7")
 	t.Setenv("ROOM_RUNTIME_CONTROLLER_CADENCE_MILLIS", "750")
 	t.Setenv("ROOM_RUNTIME_READINESS_TIMEOUT_SECONDS", "45")
+	t.Setenv("ROOM_RUNTIME_CPU_REQUEST", "20m")
+	t.Setenv("ROOM_RUNTIME_MEMORY_REQUEST", "48Mi")
+	t.Setenv("ROOM_RUNTIME_CPU_LIMIT", "500m")
+	t.Setenv("ROOM_RUNTIME_MEMORY_LIMIT", "384Mi")
+	t.Setenv("ROOM_RUNTIME_PROBE_TIMEOUT_SECONDS", "3")
+	t.Setenv("ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD", "6")
 	cfg := loadRoomRuntimeConfig()
 	if cfg.RuntimeControllerClaimBatch != 23 || cfg.RuntimeControllerConcurrency != 7 ||
-		cfg.RuntimeControllerCadence != 750*time.Millisecond || cfg.RuntimeReadinessTimeout != 45*time.Second {
+		cfg.RuntimeControllerCadence != 750*time.Millisecond || cfg.RuntimeReadinessTimeout != 45*time.Second ||
+		cfg.RuntimeCPURequest != "20m" || cfg.RuntimeMemoryRequest != "48Mi" || cfg.RuntimeCPULimit != "500m" || cfg.RuntimeMemoryLimit != "384Mi" ||
+		cfg.RuntimeProbeTimeoutSeconds != 3 || cfg.RuntimeProbeFailureThreshold != 6 {
 		t.Fatalf("controller config=%+v", cfg)
 	}
 }
@@ -450,5 +565,18 @@ func TestMaintenanceRolesRequireOnlyOwnedDurableDependencies(t *testing.T) {
 	}
 	if missing := roomDurableMissing(reconciler); len(missing) != 0 {
 		t.Fatalf("integrity reconciler inherited unrelated credentials: %v", missing)
+	}
+}
+
+func TestKubeClientConstructionDoesNotAssumeDefaultTransportType(t *testing.T) {
+	original := http.DefaultTransport
+	http.DefaultTransport = roundTripper(func(*http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	client := newKubeHTTPClient("https://kubernetes.default.svc", "uno-arena", "token", nil)
+	if client == nil || client.client == nil || client.client.Transport == nil {
+		t.Fatal("Kubernetes client was not constructed with an explicit base transport")
 	}
 }

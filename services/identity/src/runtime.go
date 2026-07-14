@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"unoarena/services/identity/domain"
 	"unoarena/services/identity/oidc"
@@ -42,6 +45,10 @@ func isNonProd(env string) bool {
 }
 
 func wireIdentityRuntime() (identityRuntime, error) {
+	return wireIdentityRuntimeWithTelemetry(nil, nil, nil)
+}
+
+func wireIdentityRuntimeWithTelemetry(playerCreated domain.PlayerCreationRecorder, httpClient *http.Client, pgxTracer pgx.QueryTracer) (identityRuntime, error) {
 	cred := strings.TrimSpace(os.Getenv("IDENTITY_INTERNAL_CREDENTIAL"))
 	dbURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	deploymentEnv := strings.TrimSpace(os.Getenv("DEPLOYMENT_ENV"))
@@ -65,6 +72,7 @@ func wireIdentityRuntime() (identityRuntime, error) {
 		Audiences:     audiences,
 		ClientID:      clientID,
 		AllowHTTP:     allowHTTP && isNonProd(deploymentEnv),
+		HTTPClient:    httpClient,
 	}
 	if err := oidc.ProductionReadinessCheck(
 		deploymentEnv,
@@ -78,7 +86,7 @@ func wireIdentityRuntime() (identityRuntime, error) {
 
 	// Durable mode when DATABASE_URL is set (production path). Capability flag forces memory.
 	if dbURL != "" && !capability {
-		pool, err := store.NewPool(context.Background(), dbURL)
+		pool, err := store.NewPool(context.Background(), dbURL, pgxTracer)
 		if err != nil {
 			return identityRuntime{}, fmt.Errorf("database pool: %w", err)
 		}
@@ -86,15 +94,16 @@ func wireIdentityRuntime() (identityRuntime, error) {
 		sessions := store.NewSessionStore(pool.Pool)
 		ids := domain.RandomIDGenerator{}
 		svc := domain.NewService(domain.ServiceDeps{
-			Players:      players,
-			Sessions:     sessions,
-			Hasher:       domain.NewCheckpointPasswordHasher(ids),
-			IDs:          ids,
-			Tokens:       ids,
-			Clock:        domain.SystemClock{},
-			SessionTTL:   24 * time.Hour,
-			Transport:    nil, // Debezium CDC — never drain/poll
-			AllowedRoles: splitCSV(os.Getenv("IDENTITY_OIDC_ALLOWED_ROLES")),
+			Players:       players,
+			Sessions:      sessions,
+			Hasher:        domain.NewCheckpointPasswordHasher(ids),
+			IDs:           ids,
+			Tokens:        ids,
+			Clock:         domain.SystemClock{},
+			SessionTTL:    24 * time.Hour,
+			Transport:     nil, // Debezium CDC — never drain/poll
+			AllowedRoles:  splitCSV(os.Getenv("IDENTITY_OIDC_ALLOWED_ROLES")),
+			PlayerCreated: playerCreated,
 		})
 		var validator *oidc.Validator
 		if issuer != "" && len(audiences) > 0 {
@@ -127,7 +136,7 @@ func wireIdentityRuntime() (identityRuntime, error) {
 	}
 
 	invalidationURL := strings.TrimSpace(os.Getenv("IDENTITY_INVALIDATION_URL"))
-	svc, sessions, invReady := newCapabilityService(invalidationURL, cred)
+	svc, sessions, invReady := newCapabilityServiceWithTelemetry(invalidationURL, cred, playerCreated, httpClient)
 	var validator *oidc.Validator
 	if issuer != "" && len(audiences) > 0 {
 		var err error
@@ -157,25 +166,30 @@ func capabilityReadyReason(ready bool) string {
 }
 
 func newCapabilityService(invalidationURL, credential string) (*domain.Service, *domain.MemorySessionRepository, bool) {
+	return newCapabilityServiceWithTelemetry(invalidationURL, credential, nil, nil)
+}
+
+func newCapabilityServiceWithTelemetry(invalidationURL, credential string, playerCreated domain.PlayerCreationRecorder, httpClient *http.Client) (*domain.Service, *domain.MemorySessionRepository, bool) {
 	ids := domain.RandomIDGenerator{}
 	sessions := domain.NewMemorySessionRepository()
 	var transport domain.InvalidationTransport
 	ready := false
 	if invalidationURL != "" && credential != "" {
-		transport = NewHTTPInvalidationTransport(invalidationURL, credential, nil)
+		transport = NewHTTPInvalidationTransport(invalidationURL, credential, httpClient)
 		ready = true
 	} else {
 		transport = domain.NewMemoryInvalidationTransport()
 	}
 	svc := domain.NewService(domain.ServiceDeps{
-		Players:    domain.NewMemoryPlayerRepository(),
-		Sessions:   sessions,
-		Hasher:     domain.NewCheckpointPasswordHasher(ids),
-		IDs:        ids,
-		Tokens:     ids,
-		Clock:      domain.SystemClock{},
-		SessionTTL: 24 * time.Hour,
-		Transport:  transport,
+		Players:       domain.NewMemoryPlayerRepository(),
+		Sessions:      sessions,
+		Hasher:        domain.NewCheckpointPasswordHasher(ids),
+		IDs:           ids,
+		Tokens:        ids,
+		Clock:         domain.SystemClock{},
+		SessionTTL:    24 * time.Hour,
+		Transport:     transport,
+		PlayerCreated: playerCreated,
 	})
 	return svc, sessions, ready
 }

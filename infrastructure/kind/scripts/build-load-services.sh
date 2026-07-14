@@ -24,8 +24,9 @@ services=(
 node="${KIND_CLUSTER_NAME}-control-plane"
 node_arch="$(docker exec "${node}" uname -m)"
 case "${node_arch}" in
+  x86_64|amd64) platform="linux/amd64" ;;
   aarch64|arm64) platform="linux/arm64" ;;
-  *) die "kind node architecture '${node_arch}' is unsupported: the selected local KurrentDB image is ARM64-only" ;;
+  *) die "kind node architecture '${node_arch}' has no reviewed service/KurrentDB image set" ;;
 esac
 
 for service in "${services[@]}"; do

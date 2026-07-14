@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/identity/domain"
 )
 
@@ -225,16 +226,19 @@ func (s *SessionStore) MarkOutboxPublished(context.Context, string, time.Time) e
 
 func insertOutbox(ctx context.Context, tx pgx.Tx, event domain.SessionInvalidatedEvent) error {
 	event = event.Normalize()
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
 	payload, err := json.Marshal(event.OutboxPayload())
 	if err != nil {
 		return domain.WrapUnavailable(err)
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO outbox_events (
-			event_id, event_type, topic, partition_key, schema_version, player_id, payload
-		) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+			event_id, event_type, topic, partition_key, schema_version, player_id, payload,
+			traceparent, tracestate
+		) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)
 	`, event.EventID, event.EventType, domain.OutboxTopicSessionInvalidated,
-		event.PlayerID.String(), event.SchemaVersion, event.PlayerID.String(), string(payload))
+		event.PlayerID.String(), event.SchemaVersion, event.PlayerID.String(), string(payload),
+		nullIfEmpty(traceparent), nullIfEmpty(tracestate))
 	if err != nil {
 		return domain.WrapUnavailable(err)
 	}

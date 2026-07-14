@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/room-gameplay/app"
 )
 
@@ -314,12 +315,34 @@ func (s *SessionStore) ReleaseReconciliationClaim(ctx context.Context, commandID
 	return wrapUnavailable(err)
 }
 
-// ClaimTimerIndexRebuild acquires the Room-context timer rebuild lease. A
-// completion newer than this worker's start fences sibling rollout replicas.
-func (s *SessionStore) ClaimTimerIndexRebuild(ctx context.Context, owner string, workerStarted time.Time, lease time.Duration) (bool, error) {
+// TimerIndexRebuildGeneration returns the database-owned completion generation
+// that fences one worker process from completions observed after it started.
+func (s *SessionStore) TimerIndexRebuildGeneration(ctx context.Context) (int64, error) {
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO room_maintenance_leases (lease_name)
+		VALUES ('timer-index-rebuild')
+		ON CONFLICT (lease_name) DO NOTHING
+	`); err != nil {
+		return 0, wrapUnavailable(err)
+	}
+	var generation int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT completion_generation
+		FROM room_maintenance_leases
+		WHERE lease_name = 'timer-index-rebuild'
+	`).Scan(&generation)
+	return generation, wrapUnavailable(err)
+}
+
+// ClaimTimerIndexRebuild acquires the Room-context timer rebuild lease only
+// while the database-owned completion generation still matches this worker.
+func (s *SessionStore) ClaimTimerIndexRebuild(ctx context.Context, owner string, generation int64, lease time.Duration) (bool, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
 		return false, fmt.Errorf("timer rebuild owner required")
+	}
+	if generation < 0 {
+		return false, fmt.Errorf("timer rebuild generation must not be negative")
 	}
 	if lease <= 0 {
 		lease = time.Minute
@@ -340,24 +363,24 @@ func (s *SessionStore) ClaimTimerIndexRebuild(ctx context.Context, owner string,
 			    updated_at = now()
 			WHERE lease_name = 'timer-index-rebuild'
 			  AND (lease_until IS NULL OR lease_until <= now())
-			  AND (completed_at IS NULL OR completed_at < $2)
+			  AND completion_generation = $2
 			RETURNING 1
 		)
 		SELECT EXISTS(SELECT 1 FROM claimed)
-	`, owner, workerStarted.UTC(), lease.Seconds()).Scan(&claimed)
+	`, owner, generation, lease.Seconds()).Scan(&claimed)
 	return claimed, wrapUnavailable(err)
 }
 
-// TimerIndexRebuildCompletedSince reports whether a sibling timer replica
-// completed this rollout's guarded rebuild.
-func (s *SessionStore) TimerIndexRebuildCompletedSince(ctx context.Context, workerStarted time.Time) (bool, error) {
+// TimerIndexRebuildCompletedAfter reports whether a sibling timer replica
+// advanced the guarded rebuild beyond this worker's initial generation.
+func (s *SessionStore) TimerIndexRebuildCompletedAfter(ctx context.Context, generation int64) (bool, error) {
 	var completed bool
 	err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM room_maintenance_leases
-			WHERE lease_name = 'timer-index-rebuild' AND completed_at >= $1
+			WHERE lease_name = 'timer-index-rebuild' AND completion_generation > $1
 		)
-	`, workerStarted.UTC()).Scan(&completed)
+	`, generation).Scan(&completed)
 	return completed, wrapUnavailable(err)
 }
 
@@ -382,7 +405,11 @@ func (s *SessionStore) RenewTimerIndexRebuild(ctx context.Context, owner string,
 func (s *SessionStore) CompleteTimerIndexRebuild(ctx context.Context, owner string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE room_maintenance_leases
-		SET lease_owner = NULL, lease_until = NULL, completed_at = now(), updated_at = now()
+		SET lease_owner = NULL,
+		    lease_until = NULL,
+		    completed_at = now(),
+		    completion_generation = completion_generation + 1,
+		    updated_at = now()
 		WHERE lease_name = 'timer-index-rebuild' AND lease_owner = $1 AND lease_until > now()
 	`, owner)
 	if err != nil {
@@ -652,14 +679,15 @@ func (s *SessionStore) reconcileOneClaimed(ctx context.Context, integrity app.Ga
 		"commandId": m.CommandID,
 	})
 	eventID := fmt.Sprintf("reconcile-%s-%d", m.RoomID, m.LogOffset)
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO integration_outbox_events (
 			event_id, event_type, topic, partition_key, schema_version, room_id,
-			integrity_log_offset, payload, occurred_at
-		) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8)
+			integrity_log_offset, payload, traceparent, tracestate, occurred_at
+		) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (event_id) DO NOTHING
 	`, eventID, app.EventRoomStateReconciled, app.TopicRoomStateReconciled, m.RoomID,
-		m.RoomID, m.LogOffset, reconcilePayload, time.Now().UTC())
+		m.RoomID, m.LogOffset, reconcilePayload, nullIfEmpty(traceparent), nullIfEmpty(tracestate), time.Now().UTC())
 	if err != nil {
 		return wrapUnavailable(err)
 	}
@@ -677,6 +705,7 @@ func (s *SessionStore) reconcileOneClaimed(ctx context.Context, integrity app.Ga
 	if err := tx.Commit(ctx); err != nil {
 		return wrapUnavailable(err)
 	}
+	app.RecordCommittedGameCompletion(ctx, outbox)
 	if s.Timers != nil && sess != nil {
 		_ = scheduleTimersFromSession(ctx, s.Timers, sess)
 	}

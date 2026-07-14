@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Explicit/NETWORKED: node-native stage of Debezium Connect (ARM64 digest) into kind.
+# Explicit/NETWORKED: node-native stage of Debezium Connect (multiarch index) into kind.
 # Uses docker exec + crictl pull on the uno-arena control-plane node.
 # Does NOT use kind load (unreliable for these upstream OCI/multiarch images here).
 # Does not claim Postgres→Kafka delivery — only stages the Connect image for kind-apply.
@@ -15,11 +15,9 @@ require_cmd python3
 assert_kind_cluster_name
 assert_kind_context
 
-# Approved local ARM64 source digest (Apple Silicon kind). Multiarch index for non-ARM notes:
-# quay.io/debezium/connect@sha256:27cf9ecb6b1facfc3392e1da684f02ae800a985759173faa070421b23ab27ae7
 DEBEZIUM_CONNECT_VERSION="${DEBEZIUM_CONNECT_VERSION:-3.6.0.Final}"
-DEBEZIUM_CONNECT_ARM64_DIGEST="${DEBEZIUM_CONNECT_ARM64_DIGEST:-sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70}"
-DEBEZIUM_CONNECT_SOURCE_IMAGE="${DEBEZIUM_CONNECT_SOURCE_IMAGE:-quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70}"
+DEBEZIUM_CONNECT_INDEX_DIGEST="${DEBEZIUM_CONNECT_INDEX_DIGEST:-sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455}"
+DEBEZIUM_CONNECT_SOURCE_IMAGE="${DEBEZIUM_CONNECT_SOURCE_IMAGE:-quay.io/debezium/connect:3.6.0.Final@sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455}"
 
 # Prior broken local runtime tag from kind-load staging (remove so crictl cannot reuse bad metadata).
 DEBEZIUM_CONNECT_STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
@@ -45,6 +43,12 @@ if [[ "${#_cp_nodes[@]}" -ne 1 ]]; then
 fi
 KIND_NODE="${_cp_nodes[0]}"
 echo "kind node ${KIND_NODE} (cluster ${KIND_CLUSTER_NAME})"
+node_arch="$(docker exec "${KIND_NODE}" uname -m)"
+case "${node_arch}" in
+  x86_64|amd64) expected_arch="amd64" ;;
+  aarch64|arm64) expected_arch="arm64" ;;
+  *) echo "error: unsupported kind node architecture ${node_arch}" >&2; exit 1 ;;
+esac
 
 node_rmi_tolerate() {
   local ref="$1"
@@ -63,19 +67,20 @@ node_rmi_tolerate "${DEBEZIUM_CONNECT_SOURCE_IMAGE}"
 echo "node-native crictl pull ${DEBEZIUM_CONNECT_SOURCE_IMAGE}"
 docker exec "${KIND_NODE}" crictl pull "${DEBEZIUM_CONNECT_SOURCE_IMAGE}"
 
-echo "verifying arm64 + exact source digest via crictl inspecti (fail-closed on kind-import aliases)"
-DIGEST_HEX="${DEBEZIUM_CONNECT_ARM64_DIGEST#sha256:}"
+echo "verifying ${expected_arch} resolution + exact multiarch index via crictl inspecti (fail-closed on kind-import aliases)"
+DIGEST_HEX="${DEBEZIUM_CONNECT_INDEX_DIGEST#sha256:}"
 docker exec "${KIND_NODE}" crictl inspecti "${DEBEZIUM_CONNECT_SOURCE_IMAGE}" | python3 -c "
 import json, sys
 want_digest = sys.argv[1]
 want_ref = sys.argv[2]
+expected_arch = sys.argv[3]
 data = json.load(sys.stdin)
 status = data.get('status') or {}
 info = data.get('info') or {}
 spec = info.get('imageSpec') or info.get('image') or {}
 arch = (spec.get('architecture') or spec.get('Architecture') or '').lower()
-if arch != 'arm64':
-    raise SystemExit('architecture must be arm64, got %r' % (arch,))
+if arch != expected_arch:
+    raise SystemExit('architecture must be %s, got %r' % (expected_arch, arch))
 repo_digests = status.get('repoDigests') or []
 # Prior kind load poisons the node: even after scoped rmi, a native pull can reconstruct
 # docker.io/library/import-* repoDigests alongside the valid quay digest. Kubelet then
@@ -101,8 +106,8 @@ if repo_digests and not any(want_digest.lower() in d.lower() for d in repo_diges
 # Exact source ref must resolve (inspecti already keyed by want_ref); require quay digest form when digests listed.
 if not any('quay.io/debezium/connect' in d and want_digest.lower() in d.lower() for d in repo_digests) and want_digest.lower() not in image_id:
     raise SystemExit('exact source digest/ref not available for %s' % want_ref)
-print('ok inspecti arch=arm64 digest=%s' % want_digest)
-" "${DIGEST_HEX}" "${DEBEZIUM_CONNECT_SOURCE_IMAGE}"
+print('ok inspecti arch=%s index=%s' % (expected_arch, want_digest))
+" "${DIGEST_HEX}" "${DEBEZIUM_CONNECT_SOURCE_IMAGE}" "${expected_arch}"
 
 echo "ok node-native-stage-debezium-connect source=${DEBEZIUM_CONNECT_SOURCE_IMAGE} node=${KIND_NODE}"
 echo "note: image stage only — run make kind-apply (after bootstrap) then make kind-test-debezium-connectors for live status"

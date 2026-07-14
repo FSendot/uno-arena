@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -80,18 +80,18 @@ func (w *TimerWorker) tick(ctx context.Context) {
 	for _, family := range []string{"uno", "reconnect"} {
 		claimed, err := w.timers.ClaimDue(ctx, family, now, 16)
 		if err != nil {
-			log.Printf(`{"level":"warn","event":"timer_claim_failed","family":%q,"error":%q}`, family, err.Error())
+			slog.WarnContext(ctx, "timer claim failed", "event", "timer_claim_failed", "family", family, "error", err.Error())
 			continue
 		}
 		for _, id := range claimed {
 			terminal, err := w.dispatch(ctx, id)
 			if err != nil {
-				log.Printf(`{"level":"warn","event":"timer_dispatch_failed","timer":%q,"error":%q}`, id.String(), err.Error())
+				slog.WarnContext(ctx, "timer dispatch failed", "event", "timer_dispatch_failed", "timer", id.String(), "error", err.Error())
 				continue
 			}
 			if terminal {
 				if err := w.timers.Ack(ctx, id); err != nil {
-					log.Printf(`{"level":"warn","event":"timer_ack_failed","timer":%q,"error":%q}`, id.String(), err.Error())
+					slog.WarnContext(ctx, "timer acknowledgement failed", "event", "timer_ack_failed", "timer", id.String(), "error", err.Error())
 				}
 			}
 		}
@@ -105,21 +105,21 @@ func (w *TimerWorker) tickNextGameContinuations(ctx context.Context, now time.Ti
 	}
 	claimed, err := w.continuations.ClaimDue(ctx, now, 16)
 	if err != nil {
-		log.Printf(`{"level":"warn","event":"next_game_continuation_claim_failed","error":%q}`, err.Error())
+		slog.WarnContext(ctx, "next game continuation claim failed", "event", "next_game_continuation_claim_failed", "error", err.Error())
 		return
 	}
 	for _, item := range claimed {
 		terminal, err := w.dispatchNextGame(ctx, item)
 		if err != nil {
-			log.Printf(`{"level":"warn","event":"next_game_continuation_dispatch_failed","roomId":%q,"commandId":%q,"error":%q}`, item.RoomID, item.CommandID, err.Error())
+			slog.WarnContext(ctx, "next game continuation dispatch failed", "event", "next_game_continuation_dispatch_failed", "roomId", item.RoomID, "commandId", item.CommandID, "error", err.Error())
 			if releaseErr := w.continuations.Release(ctx, item, now.Add(continuationRetryDelay(item.Attempts))); releaseErr != nil {
-				log.Printf(`{"level":"warn","event":"next_game_continuation_release_failed","roomId":%q,"commandId":%q,"error":%q}`, item.RoomID, item.CommandID, releaseErr.Error())
+				slog.WarnContext(ctx, "next game continuation release failed", "event", "next_game_continuation_release_failed", "roomId", item.RoomID, "commandId", item.CommandID, "error", releaseErr.Error())
 			}
 			continue
 		}
 		if terminal {
 			if err := w.continuations.Ack(ctx, item); err != nil {
-				log.Printf(`{"level":"warn","event":"next_game_continuation_ack_failed","roomId":%q,"commandId":%q,"error":%q}`, item.RoomID, item.CommandID, err.Error())
+				slog.WarnContext(ctx, "next game continuation acknowledgement failed", "event", "next_game_continuation_ack_failed", "roomId", item.RoomID, "commandId", item.CommandID, "error", err.Error())
 			}
 		}
 	}

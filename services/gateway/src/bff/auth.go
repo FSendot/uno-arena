@@ -133,10 +133,18 @@ func (s *Server) requirePrincipal(w http.ResponseWriter, r *http.Request) (Princ
 	corr := s.correlation(r)
 	principal, err := s.identity.ValidateSession(r.Context(), token, corr)
 	if err != nil {
-		s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid session", "")
+		s.writeIdentityValidationError(w, r, err)
 		return Principal{}, false
 	}
 	return principal, true
+}
+
+func (s *Server) writeIdentityValidationError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, ErrUnauthorized) {
+		s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid session", "")
+		return
+	}
+	s.writeErr(w, r, http.StatusBadGateway, "upstream_error", "identity validation unavailable", "")
 }
 
 func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +189,8 @@ func (s *Server) handlePublicAnalytics(w http.ResponseWriter, r *http.Request) {
 
 // handleTournamentReads proxies Tournament bracket/standings/assignment reads.
 // Paths: GET /v1/tournaments/{tournamentId}/bracket|standings
-//        GET /v1/tournaments/{tournamentId}/players/{playerId}/assignment
+//
+//	GET /v1/tournaments/{tournamentId}/players/{playerId}/assignment
 func (s *Server) handleTournamentReads(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1/tournaments/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -210,7 +219,7 @@ func (s *Server) handleTournamentReads(w http.ResponseWriter, r *http.Request) {
 	if tok, ok := bearerToken(r); ok {
 		p, err := s.identity.ValidateSession(r.Context(), tok, corr)
 		if err != nil {
-			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid session", "")
+			s.writeIdentityValidationError(w, r, err)
 			return
 		}
 		principal = &p

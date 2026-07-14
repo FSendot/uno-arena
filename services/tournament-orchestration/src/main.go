@@ -5,8 +5,9 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -809,26 +810,41 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func main() {
+	if err := runTournamentProcess(); err != nil {
+		if tournamentProcessTelemetry != nil {
+			tournamentProcessTelemetry.Logger.Error("tournament process stopped", "event", "process_stopped", "error", err.Error())
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(1)
+	}
+}
+
+func runTournamentProcess() error {
+	telemetryRuntime, err := startTournamentTelemetry(context.Background())
+	if err != nil {
+		return fmt.Errorf("tournament telemetry: %w", err)
+	}
+	defer shutdownTournamentTelemetry(telemetryRuntime)
+	store.ConfigureTelemetry(telemetryRuntime.TracerProvider, telemetryRuntime.MeterProvider)
+
 	cred := os.Getenv("TOURNAMENT_INTERNAL_CREDENTIAL")
 	if cred == "" {
 		cred = os.Getenv("SERVICE_CREDENTIAL")
 	}
 	rt, err := wireTournamentRuntime()
 	if err != nil {
-		log.Fatalf("tournament runtime: %v", err)
+		return fmt.Errorf("tournament runtime: %w", err)
 	}
 
 	if rt.workerRole == workerRoleTournamentProvisioning {
-		runProvisioningWorker(rt)
-		return
+		return runProvisioningWorker(rt)
 	}
 	if rt.workerRole == workerRoleTournamentSeeding {
-		runSeedingWorker(rt)
-		return
+		return runSeedingWorker(rt)
 	}
 	if rt.workerRole == workerRoleTournamentCompletion {
-		runCompletionWorker(rt)
-		return
+		return runCompletionWorker(rt)
 	}
 
 	srv := serverFromRuntime(rt, cred, strings.TrimSpace(os.Getenv("TOURNAMENT_ANALYTICS_BACKFILL_SERVICE_CREDENTIAL")))
@@ -839,19 +855,19 @@ func main() {
 	if rt.mode == "misconfigured" {
 		srv.readyReason = rt.readyReason
 	}
-	httpSrv := &http.Server{Addr: ":8080", Handler: srv.Routes()}
+	httpSrv := &http.Server{Addr: ":8080", Handler: tournamentHTTPHandler(telemetryRuntime, srv.Routes()), ReadHeaderTimeout: 5 * time.Second}
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
 	if rt.kafka != nil {
 		rt.kafka.start(rootCtx)
-		log.Printf(`{"level":"info","service":"tournament-orchestration","event":"kafka_consumer_started","group":%q,"topic":%q}`,
-			rt.kafka.consumer.cfg.Group, rt.kafka.consumer.cfg.Topic)
+		slog.InfoContext(rootCtx, "Kafka consumer started", "event", "kafka_consumer_started",
+			"group", rt.kafka.consumer.cfg.Group, "topic", rt.kafka.consumer.cfg.Topic)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"tournament-orchestration","event":"startup","mode":"%s"}`, rt.mode)
+		slog.InfoContext(rootCtx, "tournament API started", "event", "startup", "mode", rt.mode)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -860,7 +876,7 @@ func main() {
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			return err
 		}
 	case <-sigCh:
 	}
@@ -877,20 +893,21 @@ func main() {
 	if rt.pool != nil {
 		rt.pool.Close()
 	}
+	return nil
 }
 
 // runProvisioningWorker runs WORKER_ROLE=tournament-provisioning without the API HTTP server.
 // SIGTERM stops claiming and waits for in-flight ProcessProvisioningBatch work.
-func runProvisioningWorker(rt tournamentRuntime) {
+func runProvisioningWorker(rt tournamentRuntime) error {
 	if rt.store == nil || rt.svc == nil {
-		log.Fatal("provisioning worker requires durable store and service")
+		return errors.New("provisioning worker requires durable store and service")
 	}
 	if rt.durableReady != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := rt.durableReady(ctx)
 		cancel()
 		if err != nil {
-			log.Fatalf("provisioning worker schema readiness: %v", err)
+			return fmt.Errorf("provisioning worker schema readiness: %w", err)
 		}
 	}
 	worker := NewProvisioningWorker(rt.store, func(ctx context.Context, work ProvisioningBatchWork) error {
@@ -907,26 +924,27 @@ func runProvisioningWorker(rt tournamentRuntime) {
 			rt.pool.Close()
 		}
 	}()
-	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"provisioning_worker_startup","mode":%q}`, rt.mode)
+	slog.Info("provisioning worker started", "event", "provisioning_worker_startup", "mode", rt.mode)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"provisioning_worker_shutdown"}`)
+	slog.Info("provisioning worker stopped", "event", "provisioning_worker_shutdown")
+	return nil
 }
 
 // runSeedingWorker runs WORKER_ROLE=tournament-seeding without the API HTTP server.
 // Only DATABASE_URL is required (no Room URL / cursor secret).
-func runSeedingWorker(rt tournamentRuntime) {
+func runSeedingWorker(rt tournamentRuntime) error {
 	if rt.store == nil {
-		log.Fatal("seeding worker requires durable store")
+		return errors.New("seeding worker requires durable store")
 	}
 	if rt.durableReady != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := rt.durableReady(ctx)
 		cancel()
 		if err != nil {
-			log.Fatalf("seeding worker schema readiness: %v", err)
+			return fmt.Errorf("seeding worker schema readiness: %w", err)
 		}
 	}
 	worker := NewSeedingWorker(rt.store, "").WithFinalizeHook(func(tournamentID string, roundNumber int) {
@@ -944,26 +962,27 @@ func runSeedingWorker(rt tournamentRuntime) {
 			rt.pool.Close()
 		}
 	}()
-	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"seeding_worker_startup","mode":%q}`, rt.mode)
+	slog.Info("seeding worker started", "event", "seeding_worker_startup", "mode", rt.mode)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"seeding_worker_shutdown"}`)
+	slog.Info("seeding worker stopped", "event", "seeding_worker_shutdown")
+	return nil
 }
 
 // runCompletionWorker runs WORKER_ROLE=tournament-round-completion without the API HTTP server.
 // Only DATABASE_URL is required (same DB/credential boundaries as seeding; no Room/cursor).
-func runCompletionWorker(rt tournamentRuntime) {
+func runCompletionWorker(rt tournamentRuntime) error {
 	if rt.store == nil || rt.svc == nil {
-		log.Fatal("completion worker requires durable store and service")
+		return errors.New("completion worker requires durable store and service")
 	}
 	if rt.durableReady != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := rt.durableReady(ctx)
 		cancel()
 		if err != nil {
-			log.Fatalf("completion worker schema readiness: %v", err)
+			return fmt.Errorf("completion worker schema readiness: %w", err)
 		}
 	}
 	worker := NewCompletionWorker(rt.store, rt.svc)
@@ -977,10 +996,11 @@ func runCompletionWorker(rt tournamentRuntime) {
 			rt.pool.Close()
 		}
 	}()
-	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"completion_worker_startup","mode":%q}`, rt.mode)
+	slog.Info("completion worker started", "event", "completion_worker_startup", "mode", rt.mode)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Printf(`{"level":"info","service":"tournament-orchestration","event":"completion_worker_shutdown"}`)
+	slog.Info("completion worker stopped", "event", "completion_worker_shutdown")
+	return nil
 }

@@ -1,6 +1,7 @@
 replicaCount: 1
 
 env:
+  DEPLOYMENT_ENV: staging
   IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
   ROOM_GAMEPLAY_URL: http://room-gameplay.uno-arena.svc.cluster.local:8080
   TOURNAMENT_URL: http://tournament-orchestration.uno-arena.svc.cluster.local:8080

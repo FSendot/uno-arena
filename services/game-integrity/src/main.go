@@ -5,7 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -529,8 +530,8 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 }
 
 func logRequest(r *http.Request, path string) {
-	log.Printf(`{"level":"info","service":"game-integrity","event":"request","path":%q,"correlationId":%q}`,
-		path, r.Header.Get("X-Correlation-Id"))
+	slog.InfoContext(r.Context(), "HTTP request completed", "event", "request_completed",
+		"path", path, "correlationId", r.Header.Get("X-Correlation-Id"))
 }
 
 // resolveRuntime selects durable KurrentDB or offline memory, fail-closed on bad config.
@@ -603,23 +604,44 @@ func openKurrentClient(rawURL string) (*kurrentdb.Client, error) {
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatal(err)
+		slog.ErrorContext(context.Background(), "game integrity stopped", "event", "service_exit_failure", "error", err)
+		os.Exit(1)
 	}
 }
 
 func run() error {
+	rootCtx := context.Background()
+	telemetryRuntime, err := startGameIntegrityTelemetry(rootCtx)
+	if err != nil {
+		return fmt.Errorf("start telemetry: %w", err)
+	}
+	slog.SetDefault(telemetryRuntime.Logger)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetryRuntime.Shutdown(shutdownCtx); err != nil {
+			telemetryRuntime.Logger.ErrorContext(shutdownCtx, "telemetry shutdown failed", "event", "telemetry_shutdown_failure", "error", err)
+		}
+	}()
+
 	roomCred := os.Getenv("GAME_INTEGRITY_INTERNAL_CREDENTIAL")
 	auditCred := os.Getenv("GAME_INTEGRITY_AUDIT_CREDENTIAL")
 	repo, audit, mode, reason := resolveRuntime()
+	if durable, ok := repo.(*KurrentStreamRepository); ok {
+		durable.WithTracer(gameIntegrityTracer(telemetryRuntime))
+	}
+	if durableAudit, ok := audit.(*KurrentAuditRecorder); ok {
+		durableAudit.tracer = gameIntegrityTracer(telemetryRuntime)
+	}
 	if closer, ok := repo.(interface{ Close() error }); ok {
 		defer func() { _ = closer.Close() }()
 	}
 	srv := NewServerWithAudit(repo, audit, roomCred, auditCred, mode, reason)
 
-	httpSrv := &http.Server{Addr: ":8080", Handler: srv.routes()}
+	httpSrv := &http.Server{Addr: ":8080", Handler: gameIntegrityHTTPHandler(telemetryRuntime, srv.routes())}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf(`{"level":"info","service":"game-integrity","event":"startup","mode":%q,"readyReason":%q}`, mode, reason)
+		telemetryRuntime.Logger.InfoContext(rootCtx, "game integrity started", "event", "service_started", "mode", mode, "readyReason", reason)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

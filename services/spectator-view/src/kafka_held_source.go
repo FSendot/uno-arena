@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/plugin/kotel"
 
 	"unoarena/services/spectator-view/domain"
 )
@@ -113,6 +114,10 @@ func (s *franzHeldScanner) Close() error {
 
 func defaultHeldScanner(brokers []string, topic, group string) (heldKafkaScanner, error) {
 	cl, err := kgo.NewClient(
+		kgo.WithHooks(kotel.NewKotel(kotel.WithTracer(kotel.NewTracer(
+			kotel.TracerProvider(processTracerProvider()),
+			kotel.TracerPropagator(processPropagator()),
+		))).Hooks()...),
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),

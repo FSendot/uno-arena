@@ -89,6 +89,16 @@ flowchart TB
         Kafka["Kafka"]
     end
 
+    subgraph Observability["Private Observability Plane"]
+        AlloyLogs["Alloy Logs"]
+        AlloyOTLP["Alloy OTLP Gateway"]
+        Prometheus["Prometheus"]
+        Loki["Loki TSDB"]
+        Tempo["Tempo"]
+        Grafana["Grafana"]
+        ObjectStore["S3-compatible Object Storage (MinIO in kind)"]
+    end
+
     Client --> BFF
     BFF --> IdentitySvc
     BFF --> RoomSvc
@@ -126,9 +136,27 @@ flowchart TB
     BootstrapJobs --> TourneyDB
     BootstrapJobs --> RankDB
     AnalyticsBootstrap --> ClickHouse
+    BFF -. "JSON stdout" .-> AlloyLogs
+    RoomSvc -. "JSON stdout" .-> AlloyLogs
+    BFF -. "OTLP traces" .-> AlloyOTLP
+    RoomSvc -. "OTLP traces" .-> AlloyOTLP
+    Prometheus -. "private :9090 scrape" .-> BFF
+    Prometheus -. "private :9090 scrape" .-> RoomSvc
+    AlloyLogs --> Loki
+    AlloyOTLP --> Tempo
+    Loki --> ObjectStore
+    Tempo --> ObjectStore
+    Grafana --> Prometheus
+    Grafana --> Loki
+    Grafana --> Tempo
 ```
 
 ## Container Notes
+
+- `Private Observability Plane`
+  - the diagram shows representative application links; every API and worker follows the same JSON-stdout, OTLP, and private metrics contracts
+  - Alloy log and OTLP roles are separate identities; Prometheus alone may scrape application `9090`, and Grafana is reached locally through loopback port-forwarding
+  - Loki and Tempo use S3-compatible object storage: disposable MinIO in kind and an external S3 bucket in production
 
 - `Context Postgres Bootstrap Jobs`
   - one context-owned Kubernetes Job per Postgres database, completed before the corresponding service and CDC connector become ready
@@ -148,7 +176,7 @@ flowchart TB
 
 - `Game Integrity / KurrentDB and Redis initialization`
   - Game Integrity validates KurrentDB policy, expected-revision support, credentials, and envelope-key access; streams are created lazily on first append
-  - local ARM64 uses the pinned official-publisher 26.0.3 experimental ARM build and must pass real persistence/restart tests; failure never falls back to memory
+  - local deployment selects the reviewed KurrentDB 26.0.3 AMD64 or ARM64 digest from the node architecture; the ARM build is experimental, both paths must pass real persistence/restart tests, and failure never falls back to memory
   - Redis-owning services validate a versioned context key prefix and required capabilities, then safely load Lua scripts on every target node
   - neither store is forced through a relational schema bootstrap Job
 
@@ -203,10 +231,17 @@ flowchart TB
 - `Analytics / Public Read Models Service`
   - consumes sanitized/public events into ClickHouse and other derived read models
 
+- `Observability Platform`
+  - runs in a dedicated `observability` namespace, separate from application workloads and credentials
+  - joins the Istio Ambient data plane so Prometheus and telemetry traffic use authenticated east-west mTLS; L4 authorization permits the Prometheus workload identity to scrape application metrics
+  - the Alloy DaemonSet collects Kubernetes logs into Loki/MinIO, while an Alloy gateway receives application OTLP traces and forwards them to Tempo/MinIO
+  - Prometheus scrapes service and cluster metrics; Grafana provides the private logs, metrics, and traces operator view
+  - each component has a distinct least-privilege service account; storage and visualization components receive no Kubernetes API credentials
+
 ## Local and Test Topology
 
 - Local development can run the BFF plus a reduced set of services and backing stores.
-- Production application, worker, CDC, and datastore namespaces are enrolled in Istio Ambient with strict L4 mTLS and service-account workload identities. The `kind` integration topology verifies the same security path without claiming target-scale capacity.
+- Production application, worker, CDC, datastore, and observability namespaces are enrolled in Istio Ambient with strict L4 mTLS and service-account workload identities. The `kind` integration topology enrolls both `uno-arena` and `observability` and verifies the same security path without claiming target-scale capacity.
 - The repo-owned simple CLI under `client-checkpoint/` is the sole client and automated test driver for this implementation; a graphical UI is deferred and must still use only the BFF REST/SSE boundary.
 - Integration tests should cover command validation and rejection audit records, SSE fan-out including `409 snapshot_required`, spectator admission/denial and terminal stream close, advisory Uno countdown correction, replay, and cross-context event consumption.
 - **Offline capability adapters vs durable adapters:** capability mode uses real service HTTP paths (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `ANALYTICS_CAPABILITY_MODE`) with bounded in-memory edge/principal limiters and a memory session repository where Postgres is absent, plus explicit Game Integrity memory. Isolated-test fakes remain behind `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` only. Room Gameplay HTTP bridges carry the same event *names* and canonical domain fields as AsyncAPI, but each sink receives a destination-specific HTTP body (documented transform — not identical to the Kafka envelope). Identity/Room/Ranking/Tournament Postgres, GI KurrentDB, Analytics ClickHouse HTTP, Spectator/Ranking/Tournament Redis projections, Room Redis timers, Gateway Redis rate-limit + direct LiveFeed SSE, and declared franz-go consumers are implemented when configured. A clean ARM64 kind deployment proved the foundation, all eight services, Connect/Server CDC, and both recovery workers. Capability/fakes retain the in-process Hub; configured Gateway `/ready` pings every configured Redis client. Migrations under `services/*/migrations/` document the durable schemas.

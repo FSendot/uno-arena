@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -99,7 +99,7 @@ func (w *ProvisioningWorker) tick() {
 	}
 	now := w.clock()
 	if _, err := w.claims.ReapExpiredProvisioningLeases(context.Background(), now); err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"provisioning_reap_failed","err":%q}`, err.Error())
+		slog.Warn("provisioning lease reap failed", "event", "provisioning_reap_failed", "error", err.Error())
 	}
 	if w.stopped.Load() {
 		return
@@ -107,10 +107,10 @@ func (w *ProvisioningWorker) tick() {
 	claimed, err := w.claims.ClaimNextProvisioningBatch(context.Background(), w.owner, now, w.leaseTTL)
 	if err != nil {
 		if errors.Is(err, store.ErrProvisioningBatchTooLarge) {
-			log.Printf(`{"level":"error","service":"tournament-orchestration","event":"provisioning_batch_too_large","err":%q}`, err.Error())
+			slog.Error("provisioning batch too large", "event", "provisioning_batch_too_large", "error", err.Error())
 			return
 		}
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"provisioning_claim_failed","err":%q}`, err.Error())
+		slog.Warn("provisioning claim failed", "event", "provisioning_claim_failed", "error", err.Error())
 		return
 	}
 	if claimed == nil {
@@ -135,7 +135,7 @@ func (w *ProvisioningWorker) tick() {
 	w.inflight.Add(1)
 	defer w.inflight.Done()
 	if err := w.process(context.Background(), work); err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"provisioning_process_failed","tournamentId":%q,"batchId":%q,"err":%q}`,
-			work.TournamentID, work.BatchID, err.Error())
+		slog.Warn("provisioning process failed", "event", "provisioning_process_failed",
+			"tournamentId", work.TournamentID, "batchId", work.BatchID, "error", err.Error())
 	}
 }

@@ -48,9 +48,9 @@ func TestValidateIDTokenRS256HappyPath(t *testing.T) {
 	issuer = srv.URL + "/realms/unoarena"
 
 	v, err := oidc.NewValidator(oidc.Config{
-		IssuerURL: issuer,
-		Audiences: []string{aud},
-		AllowHTTP: true,
+		IssuerURL:  issuer,
+		Audiences:  []string{aud},
+		AllowHTTP:  true,
 		HTTPClient: srv.Client(),
 	})
 	if err != nil {

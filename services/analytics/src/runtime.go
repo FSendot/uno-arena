@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"unoarena/services/analytics/store"
 )
@@ -47,12 +47,12 @@ func (l *analyticsKafkaLifecycle) start(parent context.Context) {
 		if err != nil {
 			l.healthy.Store(false)
 			l.stoppedErr.Store(err)
-			log.Printf(`{"level":"error","service":"analytics","event":"kafka_consumer_stopped","err":%q}`, sanitizeLogErr(err))
+			processLogger().ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", sanitizeLogErr(err))
 			return
 		}
 		l.healthy.Store(false)
 		l.stoppedErr.Store(fmt.Errorf("kafka consumer exited unexpectedly"))
-		log.Printf(`{"level":"error","service":"analytics","event":"kafka_consumer_stopped","err":"exited unexpectedly"}`)
+		processLogger().ErrorContext(ctx, "Kafka consumer stopped", "event", "kafka_consumer_stopped", "error", "exited unexpectedly")
 	}()
 }
 
@@ -174,6 +174,7 @@ func wireAnalyticsRuntime() (analyticsRuntime, error) {
 		}
 		client, err := store.NewClient(store.Config{
 			URL: chURL, User: chUser, Password: chPass, Database: chDB,
+			HTTPClient: tracedHTTPClient(30 * time.Second),
 		})
 		if err != nil {
 			return analyticsRuntime{}, fmt.Errorf("clickhouse client: %w", err)

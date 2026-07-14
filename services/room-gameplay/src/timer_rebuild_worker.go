@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 )
 
 type timerRebuildLease interface {
-	ClaimTimerIndexRebuild(context.Context, string, time.Time, time.Duration) (bool, error)
-	TimerIndexRebuildCompletedSince(context.Context, time.Time) (bool, error)
+	TimerIndexRebuildGeneration(context.Context) (int64, error)
+	ClaimTimerIndexRebuild(context.Context, string, int64, time.Duration) (bool, error)
+	TimerIndexRebuildCompletedAfter(context.Context, int64) (bool, error)
 	RenewTimerIndexRebuild(context.Context, string, time.Duration) (bool, error)
 	CompleteTimerIndexRebuild(context.Context, string) error
 }
@@ -17,14 +18,15 @@ type timerRebuildLease interface {
 // TimerIndexRebuildWorker retries until one timer replica completes the
 // context-wide Postgres-to-Redis rebuild for this process rollout.
 type TimerIndexRebuildWorker struct {
-	leases   timerRebuildLease
-	rebuild  func(context.Context) error
-	owner    string
-	started  time.Time
-	leaseTTL time.Duration
-	interval time.Duration
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	leases        timerRebuildLease
+	rebuild       func(context.Context) error
+	owner         string
+	generation    int64
+	generationSet bool
+	leaseTTL      time.Duration
+	interval      time.Duration
+	stopCh        chan struct{}
+	doneCh        chan struct{}
 }
 
 func NewTimerIndexRebuildWorker(leases timerRebuildLease, owner string, rebuild func(context.Context) error) *TimerIndexRebuildWorker {
@@ -33,7 +35,7 @@ func NewTimerIndexRebuildWorker(leases timerRebuildLease, owner string, rebuild 
 	}
 	return &TimerIndexRebuildWorker{
 		leases: leases, rebuild: rebuild, owner: strings.TrimSpace(owner),
-		started: time.Now().UTC(), leaseTTL: time.Minute, interval: time.Second,
+		leaseTTL: time.Minute, interval: time.Second,
 		stopCh: make(chan struct{}), doneCh: make(chan struct{}),
 	}
 }
@@ -68,28 +70,37 @@ func (w *TimerIndexRebuildWorker) loop() {
 }
 
 func (w *TimerIndexRebuildWorker) tick(ctx context.Context) bool {
-	claimed, err := w.leases.ClaimTimerIndexRebuild(ctx, w.owner, w.started, w.leaseTTL)
+	if !w.generationSet {
+		generation, err := w.leases.TimerIndexRebuildGeneration(ctx)
+		if err != nil {
+			slog.WarnContext(ctx, "timer index rebuild generation read failed", "event", "timer_index_rebuild_generation_failed", "error", err.Error())
+			return false
+		}
+		w.generation = generation
+		w.generationSet = true
+	}
+	claimed, err := w.leases.ClaimTimerIndexRebuild(ctx, w.owner, w.generation, w.leaseTTL)
 	if err != nil {
-		log.Printf(`{"level":"warn","event":"timer_index_rebuild_claim_failed","error":%q}`, err.Error())
+		slog.WarnContext(ctx, "timer index rebuild claim failed", "event", "timer_index_rebuild_claim_failed", "error", err.Error())
 		return false
 	}
 	if !claimed {
-		completed, err := w.leases.TimerIndexRebuildCompletedSince(ctx, w.started)
+		completed, err := w.leases.TimerIndexRebuildCompletedAfter(ctx, w.generation)
 		if err != nil {
-			log.Printf(`{"level":"warn","event":"timer_index_rebuild_completion_check_failed","error":%q}`, err.Error())
+			slog.WarnContext(ctx, "timer index rebuild completion check failed", "event", "timer_index_rebuild_completion_check_failed", "error", err.Error())
 			return false
 		}
 		return completed
 	}
 	if err := w.rebuildWithHeartbeat(ctx); err != nil {
-		log.Printf(`{"level":"warn","event":"timer_index_rebuild_failed","error":%q}`, err.Error())
+		slog.WarnContext(ctx, "timer index rebuild failed", "event", "timer_index_rebuild_failed", "error", err.Error())
 		return false
 	}
 	if err := w.leases.CompleteTimerIndexRebuild(ctx, w.owner); err != nil {
-		log.Printf(`{"level":"warn","event":"timer_index_rebuild_complete_failed","error":%q}`, err.Error())
+		slog.WarnContext(ctx, "timer index rebuild completion failed", "event", "timer_index_rebuild_complete_failed", "error", err.Error())
 		return false
 	}
-	log.Printf(`{"level":"info","event":"timer_index_rebuild_completed"}`)
+	slog.InfoContext(ctx, "timer index rebuild completed", "event", "timer_index_rebuild_completed")
 	return true
 }
 

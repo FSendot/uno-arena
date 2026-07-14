@@ -1,0 +1,7 @@
+profile: ambient
+image: docker.io/istio/pilot@sha256:d158739d5286f7899bc039589d248720c2a9b6622d54eeb7a3fdfbb65200c22c
+global:
+  imagePullPolicy: IfNotPresent
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: 500m, memory: 1Gi}

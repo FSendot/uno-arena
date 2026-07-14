@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -23,6 +24,61 @@ type JSONLAuditSink struct {
 	Writer io.Writer
 	closer io.Closer
 	seen   map[string]string // commandId -> canonical JSON identity
+}
+
+// SlogAuditSink sends context-owned rejection audits through the process
+// telemetry handler. Handler errors propagate so command rejection remains
+// fail closed when stdout encoding or writing fails.
+type SlogAuditSink struct {
+	mu      sync.Mutex
+	handler slog.Handler
+	seen    map[string]string
+}
+
+func NewSlogAuditSink(handler slog.Handler) *SlogAuditSink {
+	return &SlogAuditSink{handler: handler, seen: make(map[string]string)}
+}
+
+func (a *SlogAuditSink) Record(ctx context.Context, rec audit.RejectionRecord) error {
+	if err := rec.Validate(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	canon, skip, err := checkAuditIdempotency(a.seen, rec)
+	if err != nil || skip {
+		return err
+	}
+	if a.handler == nil {
+		return fmt.Errorf("audit telemetry handler not configured")
+	}
+	record := slog.NewRecord(rec.Timestamp.UTC(), slog.LevelWarn, "command rejected", 0)
+	record.AddAttrs(
+		slog.String("event", "command_rejected"),
+		slog.String("commandId", rec.CommandID),
+		slog.String("correlationId", rec.CorrelationID),
+		slog.String("reason", rec.Reason),
+	)
+	if rec.SessionID != "" {
+		record.AddAttrs(slog.String("sessionId", rec.SessionID))
+	}
+	if rec.PlayerID != "" {
+		record.AddAttrs(slog.String("playerId", rec.PlayerID))
+	}
+	if rec.RoomID != "" {
+		record.AddAttrs(slog.String("roomId", rec.RoomID))
+	}
+	if rec.SubmittedSequence != nil {
+		record.AddAttrs(slog.Int64("submittedSequenceNumber", *rec.SubmittedSequence))
+	}
+	if rec.CurrentSequence != nil {
+		record.AddAttrs(slog.Int64("currentSequenceNumber", *rec.CurrentSequence))
+	}
+	if err := a.handler.Handle(ctx, record); err != nil {
+		return fmt.Errorf("audit telemetry write failed: %w", err)
+	}
+	a.seen[rec.CommandID] = canon
+	return nil
 }
 
 // NewJSONLAuditSink wraps an io.Writer as a fail-closed JSONL audit sink.

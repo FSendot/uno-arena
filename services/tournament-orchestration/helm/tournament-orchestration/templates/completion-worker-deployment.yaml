@@ -23,13 +23,23 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-completion-worker
+        app.kubernetes.io/name: tournament-orchestration
         app.kubernetes.io/part-of: {{ .Release.Name }}
+        unoarena.io/component: completion-worker
+        unoarena.io/metrics-scrape: pod
+        unoarena.io/metrics-exposed: "true"
     spec:
+      serviceAccountName: {{ .Release.Name }}-completion-worker
+      automountServiceAccountToken: false
       containers:
         - name: completion-worker
           image: {{ include "tournament-orchestration.image" . | quote }}
           imagePullPolicy: {{ include "tournament-orchestration.imagePullPolicy" . }}
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            {{- include "tournament-orchestration.telemetryEnv" (dict "root" . "component" "completion-worker") | nindent 12 }}
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
             - name: DEPLOYMENT_ENV

@@ -307,5 +307,10 @@ func NewRedisFromURL(url string) (*redis.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return redis.NewClient(opt), nil
+	client := redis.NewClient(opt)
+	if err := instrumentRedis(client); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	return client, nil
 }

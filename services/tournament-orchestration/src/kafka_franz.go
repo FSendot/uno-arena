@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/plugin/kotel"
 )
 
 const (
@@ -37,7 +38,7 @@ func newFranzMatchCompletedClient(cfg MatchCompletedKafkaConfig) (*franzMatchCom
 	if cfg.Group == "" || cfg.Topic == "" || cfg.RuntimeReadyTopic == "" || cfg.DLQTopic == "" || cfg.RuntimeReadyDLQTopic == "" {
 		return nil, fmt.Errorf("kafka group/topic/dlq required")
 	}
-	cl, err := kgo.NewClient(
+	options := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(cfg.Topic, cfg.RuntimeReadyTopic),
@@ -45,7 +46,16 @@ func newFranzMatchCompletedClient(cfg MatchCompletedKafkaConfig) (*franzMatchCom
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordPartitioner(kgo.StickyKeyPartitioner(nil)),
-	)
+	}
+	if tournamentProcessTelemetry != nil {
+		tracer := kotel.NewTracer(
+			kotel.TracerProvider(tournamentProcessTelemetry.TracerProvider),
+			kotel.TracerPropagator(tournamentProcessTelemetry.Propagator),
+			kotel.ConsumerGroup(cfg.Group),
+		)
+		options = append(options, kgo.WithHooks(kotel.NewKotel(kotel.WithTracer(tracer)).Hooks()...))
+	}
+	cl, err := kgo.NewClient(options...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
@@ -77,6 +87,7 @@ func (c *franzMatchCompletedClient) Poll(ctx context.Context) ([]ConsumerRecord,
 
 func (c *franzMatchCompletedClient) Commit(ctx context.Context, rec ConsumerRecord) error {
 	kr := &kgo.Record{
+		Context:   ctx,
 		Topic:     rec.Topic,
 		Partition: rec.Partition,
 		Offset:    rec.Offset,
@@ -92,6 +103,7 @@ func (c *franzMatchCompletedClient) Commit(ctx context.Context, rec ConsumerReco
 func (c *franzMatchCompletedClient) PublishDLQ(ctx context.Context, original ConsumerRecord, meta DLQFailureMeta) error {
 	dlqTopic := dlqTopicForSource(meta.SourceTopic, c.readyTopic, c.matchDLQTopic, c.readinessDLQTopic)
 	rec := &kgo.Record{
+		Context: ctx,
 		Topic:   dlqTopic,
 		Key:     append([]byte(nil), original.Key...),
 		Value:   append([]byte(nil), original.Value...),
@@ -118,6 +130,7 @@ func (c *franzMatchCompletedClient) Close() error {
 
 func consumerRecordFromKgo(r *kgo.Record) ConsumerRecord {
 	return ConsumerRecord{
+		Context:   r.Context,
 		Topic:     r.Topic,
 		Partition: r.Partition,
 		Offset:    r.Offset,

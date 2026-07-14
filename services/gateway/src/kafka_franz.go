@@ -28,14 +28,14 @@ type franzSessionInvalidatedClient struct {
 	dlqTopic string
 }
 
-func newFranzSessionInvalidatedClient(cfg SessionInvalidatedKafkaConfig) (*franzSessionInvalidatedClient, error) {
+func newFranzSessionInvalidatedClient(cfg SessionInvalidatedKafkaConfig, hooks ...kgo.Hook) (*franzSessionInvalidatedClient, error) {
 	if len(cfg.Brokers) == 0 {
 		return nil, fmt.Errorf("kafka brokers required")
 	}
 	if cfg.Group == "" || cfg.Topic == "" || cfg.DLQTopic == "" {
 		return nil, fmt.Errorf("kafka group/topic/dlq required")
 	}
-	cl, err := kgo.NewClient(
+	options := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(cfg.Topic),
@@ -43,7 +43,11 @@ func newFranzSessionInvalidatedClient(cfg SessionInvalidatedKafkaConfig) (*franz
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordPartitioner(kgo.StickyKeyPartitioner(nil)),
-	)
+	}
+	if len(hooks) > 0 {
+		options = append(options, kgo.WithHooks(hooks...))
+	}
+	cl, err := kgo.NewClient(options...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
@@ -71,6 +75,7 @@ func (c *franzSessionInvalidatedClient) Poll(ctx context.Context) ([]ConsumerRec
 
 func (c *franzSessionInvalidatedClient) Commit(ctx context.Context, rec ConsumerRecord) error {
 	kr := &kgo.Record{
+		Context:   ctx,
 		Topic:     rec.Topic,
 		Partition: rec.Partition,
 		Offset:    rec.Offset,
@@ -85,6 +90,7 @@ func (c *franzSessionInvalidatedClient) Commit(ctx context.Context, rec Consumer
 
 func (c *franzSessionInvalidatedClient) PublishDLQ(ctx context.Context, original ConsumerRecord, meta DLQFailureMeta) error {
 	rec := &kgo.Record{
+		Context: ctx,
 		Topic:   c.dlqTopic,
 		Key:     append([]byte(nil), original.Key...),
 		Value:   append([]byte(nil), original.Value...),
@@ -109,6 +115,7 @@ func consumerRecordFromKgo(r *kgo.Record) ConsumerRecord {
 		Offset:    r.Offset,
 		Key:       append([]byte(nil), r.Key...),
 		Value:     append([]byte(nil), r.Value...),
+		Context:   r.Context,
 	}
 }
 

@@ -187,36 +187,47 @@ func TestIntegration_ReconciliationClaimsAreBoundedSkipLockedAndRecoverAfterLeas
 func TestIntegration_TimerIndexRebuildUsesContextLeaseAndCompletionFence(t *testing.T) {
 	pool := openPool(t)
 	ctx := context.Background()
-	workerStarted := time.Now().UTC()
-	claimed, err := store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-a", workerStarted, time.Minute)
+	sessions := store.NewSessionStore(pool)
+	generation, err := sessions.TimerIndexRebuildGeneration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := sessions.ClaimTimerIndexRebuild(ctx, "timer-a", generation, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("first claim=%v err=%v", claimed, err)
 	}
-	claimed, err = store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-b", workerStarted, time.Minute)
+	claimed, err = sessions.ClaimTimerIndexRebuild(ctx, "timer-b", generation, time.Minute)
 	if err != nil || claimed {
 		t.Fatalf("concurrent claim=%v err=%v", claimed, err)
 	}
-	if renewed, err := store.NewSessionStore(pool).RenewTimerIndexRebuild(ctx, "timer-b", time.Minute); err != nil || renewed {
+	if renewed, err := sessions.RenewTimerIndexRebuild(ctx, "timer-b", time.Minute); err != nil || renewed {
 		t.Fatalf("non-owner renewal=%v err=%v", renewed, err)
 	}
-	if renewed, err := store.NewSessionStore(pool).RenewTimerIndexRebuild(ctx, "timer-a", time.Minute); err != nil || !renewed {
+	if renewed, err := sessions.RenewTimerIndexRebuild(ctx, "timer-a", time.Minute); err != nil || !renewed {
 		t.Fatalf("owner renewal=%v err=%v", renewed, err)
 	}
-	if err := store.NewSessionStore(pool).CompleteTimerIndexRebuild(ctx, "timer-a"); err != nil {
+	if err := sessions.CompleteTimerIndexRebuild(ctx, "timer-a"); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-b", workerStarted, time.Minute)
+	claimed, err = sessions.ClaimTimerIndexRebuild(ctx, "timer-b", generation, time.Minute)
 	if err != nil || claimed {
 		t.Fatalf("same rollout must observe completion: claim=%v err=%v", claimed, err)
 	}
-	claimed, err = store.NewSessionStore(pool).ClaimTimerIndexRebuild(ctx, "timer-c", time.Now().UTC().Add(time.Second), time.Minute)
+	if completed, err := sessions.TimerIndexRebuildCompletedAfter(ctx, generation); err != nil || !completed {
+		t.Fatalf("same rollout completion=%v err=%v", completed, err)
+	}
+	laterGeneration, err := sessions.TimerIndexRebuildGeneration(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = sessions.ClaimTimerIndexRebuild(ctx, "timer-c", laterGeneration, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("later worker may initiate a fresh guarded rebuild: claim=%v err=%v", claimed, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE room_maintenance_leases SET lease_until = now() - interval '1 second' WHERE lease_name = 'timer-index-rebuild'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.NewSessionStore(pool).CompleteTimerIndexRebuild(ctx, "timer-c"); err == nil {
+	if err := sessions.CompleteTimerIndexRebuild(ctx, "timer-c"); err == nil {
 		t.Fatal("expired owner must not record rebuild completion")
 	}
 }

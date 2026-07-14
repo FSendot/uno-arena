@@ -6,7 +6,19 @@ metadata:
   name: uno-arena
   labels:
     app.kubernetes.io/part-of: uno-arena
+    istio.io/dataplane-mode: ambient
     uno-arena.local/foundation: "true"
+    uno-arena.local/non-production: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: uno-arena
+    kubernetes.io/metadata.name: observability
+    istio.io/dataplane-mode: ambient
+    uno-arena.local/foundation: "observability"
     uno-arena.local/non-production: "true"
 ---
 # Optional scratch namespace for ad-hoc operator experiments. Services and

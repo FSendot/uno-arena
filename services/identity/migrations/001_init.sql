@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
     player_id TEXT,
     payload JSONB NOT NULL,
+    traceparent TEXT,
+    tracestate TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

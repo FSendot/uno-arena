@@ -16,7 +16,7 @@ const (
 	ExpectedMigrationVersion = "001_init"
 	ExpectedBootstrapVersion = "001_init"
 	// ExpectedSchemaChecksum is SHA-256 of services/tournament-orchestration/migrations/001_init.sql.
-	ExpectedSchemaChecksum = "cfeb3869c3a4bde6f905e86471a70bff901d5b8dfbc3adbb9c657950df3baa1d"
+	ExpectedSchemaChecksum = "041a949b63103aa52a333ee8c3406d4f348b112241cd3a8a778c436bf5db8600"
 )
 
 // SchemaExpectation holds the exact version/checksum VerifySchema requires.

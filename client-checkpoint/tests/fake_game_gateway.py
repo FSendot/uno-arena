@@ -51,6 +51,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"token": f"tok-{user}", "playerId": f"player-{user}", "sessionId": f"sess-{user}"})
             return
         if parsed.path == "/v1/commands":
+            if (data.get("type") == "RegisterPlayer"
+                    and player(self.headers) == "player-tourney-unknown"):
+                self.send_json(502, {"code": "upstream_error", "message": "result unknown"})
+                return
             self.send_json(200, {"status": "accepted", "sequenceNumber": STATE["sequence"],
                                  "payload": {"roomId": data.get("payload", {}).get("roomId", "room-game")}})
             return

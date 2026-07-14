@@ -6,6 +6,7 @@ image:
 
 env:
   SERVICE_NAME: ranking
+  DEPLOYMENT_ENV: staging
   REDIS_URL: redis://redis:6379/4
   KAFKA_BROKERS: kafka:9092
   KAFKA_CONSUMER_GROUP: ranking
@@ -45,3 +46,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

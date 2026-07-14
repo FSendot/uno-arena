@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -107,14 +107,14 @@ func (w *SeedingWorker) tick() {
 	}
 	now := w.clock()
 	if _, err := w.claims.ReapExpiredSeedingLeases(context.Background(), now); err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"seeding_reap_failed","err":%q}`, err.Error())
+		slog.Warn("seeding lease reap failed", "event", "seeding_reap_failed", "error", err.Error())
 	}
 	if w.stopped.Load() {
 		return
 	}
 	claimed, err := w.claims.ClaimNextSeedingJob(context.Background(), w.owner, now, w.leaseTTL)
 	if err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"seeding_claim_failed","err":%q}`, err.Error())
+		slog.Warn("seeding claim failed", "event", "seeding_claim_failed", "error", err.Error())
 		return
 	}
 	if claimed == nil {
@@ -128,8 +128,7 @@ func (w *SeedingWorker) tick() {
 	// Exactly one claimed chunk per tick — never reclaim (avoids stranded leases on other tournaments).
 	completed, err := w.claims.ProcessSeedingChunk(context.Background(), *claimed, w.owner, w.clock())
 	if err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"seeding_chunk_failed","tournamentId":%q,"err":%q}`,
-			claimed.TournamentID, err.Error())
+		slog.Warn("seeding chunk failed", "event", "seeding_chunk_failed", "tournamentId", claimed.TournamentID, "error", err.Error())
 		return
 	}
 	if completed && w.onFinalize != nil {

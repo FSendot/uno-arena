@@ -10,6 +10,17 @@ command -v "${HELM}" >/dev/null 2>&1 || { echo "helm required" >&2; exit 1; }
 "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" >/dev/null
 
 kind_out="$("${HELM}" template spectator-view-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
+echo "${kind_out}" | grep -q 'cpu: 500m'
+echo "${kind_out}" | grep -q 'timeoutSeconds: 3'
+echo "${kind_out}" | grep -q 'failureThreshold: 6'
+echo "${kind_out}" | grep -q 'serviceAccountName: spectator-view'
+echo "${kind_out}" | grep -q 'serviceAccountName: spectator-view-projection-rebuilder'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-scrape: service'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-scrape: pod'
+echo "${kind_out}" | grep -q 'unoarena.io/metrics-exposed: "true"'
+echo "${kind_out}" | grep -q 'containerPort: 9090'
+test "$(echo "${kind_out}" | grep -c 'name: TELEMETRY_MODE')" -eq 2
+test "$(echo "${kind_out}" | grep -c 'name: POD_UID')" -eq 2
 echo "${kind_out}" | grep -q 'image: "uno-arena/spectator-view:local"'
 echo "${kind_out}" | grep -q 'imagePullPolicy: IfNotPresent'
 ! echo "${kind_out}" | grep -q 'image: "uno-arena/spectator-view@"'
@@ -39,8 +50,9 @@ echo "${reb_out}" | grep -q 'ROOM_SPECTATOR_RECOVERY_SERVICE_CREDENTIAL'
 echo "${reb_out}" | grep -q 'KAFKA_PROJECTION_REBUILD_TOPIC'
 echo "${reb_out}" | grep -q 'spectator.projection.rebuild_requested'
 test "$(echo "${reb_out}" | grep -c 'name: WORKER_ROLE')" -eq 1
-rebuilder_doc="$(echo "${reb_out}" | awk '/name: .*projection-rebuilder$/{flag=1} flag; /^---$/{if(flag){exit}}')"
-! echo "${rebuilder_doc}" | grep -q 'containerPort' || { echo "rebuilder must not expose ports" >&2; exit 1; }
+rebuilder_doc="$(echo "${reb_out}" | awk '/^# Source: spectator-view\/templates\/projection-rebuilder-deployment.yaml$/{flag=1} flag')"
+echo "${rebuilder_doc}" | grep -q 'containerPort: 9090' || { echo "rebuilder must expose only metrics" >&2; exit 1; }
+! echo "${rebuilder_doc}" | grep -q 'containerPort: 8080' || { echo "rebuilder must not expose HTTP" >&2; exit 1; }
 ! echo "${rebuilder_doc}" | grep -q 'readinessProbe' || { echo "rebuilder must not use HTTP probes" >&2; exit 1; }
 ! echo "${rebuilder_doc}" | grep -q 'SPECTATOR_VIEW_INTERNAL_CREDENTIAL' || { echo "rebuilder must not get API credential" >&2; exit 1; }
 

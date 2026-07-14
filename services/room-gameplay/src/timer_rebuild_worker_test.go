@@ -16,11 +16,14 @@ type fakeTimerRebuildLease struct {
 	renewOnce sync.Once
 }
 
-func (f *fakeTimerRebuildLease) ClaimTimerIndexRebuild(context.Context, string, time.Time, time.Duration) (bool, error) {
+func (f *fakeTimerRebuildLease) TimerIndexRebuildGeneration(context.Context) (int64, error) {
+	return 0, nil
+}
+func (f *fakeTimerRebuildLease) ClaimTimerIndexRebuild(context.Context, string, int64, time.Duration) (bool, error) {
 	f.claimCall++
 	return f.claimed, nil
 }
-func (f *fakeTimerRebuildLease) TimerIndexRebuildCompletedSince(context.Context, time.Time) (bool, error) {
+func (f *fakeTimerRebuildLease) TimerIndexRebuildCompletedAfter(context.Context, int64) (bool, error) {
 	return f.completed, nil
 }
 func (f *fakeTimerRebuildLease) RenewTimerIndexRebuild(context.Context, string, time.Duration) (bool, error) {

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"unoarena/platform/telemetry"
 	"unoarena/services/tournament-orchestration/domain"
 	"unoarena/shared/envelope"
 )
@@ -248,6 +249,7 @@ func prepareBulkAssignments(
 	ctx context.Context, tx pgx.Tx, in PrepareProvisioningBatchInput,
 	fromIdx, toIdx, slotSize int, now time.Time,
 ) ([]PreparedSlotWork, int, string, error) {
+	traceparent, tracestate := telemetry.TraceContextHeaders(ctx)
 	rows, err := tx.Query(ctx, `
 		SELECT s.slot_id, s.slot_index, s.status, s.seeded_player_ids,
 		       a.room_id, a.provisioning_batch_id
@@ -404,7 +406,8 @@ func prepareBulkAssignments(
 	// Bulk outbox insert; verify immutable fields on conflict.
 	_, err = tx.Exec(ctx, `
 		INSERT INTO outbox_events (
-			event_id, event_type, tournament_id, topic, partition_key, schema_version, payload, created_at
+			event_id, event_type, tournament_id, topic, partition_key, schema_version, payload,
+			traceparent, tracestate, created_at
 		)
 		SELECT
 			w.event_id,
@@ -426,13 +429,16 @@ func prepareBulkAssignments(
 				'roomId', w.room_id,
 				'batchId', w.batch_id
 			),
+			$8,
+			$9,
 			$4
 		FROM jsonb_to_recordset($1::jsonb) AS w(
 			slot_id text, room_id text, batch_id text, event_id text
 		)
 		ON CONFLICT (event_id) DO NOTHING
 	`, wantJSON, in.TournamentID, in.RoundNumber, now,
-		string(domain.FactTournamentMatchAssigned), in.CorrelationID, in.CommandID)
+		string(domain.FactTournamentMatchAssigned), in.CorrelationID, in.CommandID,
+		nullIfEmpty(traceparent), nullIfEmpty(tracestate))
 	if err != nil {
 		return nil, 0, "", wrapUnavailable(err)
 	}

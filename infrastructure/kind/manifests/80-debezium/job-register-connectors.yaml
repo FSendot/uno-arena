@@ -1,7 +1,7 @@
 # Declarative registration of the four Kafka-bound PostgreSQL Outbox Event Router
 # connectors. Idempotent PUT /connectors/{name}/config; fail-closed on config/status
 # errors. Uses the same exact quay.io Connect digest as the Deployment (curl/bash/python3;
-# sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70;
+# sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455;
 # imagePullPolicy Never — staged by load-debezium-connect.sh node-native crictl pull).
 # Debezium owns unique replication slots; publications come from postgres bootstrap Jobs.
 apiVersion: v1
@@ -184,6 +184,24 @@ data:
             raise SystemExit("event payload field must be payload")
         if cfg.get("transforms.outbox.route.by.field") != "topic":
             raise SystemExit("route.by.field must be topic")
+        placements = {
+            item.strip()
+            for item in str(cfg.get("transforms.outbox.table.fields.additional.placement", "")).split(",")
+            if item.strip()
+        }
+        required_placements = {
+            "event_type:header:type",
+            "traceparent:header:traceparent",
+            "tracestate:header:tracestate",
+        }
+        missing_placements = required_placements - placements
+        if missing_placements:
+            raise SystemExit(
+                "missing required outbox header placements: "
+                + ",".join(sorted(missing_placements))
+            )
+        if any("baggage" in item.lower() for item in placements):
+            raise SystemExit("baggage must not be routed through CDC outboxes")
         if str(cfg.get("value.converter.schemas.enable", "")).lower() != "false":
             raise SystemExit("value.converter.schemas.enable must be false")
         print(json.dumps(cfg, separators=(",", ":")))
@@ -288,7 +306,7 @@ spec:
       containers:
         - name: register
           # Same exact Connect digest as debezium-connect Deployment (Never = no runtime pull).
-          image: quay.io/debezium/connect:3.6.0.Final@sha256:b7ca129320f4260b3c7399704192c31727080705753f96b78424a7d1349bbb70
+          image: quay.io/debezium/connect:3.6.0.Final@sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
           imagePullPolicy: Never
           command: ["/bin/bash", "/scripts/register-connectors.sh"]
           env:

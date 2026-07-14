@@ -13,14 +13,29 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}
+        app.kubernetes.io/name: identity
+        app.kubernetes.io/component: api
+        unoarena.io/metrics-exposed: "true"
+        unoarena.io/component: api
     spec:
+      serviceAccountName: identity
+      automountServiceAccountToken: false
       containers:
         - name: {{ .Release.Name }}
           image: {{ include "identity.image" . | quote }}
           imagePullPolicy: {{ include "identity.imagePullPolicy" . }}
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
           env:
+            - name: SERVICE_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             {{- range $name, $val := .Values.env }}
             - name: {{ $name }}
               value: {{ $val | quote }}
@@ -41,12 +56,16 @@ spec:
               path: /ready
               port: 8080
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: {{ .Values.healthProbes.periodSeconds }}
+            timeoutSeconds: {{ .Values.healthProbes.timeoutSeconds }}
+            failureThreshold: {{ .Values.healthProbes.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: {{ .Values.healthProbes.periodSeconds }}
+            timeoutSeconds: {{ .Values.healthProbes.timeoutSeconds }}
+            failureThreshold: {{ .Values.healthProbes.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 
 	"unoarena/services/spectator-view/store"
@@ -54,6 +54,14 @@ func wireProjectionRebuildWorker() (projectionRebuildWorkerRuntime, error) {
 	rdb, err := store.NewRedisFromURL(redisURL)
 	if err != nil {
 		return projectionRebuildWorkerRuntime{}, fmt.Errorf("redis client: %w", err)
+	}
+	if err := redisotel.InstrumentTracing(rdb,
+		redisotel.WithTracerProvider(processTracerProvider()),
+		redisotel.WithDBStatement(false),
+		redisotel.WithCallerEnabled(false),
+	); err != nil {
+		_ = rdb.Close()
+		return projectionRebuildWorkerRuntime{}, fmt.Errorf("instrument redis: %w", err)
 	}
 	rs := store.NewRedisProjectionStore(rdb, keyPrefix)
 	if n, ok, err := store.ParseStreamMaxLenEnv(os.Getenv("SPECTATOR_REDIS_STREAM_MAXLEN")); err != nil {
@@ -125,16 +133,16 @@ func (rt projectionRebuildWorkerRuntime) close() {
 }
 
 // runProjectionRebuildWorker runs the long-lived rebuild consumer without HTTP.
-func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) {
+func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) error {
 	if rt.consumer == nil {
-		log.Fatal("projection rebuild worker requires consumer")
+		return fmt.Errorf("projection rebuild worker requires consumer")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	defer rt.close()
 
-	log.Printf(`{"level":"info","service":"spectator-view","event":"projection_rebuilder_startup","mode":%q,"group":%q,"topic":%q}`,
-		rt.mode, rt.consumer.cfg.Group, rt.consumer.cfg.Topic)
+	processLogger().InfoContext(ctx, "projection rebuilder started", "event", "projection_rebuilder_started",
+		"mode", rt.mode, "group", rt.consumer.cfg.Group, "topic", rt.consumer.cfg.Topic)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -144,7 +152,7 @@ func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) {
 	select {
 	case err := <-errCh:
 		if err != nil && ctx.Err() == nil {
-			log.Fatalf(`{"level":"error","service":"spectator-view","event":"projection_rebuilder_stopped","error":%q}`, err.Error())
+			return fmt.Errorf("projection rebuilder stopped: %w", err)
 		}
 	case <-ctx.Done():
 		select {
@@ -152,6 +160,7 @@ func runProjectionRebuildWorker(rt projectionRebuildWorkerRuntime) {
 		case <-time.After(10 * time.Second):
 		}
 	}
+	return nil
 }
 
 func applyHeldScanLimitsFromEnv(held *KafkaHeldSpectatorDLQSource) {

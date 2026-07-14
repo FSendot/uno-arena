@@ -381,7 +381,7 @@ func TestJSONLAudit_AppendOnlyFailClosed(t *testing.T) {
 
 	at := time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC)
 	rec := audit.NewRejection("cmd_jsonl", "corr_1", "s1", "p1", "unknown_command_type", at)
-	if err := sink.RecordRejection(rec); err != nil {
+	if err := sink.RecordRejection(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(path)
@@ -396,7 +396,7 @@ func TestJSONLAudit_AppendOnlyFailClosed(t *testing.T) {
 	}
 
 	broken := bff.NewJSONLAudit(errWriter{})
-	if err := broken.RecordRejection(rec); err == nil {
+	if err := broken.RecordRejection(context.Background(), rec); err == nil {
 		t.Fatal("write failure must fail closed")
 	}
 }
@@ -418,7 +418,7 @@ func TestJSONLAudit_RejectsNilErrorShortWrite(t *testing.T) {
 	at := time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC)
 	rec := audit.NewRejection("cmd_short", "corr_1", "s1", "p1", "unknown_command_type", at)
 	sink := bff.NewJSONLAudit(shortWriter{})
-	err := sink.RecordRejection(rec)
+	err := sink.RecordRejection(context.Background(), rec)
 	if err == nil {
 		t.Fatal("nil-error short write must fail closed")
 	}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 
 	"unoarena/services/ranking/domain"
 	"unoarena/services/ranking/store"
@@ -77,7 +76,8 @@ func (a *durableApp) LeaderboardPage(ctx context.Context, boardType domain.Ratin
 			return page, nil
 		}
 		// Architecture: authoritative HTTP leaderboard fallback reads are served from Postgres.
-		log.Printf(`{"level":"warn","service":"ranking","event":"leaderboard_redis_fallback","err":%q}`, sanitizeLogErr(err))
+		processLogger().WarnContext(ctx, "Redis leaderboard unavailable; using authoritative store",
+			"event", "leaderboard_redis_fallback", "error", sanitizeLogErr(err))
 	}
 	return a.store.LeaderboardPage(ctx, q)
 }

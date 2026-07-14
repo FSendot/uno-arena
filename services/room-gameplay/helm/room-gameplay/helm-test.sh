@@ -10,6 +10,13 @@ command -v "${HELM}" >/dev/null 2>&1 || { echo "helm required" >&2; exit 1; }
 "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" >/dev/null
 
 kind_out="$("${HELM}" template room-kind "${CHART}" -f "${CHART}/values.kind.yaml")"
+echo "${kind_out}" | grep -q 'cpu: 500m'
+echo "${kind_out}" | grep -q 'timeoutSeconds: 3'
+echo "${kind_out}" | grep -q 'failureThreshold: 6'
+echo "${kind_out}" | grep -q 'name: ROOM_RUNTIME_CPU_LIMIT'
+echo "${kind_out}" | grep -A1 'name: ROOM_RUNTIME_CPU_LIMIT' | grep -q 'value: "500m"'
+echo "${kind_out}" | grep -A1 'name: ROOM_RUNTIME_PROBE_TIMEOUT_SECONDS' | grep -q 'value: "10"'
+echo "${kind_out}" | grep -A1 'name: ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD' | grep -q 'value: "6"'
 echo "${kind_out}" | grep -q 'image: "uno-arena/room-gameplay:local"'
 echo "${kind_out}" | grep -q 'imagePullPolicy: IfNotPresent'
 ! echo "${kind_out}" | grep -q 'image: "uno-arena/room-gameplay@"'

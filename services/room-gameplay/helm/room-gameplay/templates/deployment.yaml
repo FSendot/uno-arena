@@ -4,7 +4,7 @@ metadata:
   name: {{ .Release.Name }}
   labels:
     app: {{ .Release.Name }}
-    unoarena.io/component: room-router
+    unoarena.io/component: api
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -14,7 +14,9 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}
-        unoarena.io/component: room-router
+        app.kubernetes.io/name: room-gameplay
+        unoarena.io/component: api
+        unoarena.io/metrics-exposed: "true"
     spec:
       serviceAccountName: {{ .Release.Name }}-router
       containers:
@@ -22,8 +24,12 @@ spec:
           image: {{ include "room-gameplay.image" . | quote }}
           imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
           env:
+            {{- include "room-gameplay.telemetryEnv" (dict "root" . "component" "room-router") | nindent 12 }}
             - name: WORKER_ROLE
               value: "room-router"
             - name: POD_NAMESPACE
@@ -52,12 +58,16 @@ spec:
               path: /ready
               port: 8080
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: {{ .Values.healthProbes.periodSeconds }}
+            timeoutSeconds: {{ .Values.healthProbes.timeoutSeconds }}
+            failureThreshold: {{ .Values.healthProbes.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: {{ .Values.healthProbes.periodSeconds }}
+            timeoutSeconds: {{ .Values.healthProbes.timeoutSeconds }}
+            failureThreshold: {{ .Values.healthProbes.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

@@ -192,6 +192,10 @@ services:
       dockerfile: services/gateway/Dockerfile
     environment:
       SERVICE_NAME: gateway
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       IDENTITY_URL: http://identity:8080
       ROOM_GAMEPLAY_URL: http://room-gameplay:8080
       TOURNAMENT_URL: http://tournament-orchestration:8080
@@ -230,6 +234,10 @@ services:
       dockerfile: services/identity/Dockerfile
     environment:
       SERVICE_NAME: identity
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       IDENTITY_INTERNAL_CREDENTIAL: ${IDENTITY_INTERNAL_CREDENTIAL:-local-gw-backend}
       # URL wiring only — no depends_on gateway (avoids cycle; readiness is config-based).
       IDENTITY_INVALIDATION_URL: http://gateway:8080
@@ -253,6 +261,10 @@ services:
       dockerfile: services/room-gameplay/Dockerfile
     environment:
       SERVICE_NAME: room-gameplay
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       SERVICE_CREDENTIAL: ${ROOM_SERVICE_CREDENTIAL:-local-gw-backend}
       ROOM_SERVICE_CREDENTIAL: ${ROOM_SERVICE_CREDENTIAL:-local-gw-backend}
       ROOM_TIMER_SERVICE_CREDENTIAL: ${ROOM_TIMER_SERVICE_CREDENTIAL:-local-room-timer}
@@ -300,6 +312,9 @@ services:
       dockerfile: services/game-integrity/Dockerfile
     environment:
       SERVICE_NAME: game-integrity
+      TELEMETRY_MODE: disabled
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       # Durable KurrentDB adapter (ADR-0035) + local-only envelope encryption (ADR-0024).
       DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
       KURRENTDB_URL: ${KURRENTDB_URL:-kurrentdb://kurrentdb:2113?tls=false}
@@ -322,6 +337,10 @@ services:
       dockerfile: services/tournament-orchestration/Dockerfile
     environment:
       SERVICE_NAME: tournament-orchestration
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       TOURNAMENT_INTERNAL_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-room-to-tournament}
       SERVICE_CREDENTIAL: ${TOURNAMENT_INTERNAL_CREDENTIAL:-local-room-to-tournament}
       ROOM_GAMEPLAY_URL: http://room-gameplay:8080
@@ -345,6 +364,10 @@ services:
       dockerfile: services/ranking/Dockerfile
     environment:
       SERVICE_NAME: ranking
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       RANKING_INTERNAL_CREDENTIAL: ${RANKING_INTERNAL_CREDENTIAL:-local-ranking-internal}
       DATABASE_URL: postgres://${POSTGRES_USER:-uno}:${POSTGRES_PASSWORD:-uno}@postgres-ranking:5432/ranking?sslmode=disable
       KAFKA_BROKERS: kafka:9092
@@ -366,6 +389,10 @@ services:
       dockerfile: services/spectator-view/Dockerfile
     environment:
       SERVICE_NAME: spectator-view
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       SPECTATOR_VIEW_INTERNAL_CREDENTIAL: ${SPECTATOR_VIEW_INTERNAL_CREDENTIAL:-local-room-to-spectator}
       KAFKA_BROKERS: kafka:9092
       REDIS_URL: redis://redis:6379/5
@@ -384,6 +411,10 @@ services:
       dockerfile: services/analytics/Dockerfile
     environment:
       SERVICE_NAME: analytics
+      TELEMETRY_MODE: disabled
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-local}
+      SERVICE_VERSION: local
+      UNOARENA_COMPONENT: api
       ANALYTICS_ROOM_CREDENTIAL: ${ANALYTICS_ROOM_CREDENTIAL:-local-analytics-room}
       ANALYTICS_RANKING_CREDENTIAL: ${ANALYTICS_RANKING_CREDENTIAL:-local-analytics-ranking}
       ANALYTICS_TOURNAMENT_CREDENTIAL: ${ANALYTICS_TOURNAMENT_CREDENTIAL:-local-analytics-tournament}

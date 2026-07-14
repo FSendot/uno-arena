@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,7 +87,7 @@ func (w *CompletionWorker) tick() {
 	}
 	cand, err := w.candidates.FindReadyRoundCandidate(context.Background())
 	if err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"completion_candidate_failed","err":%q}`, sanitizeCompletionErr(err))
+		slog.Warn("completion candidate lookup failed", "event", "completion_candidate_failed", "error", sanitizeCompletionErr(err))
 		return
 	}
 	if cand == nil {
@@ -107,19 +107,19 @@ func (w *CompletionWorker) tick() {
 			if errors.As(err, &nr) && nr != nil {
 				reason = nr.Reason
 			}
-			log.Printf(`{"level":"info","service":"tournament-orchestration","event":"completion_not_ready","tournamentId":%q,"roundNumber":%d,"reason":%q}`,
-				cand.TournamentID, cand.RoundNumber, reason)
+			slog.Info("completion candidate not ready", "event", "completion_not_ready",
+				"tournamentId", cand.TournamentID, "roundNumber", cand.RoundNumber, "reason", reason)
 			return
 		}
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"completion_try_failed","tournamentId":%q,"roundNumber":%d,"err":%q}`,
-			cand.TournamentID, cand.RoundNumber, sanitizeCompletionErr(err))
+		slog.Warn("completion attempt failed", "event", "completion_try_failed",
+			"tournamentId", cand.TournamentID, "roundNumber", cand.RoundNumber, "error", sanitizeCompletionErr(err))
 		return
 	}
 	// Prior persisted reject (e.g. manual poison of deterministic id): surface it —
 	// do not silently ignore rejected envelopes while the hint keeps reappearing.
 	if res.Status == envelope.StatusRejected {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"completion_rejected_prior","tournamentId":%q,"roundNumber":%d,"commandId":%q,"reason":%q}`,
-			cand.TournamentID, cand.RoundNumber, res.CommandID, res.Reason)
+		slog.Warn("completion used prior rejection", "event", "completion_rejected_prior",
+			"tournamentId", cand.TournamentID, "roundNumber", cand.RoundNumber, "commandId", res.CommandID, "reason", res.Reason)
 	}
 }
 

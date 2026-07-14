@@ -294,7 +294,8 @@ func (s *Service) commitAcceptedDurable(
 		return CommandResult{Err: fmt.Errorf("reconciliation intent: %w", err)}
 	}
 
-	appendRes, err := s.deps.Integrity.Append(ctx, AppendRequest{
+	appendCtx, appendSpan := startContextSpan(ctx, "room-gameplay.integrity.append")
+	appendRes, err := s.deps.Integrity.Append(appendCtx, AppendRequest{
 		RoomID:           roomID,
 		GameID:           gameID,
 		EventID:          in.CommandID,
@@ -302,6 +303,7 @@ func (s *Service) commitAcceptedDurable(
 		EventType:        in.Type,
 		Payload:          payload,
 	})
+	appendSpan.End()
 	if err != nil {
 		_ = uow.Rollback()
 		if isDefinitiveIntegrityAppendFailure(err) {
@@ -328,9 +330,13 @@ func (s *Service) commitAcceptedDurable(
 		return CommandResult{Err: fmt.Errorf("reconciliation finalize: %w", err)}
 	}
 
-	if err := uow.CommitAccepted(req); err != nil {
+	_, commitSpan := startContextSpan(ctx, "room-gameplay.command.commit")
+	err = uow.CommitAccepted(req)
+	commitSpan.End()
+	if err != nil {
 		return CommandResult{Err: err}
 	}
+	RecordCommittedGameCompletion(ctx, req.Outbox)
 	// Durable mode: no DrainOutbox / MultiDestinationPublisher polling.
 	acceptedPayload := map[string]any{"facts": factNames(out.Facts)}
 	if in.Type == "ProvisionTournamentRoom" {

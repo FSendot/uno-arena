@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -152,8 +152,8 @@ func (s *Service) refreshBracketBestEffort(ctx context.Context, scope BracketPro
 	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bracketProjectionRefreshTimeout)
 	defer cancel()
 	if err := s.bracketRefresh.Refresh(refreshCtx, scope); err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"bracket_projection_refresh_failed","tournamentId":%q,"err":%q}`,
-			scope.TournamentID, err.Error())
+		slog.WarnContext(refreshCtx, "bracket projection refresh failed", "event", "bracket_projection_refresh_failed",
+			"tournamentId", scope.TournamentID, "error", err.Error())
 	}
 }
 

@@ -1,29 +1,73 @@
 package bff
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 
 	"unoarena/shared/audit"
 )
 
+// SlogAudit writes a rejection through the process telemetry handler directly.
+// Handler errors are returned so rejection auditing remains fail-closed.
+type SlogAudit struct {
+	Handler slog.Handler
+}
+
+// NewSlogAudit constructs the Kubernetes stdout rejection-audit adapter.
+func NewSlogAudit(handler slog.Handler) *SlogAudit {
+	return &SlogAudit{Handler: handler}
+}
+
+func (a *SlogAudit) RecordRejection(ctx context.Context, record audit.RejectionRecord) error {
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	if a == nil || a.Handler == nil {
+		return fmt.Errorf("audit slog handler not configured")
+	}
+	logRecord := slog.NewRecord(record.Timestamp.UTC(), slog.LevelWarn, "command rejected", 0)
+	logRecord.AddAttrs(
+		slog.String("event", "command_rejected"),
+		slog.String("commandId", record.CommandID),
+		slog.String("correlationId", record.CorrelationID),
+		slog.String("reason", record.Reason),
+	)
+	for key, value := range map[string]string{
+		"sessionId": record.SessionID, "playerId": record.PlayerID,
+		"roomId": record.RoomID, "tournamentId": record.TournamentID,
+	} {
+		if value != "" {
+			logRecord.AddAttrs(slog.String(key, value))
+		}
+	}
+	if record.SubmittedSequence != nil {
+		logRecord.AddAttrs(slog.Int64("submittedSequenceNumber", *record.SubmittedSequence))
+	}
+	if record.CurrentSequence != nil {
+		logRecord.AddAttrs(slog.Int64("currentSequenceNumber", *record.CurrentSequence))
+	}
+	return a.Handler.Handle(ctx, logRecord)
+}
+
 // ClosedAudit is the fail-closed default when no audit sink is configured.
 // It never silently accepts rejections into an in-memory buffer.
 type ClosedAudit struct{}
 
 // RecordRejection always fails closed.
-func (ClosedAudit) RecordRejection(audit.RejectionRecord) error {
+func (ClosedAudit) RecordRejection(context.Context, audit.RejectionRecord) error {
 	return errors.New("audit sink not configured")
 }
 
 // AuditSink receives structured operational/security rejection records.
 // These are never domain events and must never be treated as Game Integrity entries.
 type AuditSink interface {
-	RecordRejection(record audit.RejectionRecord) error
+	RecordRejection(context.Context, audit.RejectionRecord) error
 }
 
 // MemoryAudit is an in-process audit sink for offline/tests.
@@ -38,7 +82,7 @@ func NewMemoryAudit() *MemoryAudit {
 }
 
 // RecordRejection stores a validated rejection audit record.
-func (a *MemoryAudit) RecordRejection(record audit.RejectionRecord) error {
+func (a *MemoryAudit) RecordRejection(_ context.Context, record audit.RejectionRecord) error {
 	if err := record.Validate(); err != nil {
 		return err
 	}
@@ -91,7 +135,7 @@ func NewStderrJSONLAudit() *JSONLAudit {
 }
 
 // RecordRejection validates and appends one JSON line. Write failures fail closed.
-func (a *JSONLAudit) RecordRejection(record audit.RejectionRecord) error {
+func (a *JSONLAudit) RecordRejection(_ context.Context, record audit.RejectionRecord) error {
 	if err := record.Validate(); err != nil {
 		return err
 	}

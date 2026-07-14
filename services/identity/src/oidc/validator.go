@@ -52,11 +52,11 @@ type Claims struct {
 
 // Validator discovers JWKS and validates RS256 ID tokens fail-closed.
 type Validator struct {
-	cfg    Config
-	client *http.Client
-	mu     sync.Mutex
-	jwks   map[string]*rsa.PublicKey // kid -> key
-	jwksAt time.Time
+	cfg     Config
+	client  *http.Client
+	mu      sync.Mutex
+	jwks    map[string]*rsa.PublicKey // kid -> key
+	jwksAt  time.Time
 	jwksURI string
 	discAt  time.Time
 	tokenEP string

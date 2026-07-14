@@ -42,7 +42,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:18.4-alpine3.24
+          image: postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
           imagePullPolicy: IfNotPresent
           args:
             - "-c"
@@ -76,14 +76,14 @@ spec:
             exec:
               command: ["pg_isready", "-U", "ranking_admin", "-d", "ranking"]
             initialDelaySeconds: 3
-            periodSeconds: 5
+            periodSeconds: 15
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "ranking_admin", "-d", "ranking"]
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 30
             timeoutSeconds: 3
             failureThreshold: 6
           resources:

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 
 	"unoarena/services/ranking/domain"
 )
@@ -25,7 +26,8 @@ const (
 
 // RankingStore is the durable Postgres adapter for Ranking.
 type RankingStore struct {
-	pool *pgxpool.Pool
+	pool           *pgxpool.Pool
+	tracerProvider trace.TracerProvider
 
 	// FailNextCommits injects N commit failures after writes (integration tests only).
 	FailNextCommits int
@@ -34,6 +36,21 @@ type RankingStore struct {
 // NewRankingStore wraps a writer pool.
 func NewRankingStore(pool *pgxpool.Pool) *RankingStore {
 	return &RankingStore{pool: pool}
+}
+
+// NewRankingStoreWithTracer retains the process-owned tracer provider without
+// publishing it globally, so transaction boundaries remain context-owned.
+func NewRankingStoreWithTracer(pool *pgxpool.Pool, tracerProvider trace.TracerProvider) *RankingStore {
+	return &RankingStore{pool: pool, tracerProvider: tracerProvider}
+}
+
+func (s *RankingStore) commitTransaction(ctx context.Context, tx pgx.Tx) error {
+	if s.tracerProvider == nil {
+		return tx.Commit(ctx)
+	}
+	ctx, span := s.tracerProvider.Tracer("unoarena/services/ranking/store").Start(ctx, "ranking.database.commit")
+	defer span.End()
+	return tx.Commit(ctx)
 }
 
 // OutboxEvent is an append-only CDC outbox row.
@@ -575,7 +592,7 @@ func (s *RankingStore) ApplyCasualGameCompleted(ctx context.Context, req GameCom
 		s.FailNextCommits--
 		return GameCompletedResult{}, wrapUnavailable(fmt.Errorf("injected commit failure"))
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitTransaction(ctx, tx); err != nil {
 		return GameCompletedResult{}, wrapUnavailable(err)
 	}
 	return result, nil
@@ -803,7 +820,7 @@ func (s *RankingStore) ApplyTournamentPlacement(ctx context.Context, req Tournam
 		s.FailNextCommits--
 		return domain.CommandOutcome{}, wrapUnavailable(fmt.Errorf("injected commit failure"))
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitTransaction(ctx, tx); err != nil {
 		return domain.CommandOutcome{}, wrapUnavailable(err)
 	}
 	return out, nil
@@ -897,7 +914,7 @@ func (s *RankingStore) commitCasualIgnored(ctx context.Context, tx pgx.Tx, req G
 		s.FailNextCommits--
 		return GameCompletedResult{}, wrapUnavailable(fmt.Errorf("injected commit failure"))
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitTransaction(ctx, tx); err != nil {
 		return GameCompletedResult{}, wrapUnavailable(err)
 	}
 	return result, nil

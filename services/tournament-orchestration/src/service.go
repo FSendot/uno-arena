@@ -143,7 +143,7 @@ func NewService(d ServiceDeps) *Service {
 // NoopAudit drops rejection audits (tests should use MemoryAudit).
 type NoopAudit struct{}
 
-func (NoopAudit) RecordRejection(audit.RejectionRecord) error { return nil }
+func (NoopAudit) RecordRejection(context.Context, audit.RejectionRecord) error { return nil }
 
 type randomIDs struct{}
 
@@ -165,6 +165,8 @@ type CommandRequest struct {
 
 // SubmitCommand routes a versioned command to the domain aggregate.
 func (s *Service) SubmitCommand(ctx context.Context, req CommandRequest, correlationID string) (envelope.Result, error) {
+	ctx, span := startContextSpan(ctx, "tournament-orchestration.command.handle")
+	defer span.End()
 	if s.registrations != nil && isRegistrationDifferentialCommand(req.Type) {
 		return s.submitCommandRegistrationDifferential(ctx, req, correlationID)
 	}
@@ -188,7 +190,7 @@ func (s *Service) SubmitCommand(ctx context.Context, req CommandRequest, correla
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.submitCommandLocked(req, correlationID)
+	return s.submitCommandLocked(ctx, req, correlationID)
 }
 
 func isRegistrationDifferentialCommand(typ string) bool {
@@ -200,9 +202,9 @@ func isRegistrationDifferentialCommand(typ string) bool {
 	}
 }
 
-func (s *Service) submitCommandLocked(req CommandRequest, correlationID string) (envelope.Result, error) {
+func (s *Service) submitCommandLocked(ctx context.Context, req CommandRequest, correlationID string) (envelope.Result, error) {
 	if req.CommandID == "" || req.Type == "" {
-		return s.reject(req, correlationID, "", "invalid_envelope")
+		return s.reject(ctx, req, correlationID, "", "invalid_envelope")
 	}
 	if req.SchemaVersion != envelope.CurrentSchemaVersion {
 		return envelope.Result{}, fmt.Errorf("schemaVersion must be %d", envelope.CurrentSchemaVersion)
@@ -227,15 +229,15 @@ func (s *Service) submitCommandLocked(req CommandRequest, correlationID string) 
 	}
 
 	tournamentID := stringField(payload, "tournamentId")
-	return s.dispatch(req, payload, tournamentID, correlationID)
+	return s.dispatch(ctx, req, payload, tournamentID, correlationID)
 }
 
-func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
+func (s *Service) dispatch(ctx context.Context, req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
 	switch req.Type {
 	case CmdCreateTournament:
-		return s.createTournament(req, payload, correlationID)
+		return s.createTournament(ctx, req, payload, correlationID)
 	case CmdRegisterPlayer:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			playerID := stringField(payload, "playerId")
 			if playerID == "" {
 				playerID = req.PlayerID
@@ -246,11 +248,11 @@ func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamen
 			})
 		})
 	case CmdCloseRegistration:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.CloseRegistration(domain.CloseRegistrationCommand{CommandID: domain.CommandID(req.CommandID)})
 		})
 	case CmdSeedRound:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.SeedRound(domain.SeedRoundCommand{
 				CommandID:   domain.CommandID(req.CommandID),
 				RoundNumber: intField(payload, "roundNumber"),
@@ -258,7 +260,7 @@ func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamen
 		})
 	case CmdProvisionRoundMatches:
 		// Assignment + outbox only; Room calls happen in ProcessProvisioningBatch.
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.ProvisionRoundMatches(domain.ProvisionRoundMatchesCommand{
 				CommandID:   domain.CommandID(req.CommandID),
 				RoundNumber: intField(payload, "roundNumber"),
@@ -266,24 +268,24 @@ func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamen
 		})
 	case CmdRecordMatchResult:
 		// Memory/capability whole rewrite when RoundMatches is not wired.
-		return s.recordResult(req, payload, tournamentID, correlationID)
+		return s.recordResult(ctx, req, payload, tournamentID, correlationID)
 	case CmdCompleteRound:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.CompleteRound(domain.CompleteRoundCommand{
 				CommandID:   domain.CommandID(req.CommandID),
 				RoundNumber: intField(payload, "roundNumber"),
 			})
 		})
 	case CmdCompleteTournament:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.CompleteTournament(domain.CompleteTournamentCommand{CommandID: domain.CommandID(req.CommandID)})
 		})
 	case CmdCancelTournament:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.CancelTournament(domain.CancelTournamentCommand{CommandID: domain.CommandID(req.CommandID)})
 		})
 	case CmdRetryProvisioning:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.RetryTournamentProvisioningBatch(domain.RetryTournamentProvisioningBatchCommand{
 				CommandID:    domain.CommandID(req.CommandID),
 				RoundNumber:  intField(payload, "roundNumber"),
@@ -292,7 +294,7 @@ func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamen
 			})
 		})
 	case CmdQuarantineBatch:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.QuarantineTournamentProvisioningBatch(domain.QuarantineTournamentProvisioningBatchCommand{
 				CommandID:   domain.CommandID(req.CommandID),
 				RoundNumber: intField(payload, "roundNumber"),
@@ -301,7 +303,7 @@ func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamen
 			})
 		})
 	case CmdQuarantineResult:
-		return s.withTournament(req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
+		return s.withTournament(ctx, req, tournamentID, correlationID, func(t *domain.Tournament) domain.CommandOutcome {
 			return t.QuarantineTournamentResult(domain.QuarantineTournamentResultCommand{
 				CommandID:         domain.CommandID(req.CommandID),
 				RoomID:            domain.RoomID(stringField(payload, "roomId")),
@@ -310,14 +312,14 @@ func (s *Service) dispatch(req CommandRequest, payload map[string]any, tournamen
 			})
 		})
 	default:
-		return s.reject(req, correlationID, tournamentID, "unknown_command_type")
+		return s.reject(ctx, req, correlationID, tournamentID, "unknown_command_type")
 	}
 }
 
-func (s *Service) createTournament(req CommandRequest, payload map[string]any, correlationID string) (envelope.Result, error) {
+func (s *Service) createTournament(ctx context.Context, req CommandRequest, payload map[string]any, correlationID string) (envelope.Result, error) {
 	tid := domain.TournamentID(stringField(payload, "tournamentId"))
 	if !tid.Valid() {
-		return s.reject(req, correlationID, "", string(domain.RejectInvalidIdentity))
+		return s.reject(ctx, req, correlationID, "", string(domain.RejectInvalidIdentity))
 	}
 	uow, err := s.repo.BeginCreate(tid)
 	if err != nil {
@@ -328,7 +330,7 @@ func (s *Service) createTournament(req CommandRequest, payload map[string]any, c
 		return prior, nil
 	}
 	if uow.Exists() {
-		return s.rejectUoW(uow, req, correlationID, string(tid), "tournament_already_exists")
+		return s.rejectUoW(ctx, uow, req, correlationID, string(tid), "tournament_already_exists")
 	}
 	tr, out := domain.CreateTournament(domain.CreateTournamentCommand{
 		CommandID:    domain.CommandID(req.CommandID),
@@ -338,17 +340,17 @@ func (s *Service) createTournament(req CommandRequest, payload map[string]any, c
 		BatchSize:    intField(payload, "batchSize"),
 		Visibility:   domain.TournamentVisibility(stringField(payload, "visibility")),
 	})
-	return s.commitOutcome(uow, req, tr, out, string(tid), correlationID, nil)
+	return s.commitOutcome(ctx, uow, req, tr, out, string(tid), correlationID, nil)
 }
 
-func (s *Service) withTournament(req CommandRequest, tournamentID, correlationID string, fn func(*domain.Tournament) domain.CommandOutcome) (envelope.Result, error) {
-	return s.withTournamentSource(req, tournamentID, correlationID, nil, fn)
+func (s *Service) withTournament(ctx context.Context, req CommandRequest, tournamentID, correlationID string, fn func(*domain.Tournament) domain.CommandOutcome) (envelope.Result, error) {
+	return s.withTournamentSource(ctx, req, tournamentID, correlationID, nil, fn)
 }
 
-func (s *Service) withTournamentSource(req CommandRequest, tournamentID, correlationID string, matchSource *MatchResultSource, fn func(*domain.Tournament) domain.CommandOutcome) (envelope.Result, error) {
+func (s *Service) withTournamentSource(ctx context.Context, req CommandRequest, tournamentID, correlationID string, matchSource *MatchResultSource, fn func(*domain.Tournament) domain.CommandOutcome) (envelope.Result, error) {
 	tid := domain.TournamentID(tournamentID)
 	if !tid.Valid() {
-		return s.reject(req, correlationID, "", string(domain.RejectInvalidIdentity))
+		return s.reject(ctx, req, correlationID, "", string(domain.RejectInvalidIdentity))
 	}
 	uow, err := s.repo.BeginExisting(tid)
 	if err != nil {
@@ -359,17 +361,17 @@ func (s *Service) withTournamentSource(req CommandRequest, tournamentID, correla
 		return prior, nil
 	}
 	if !uow.Exists() {
-		return s.rejectUoW(uow, req, correlationID, tournamentID, "tournament_not_found")
+		return s.rejectUoW(ctx, uow, req, correlationID, tournamentID, "tournament_not_found")
 	}
 	t := uow.Loaded()
 	out := fn(t)
-	return s.commitOutcome(uow, req, t, out, tournamentID, correlationID, matchSource)
+	return s.commitOutcome(ctx, uow, req, t, out, tournamentID, correlationID, matchSource)
 }
 
-func (s *Service) recordResult(req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
+func (s *Service) recordResult(ctx context.Context, req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
 	standings, err := parseStandings(payload["standings"])
 	if err != nil {
-		return s.reject(req, correlationID, tournamentID, "invalid_standings")
+		return s.reject(ctx, req, correlationID, tournamentID, "invalid_standings")
 	}
 	eventID := stringField(payload, "eventId")
 	roomID := stringField(payload, "roomId")
@@ -382,7 +384,7 @@ func (s *Service) recordResult(req CommandRequest, payload map[string]any, tourn
 			CompletionVersion: completionVersion,
 		}
 	}
-	return s.withTournamentSource(req, tournamentID, correlationID, matchSource, func(t *domain.Tournament) domain.CommandOutcome {
+	return s.withTournamentSource(ctx, req, tournamentID, correlationID, matchSource, func(t *domain.Tournament) domain.CommandOutcome {
 		rid := domain.RoomID(roomID)
 		roundNumber := intField(payload, "roundNumber")
 		slotID := domain.SlotID(stringField(payload, "slotId"))
@@ -441,7 +443,7 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 		SchemaVersion: envelope.CurrentSchemaVersion,
 	}
 	if err := validateProvisioningBatchWork(work); err != nil {
-		res, err2 := s.reject(req, work.CorrelationID, work.TournamentID, err.Error())
+		res, err2 := s.reject(ctx, req, work.CorrelationID, work.TournamentID, err.Error())
 		s.mu.Unlock()
 		return res, err2
 	}
@@ -458,35 +460,35 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 		return prior, nil
 	}
 	if !uow.Exists() {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
 		s.mu.Unlock()
 		return res, err2
 	}
 	t := uow.Loaded()
 	round, ok := t.Round(work.RoundNumber)
 	if !ok {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
 		s.mu.Unlock()
 		return res, err2
 	}
 	batch, ok := round.FindBatch(domain.BatchID(work.BatchID))
 	if !ok {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
 		s.mu.Unlock()
 		return res, err2
 	}
 	if batch.Status == domain.BatchQuarantined {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectQuarantined))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectQuarantined))
 		s.mu.Unlock()
 		return res, err2
 	}
 	if batch.Status == domain.BatchCancelled {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchCancelled))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchCancelled))
 		s.mu.Unlock()
 		return res, err2
 	}
 	if err := validateBatchRange(batch, work); err != nil {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, err.Error())
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, err.Error())
 		s.mu.Unlock()
 		return res, err2
 	}
@@ -496,18 +498,18 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 			RoundNumber: work.RoundNumber,
 			BatchID:     domain.BatchID(work.BatchID),
 		})
-		res, err2 := s.commitOutcome(uow, req, t, out, work.TournamentID, work.CorrelationID, nil)
+		res, err2 := s.commitOutcome(ctx, uow, req, t, out, work.TournamentID, work.CorrelationID, nil)
 		s.mu.Unlock()
 		return res, err2
 	}
 	// Cancelled/terminal work must never reach Room provisioning.
 	if t.Phase().IsTerminal() {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectAlreadyTerminal))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectAlreadyTerminal))
 		s.mu.Unlock()
 		return res, err2
 	}
 	if round.Status != domain.RoundProvisioning {
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotReady))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotReady))
 		s.mu.Unlock()
 		return res, err2
 	}
@@ -515,7 +517,7 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 	case domain.BatchPending, domain.BatchRetried, domain.BatchInProgress:
 		// claimable/work statuses only
 	default:
-		res, err2 := s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectUnexpectedBatchStatus))
+		res, err2 := s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectUnexpectedBatchStatus))
 		s.mu.Unlock()
 		return res, err2
 	}
@@ -555,12 +557,12 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 		if err != nil {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return s.recordProvisionFailure(req, work, err.Error())
+			return s.recordProvisionFailure(ctx, req, work, err.Error())
 		}
 		if res.RoomID != string(slot.RoomID) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return s.recordProvisionFailure(req, work, ErrRoomIDMismatch.Error())
+			return s.recordProvisionFailure(ctx, req, work, ErrRoomIDMismatch.Error())
 		}
 	}
 
@@ -575,7 +577,7 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 		return prior, nil
 	}
 	if !uow2.Exists() {
-		return s.rejectUoW(uow2, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+		return s.rejectUoW(ctx, uow2, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
 	}
 	t = uow2.Loaded()
 	out := t.CompleteTournamentProvisioningBatch(domain.CompleteTournamentProvisioningBatchCommand{
@@ -583,10 +585,10 @@ func (s *Service) processProvisioningBatchLegacy(ctx context.Context, work Provi
 		RoundNumber: work.RoundNumber,
 		BatchID:     domain.BatchID(work.BatchID),
 	})
-	return s.commitOutcome(uow2, req, t, out, work.TournamentID, work.CorrelationID, nil)
+	return s.commitOutcome(ctx, uow2, req, t, out, work.TournamentID, work.CorrelationID, nil)
 }
 
-func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBatchWork, reason string) (envelope.Result, error) {
+func (s *Service) recordProvisionFailure(ctx context.Context, req CommandRequest, work ProvisioningBatchWork, reason string) (envelope.Result, error) {
 	uow, err := s.repo.BeginExisting(domain.TournamentID(work.TournamentID))
 	if err != nil {
 		return envelope.Result{}, err
@@ -596,16 +598,16 @@ func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBa
 		return prior, nil
 	}
 	if !uow.Exists() {
-		return s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
+		return s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, "tournament_not_found")
 	}
 	t := uow.Loaded()
 	round, ok := t.Round(work.RoundNumber)
 	if !ok {
-		return s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
+		return s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectRoundNotFound))
 	}
 	batch, ok := round.FindBatch(domain.BatchID(work.BatchID))
 	if !ok {
-		return s.rejectUoW(uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
+		return s.rejectUoW(ctx, uow, req, work.CorrelationID, work.TournamentID, string(domain.RejectBatchNotFound))
 	}
 	nextAttempt := batch.RetryAttempt + 1
 	out := t.RetryTournamentProvisioningBatch(domain.RetryTournamentProvisioningBatchCommand{
@@ -619,7 +621,7 @@ func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBa
 	}
 	// Quarantine (budget exhausted) has no further retry work.
 	if b, ok := round.FindBatch(domain.BatchID(work.BatchID)); ok && b.Status == domain.BatchQuarantined {
-		return s.commitOutcome(uow, req, t, out, work.TournamentID, work.CorrelationID, nil)
+		return s.commitOutcome(ctx, uow, req, t, out, work.TournamentID, work.CorrelationID, nil)
 	}
 	nextWork := ProvisioningBatchWork{
 		CommandID:     provisioningAttemptCommandID(work.TournamentID, work.RoundNumber, work.BatchID, nextAttempt),
@@ -633,7 +635,7 @@ func (s *Service) recordProvisionFailure(req CommandRequest, work ProvisioningBa
 		CorrelationID: work.CorrelationID,
 	}
 	// Attach nextRetryWork before Commit so exact replay returns byte-stable retry identity.
-	return s.commitOutcome(uow, req, t, out, work.TournamentID, work.CorrelationID, nil, nextRetryWorkPayload(nextWork))
+	return s.commitOutcome(ctx, uow, req, t, out, work.TournamentID, work.CorrelationID, nil, nextRetryWorkPayload(nextWork))
 }
 
 func nextRetryWorkPayload(next ProvisioningBatchWork) map[string]any {
@@ -756,7 +758,7 @@ func (s *Service) ingestMatchCompletedDifferential(ctx context.Context, evt Matc
 		RoomID:            evt.RoomID,
 		CompletionVersion: evt.CompletionVersion,
 	}
-	result, err := s.commitRoundMatchOutcome(uow, req, decision, cmd, string(tid), evt.CorrelationID, matchSource)
+	result, err := s.commitRoundMatchOutcome(ctx, uow, req, decision, cmd, string(tid), evt.CorrelationID, matchSource)
 	if err != nil {
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return ingestResponse(prior, commandID, tid, evt, dispositionFromResult(prior)), nil
@@ -818,7 +820,7 @@ func (s *Service) ingestMatchCompletedLegacy(ctx context.Context, evt MatchCompl
 		RoomID:            evt.RoomID,
 		CompletionVersion: evt.CompletionVersion,
 	}
-	result, err := s.commitOutcome(uow, req, t, out, string(tid), evt.CorrelationID, matchSource)
+	result, err := s.commitOutcome(ctx, uow, req, t, out, string(tid), evt.CorrelationID, matchSource)
 	if err != nil {
 		return nil, err
 	}
@@ -898,6 +900,7 @@ func dispositionFromDecision(d domain.RoundMatchDecision) string {
 }
 
 func (s *Service) commitRoundMatchOutcome(
+	ctx context.Context,
 	uow RoundMatchUnitOfWork,
 	req CommandRequest,
 	decision domain.RoundMatchDecision,
@@ -912,6 +915,11 @@ func (s *Service) commitRoundMatchOutcome(
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(RoundMatchCommitRequest{
 			TournamentID:      tournamentID,
 			CommandID:         req.CommandID,
@@ -925,11 +933,6 @@ func (s *Service) commitRoundMatchOutcome(
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return s.canonicalRoundMatchOutcome(req.CommandID, prior), nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalRoundMatchOutcome(req.CommandID, res), nil
@@ -1058,7 +1061,7 @@ func (s *Service) submitCommandRecordMatchDifferential(ctx context.Context, req 
 		return prior, nil
 	}
 	if !uow.Exists() {
-		return s.rejectRoundMatchUoW(uow, req, correlationID, tournamentID, "tournament_not_found")
+		return s.rejectRoundMatchUoW(ctx, uow, req, correlationID, tournamentID, "tournament_not_found")
 	}
 
 	if err := uow.AttachPriorResult(roomID, completionVersion); err != nil {
@@ -1094,12 +1097,12 @@ func (s *Service) submitCommandRecordMatchDifferential(ctx context.Context, req 
 			CompletionVersion: completionVersion,
 		}
 	}
-	return s.commitRoundMatchOutcome(uow, req, decision, recordCmd, tournamentID, correlationID, matchSource)
+	return s.commitRoundMatchOutcome(ctx, uow, req, decision, recordCmd, tournamentID, correlationID, matchSource)
 }
 
 func (s *Service) rejectRoundMatch(ctx context.Context, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID == "" {
-		return s.reject(req, correlationID, tournamentID, reason)
+		return s.reject(ctx, req, correlationID, tournamentID, reason)
 	}
 	uow, err := s.roundMatches.BeginStandaloneCommand(ctx, req.CommandID)
 	if err != nil {
@@ -1113,6 +1116,11 @@ func (s *Service) rejectRoundMatch(ctx context.Context, req CommandRequest, corr
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(RoundMatchCommitRequest{
 		TournamentID: tournamentID,
 		CommandID:    req.CommandID,
@@ -1123,18 +1131,18 @@ func (s *Service) rejectRoundMatch(ctx context.Context, req CommandRequest, corr
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return s.canonicalRoundMatchOutcome(req.CommandID, prior), nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalRoundMatchOutcome(req.CommandID, res), nil
 }
 
-func (s *Service) rejectRoundMatchUoW(uow RoundMatchUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
+func (s *Service) rejectRoundMatchUoW(ctx context.Context, uow RoundMatchUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(RoundMatchCommitRequest{
 		TournamentID: tournamentID,
 		CommandID:    req.CommandID,
@@ -1145,11 +1153,6 @@ func (s *Service) rejectRoundMatchUoW(uow RoundMatchUnitOfWork, req CommandReque
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return s.canonicalRoundMatchOutcome(req.CommandID, prior), nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalRoundMatchOutcome(req.CommandID, res), nil
@@ -1224,7 +1227,7 @@ func (s *Service) createTournamentDifferential(ctx context.Context, req CommandR
 		return prior, nil
 	}
 	if uow.Exists() {
-		return s.rejectRegistrationUoW(uow, req, correlationID, string(tid), "tournament_already_exists")
+		return s.rejectRegistrationUoW(ctx, uow, req, correlationID, string(tid), "tournament_already_exists")
 	}
 	createCmd := domain.CreateTournamentCommand{
 		CommandID:    domain.CommandID(req.CommandID),
@@ -1235,7 +1238,7 @@ func (s *Service) createTournamentDifferential(ctx context.Context, req CommandR
 		Visibility:   domain.TournamentVisibility(stringField(payload, "visibility")),
 	}
 	decision := domain.DecideCreateTournament(createCmd)
-	return s.commitRegistrationOutcome(uow, req, decision, createCmd, string(tid), correlationID, true, nil)
+	return s.commitRegistrationOutcome(ctx, uow, req, decision, createCmd, string(tid), correlationID, true, nil)
 }
 
 func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandRequest, payload map[string]any, tournamentID, correlationID string) (envelope.Result, error) {
@@ -1267,12 +1270,12 @@ func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandReq
 		return prior, nil
 	}
 	if !uow.Exists() {
-		return s.rejectRegistrationUoW(uow, req, correlationID, tournamentID, "tournament_not_found")
+		return s.rejectRegistrationUoW(ctx, uow, req, correlationID, tournamentID, "tournament_not_found")
 	}
 
 	decision := domain.DecideRegisterPlayer(uow.RegisterContext(), regCmd)
 	if decision.Kind != domain.RegistrationReserve {
-		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, nil)
+		return s.finalizeRegistrationDecision(ctx, uow, req, decision, tournamentID, correlationID, nil)
 	}
 
 	_, autoClosed, err := uow.ReserveRegistration()
@@ -1280,14 +1283,14 @@ func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandReq
 		decision = domain.DecideRegisterPlayer(domain.RegistrationContext{
 			TournamentID: tid, Exists: true, Phase: domain.PhaseRegistration, PlayerRegistered: true,
 		}, regCmd)
-		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, nil)
+		return s.finalizeRegistrationDecision(ctx, uow, req, decision, tournamentID, correlationID, nil)
 	}
 	if store.IsRegistrationCapacityExceeded(err) {
 		decision = domain.RegistrationDecision{
 			Kind:    domain.RegistrationReject,
 			Outcome: domain.CapacityExceededOutcome(regCmd.CommandID),
 		}
-		return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, nil)
+		return s.finalizeRegistrationDecision(ctx, uow, req, decision, tournamentID, correlationID, nil)
 	}
 	if err != nil {
 		return envelope.Result{}, err
@@ -1308,7 +1311,7 @@ func (s *Service) registerPlayerDifferential(ctx context.Context, req CommandReq
 			return envelope.Result{}, err
 		}
 	}
-	return s.finalizeRegistrationDecision(uow, req, decision, tournamentID, correlationID, kickoff)
+	return s.finalizeRegistrationDecision(ctx, uow, req, decision, tournamentID, correlationID, kickoff)
 }
 
 func (s *Service) closeRegistrationDifferential(ctx context.Context, req CommandRequest, tournamentID, correlationID string) (envelope.Result, error) {
@@ -1325,7 +1328,7 @@ func (s *Service) closeRegistrationDifferential(ctx context.Context, req Command
 		return prior, nil
 	}
 	if !uow.Exists() {
-		return s.rejectRegistrationUoW(uow, req, correlationID, tournamentID, "tournament_not_found")
+		return s.rejectRegistrationUoW(ctx, uow, req, correlationID, tournamentID, "tournament_not_found")
 	}
 	closeCmd := domain.CloseRegistrationCommand{CommandID: domain.CommandID(req.CommandID)}
 	decision := domain.DecideCloseRegistration(uow.CloseContext(), closeCmd)
@@ -1337,7 +1340,7 @@ func (s *Service) closeRegistrationDifferential(ctx context.Context, req Command
 			return envelope.Result{}, err
 		}
 	}
-	return s.commitRegistrationOutcome(uow, req, decision, domain.CreateTournamentCommand{}, tournamentID, correlationID, bump, kickoff)
+	return s.commitRegistrationOutcome(ctx, uow, req, decision, domain.CreateTournamentCommand{}, tournamentID, correlationID, bump, kickoff)
 }
 
 func registrationRound1Kickoff(tid domain.TournamentID, registeredCount int, correlationID string) (*RegistrationRound1Kickoff, error) {
@@ -1354,11 +1357,16 @@ func registrationRound1Kickoff(tid domain.TournamentID, registeredCount int, cor
 	}, nil
 }
 
-func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, tournamentID, correlationID string, kickoff *RegistrationRound1Kickoff) (envelope.Result, error) {
+func (s *Service) finalizeRegistrationDecision(ctx context.Context, uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, tournamentID, correlationID string, kickoff *RegistrationRound1Kickoff) (envelope.Result, error) {
 	out := decision.Outcome
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.FinalizeRegister(RegistrationCommitRequest{
 			Op:           string(store.RegistrationOpRegister),
 			TournamentID: tournamentID,
@@ -1370,11 +1378,6 @@ func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req C
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalRegistrationOutcome(req.CommandID, res), nil
@@ -1430,7 +1433,7 @@ func (s *Service) finalizeRegistrationDecision(uow RegistrationUnitOfWork, req C
 	return s.canonicalRegistrationOutcome(req.CommandID, res), nil
 }
 
-func (s *Service) commitRegistrationOutcome(uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, createCmd domain.CreateTournamentCommand, tournamentID, correlationID string, bumpBase bool, kickoff *RegistrationRound1Kickoff) (envelope.Result, error) {
+func (s *Service) commitRegistrationOutcome(ctx context.Context, uow RegistrationUnitOfWork, req CommandRequest, decision domain.RegistrationDecision, createCmd domain.CreateTournamentCommand, tournamentID, correlationID string, bumpBase bool, kickoff *RegistrationRound1Kickoff) (envelope.Result, error) {
 	out := decision.Outcome
 	op := string(store.RegistrationOpCreate)
 	if req.Type == CmdCloseRegistration {
@@ -1439,6 +1442,11 @@ func (s *Service) commitRegistrationOutcome(uow RegistrationUnitOfWork, req Comm
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(RegistrationCommitRequest{
 			Op: op, TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 			Outcome: res, Decision: decision, CreateCmd: createCmd,
@@ -1447,11 +1455,6 @@ func (s *Service) commitRegistrationOutcome(uow RegistrationUnitOfWork, req Comm
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalRegistrationOutcome(req.CommandID, res), nil
@@ -1525,7 +1528,7 @@ func (s *Service) canonicalRegistrationOutcome(commandID string, fallback envelo
 
 func (s *Service) rejectRegistration(ctx context.Context, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID == "" {
-		return s.reject(req, correlationID, tournamentID, reason)
+		return s.reject(ctx, req, correlationID, tournamentID, reason)
 	}
 	uow, err := s.registrations.BeginStandaloneCommand(ctx, req.CommandID)
 	if err != nil {
@@ -1539,6 +1542,11 @@ func (s *Service) rejectRegistration(ctx context.Context, req CommandRequest, co
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(RegistrationCommitRequest{
 		Op:           string(store.RegistrationOpStandalone),
 		TournamentID: tournamentID,
@@ -1551,15 +1559,10 @@ func (s *Service) rejectRegistration(ctx context.Context, req CommandRequest, co
 		}
 		return envelope.Result{}, err
 	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
-		return envelope.Result{}, err
-	}
 	return s.canonicalRegistrationOutcome(req.CommandID, res), nil
 }
 
-func (s *Service) rejectRegistrationUoW(uow RegistrationUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
+func (s *Service) rejectRegistrationUoW(ctx context.Context, uow RegistrationUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID != "" {
 		if prior, ok := uow.LookupOutcome(req.CommandID); ok {
 			return prior, nil
@@ -1569,6 +1572,11 @@ func (s *Service) rejectRegistrationUoW(uow RegistrationUnitOfWork, req CommandR
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if req.CommandID != "" {
 		commitReq := RegistrationCommitRequest{
 			TournamentID: tournamentID,
@@ -1597,11 +1605,6 @@ func (s *Service) rejectRegistrationUoW(uow RegistrationUnitOfWork, req CommandR
 	} else {
 		_ = uow.Rollback()
 	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
-		return envelope.Result{}, err
-	}
 	return s.canonicalRegistrationOutcome(req.CommandID, res), nil
 }
 
@@ -1611,6 +1614,11 @@ func (s *Service) persistRegistrationRejectStandalone(ctx context.Context, req C
 		reason = string(decision.Outcome.Rejection.Code)
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if req.CommandID != "" {
 		uow, err := s.registrations.BeginStandaloneCommand(ctx, req.CommandID)
 		if err != nil {
@@ -1632,11 +1640,6 @@ func (s *Service) persistRegistrationRejectStandalone(ctx context.Context, req C
 			}
 			return envelope.Result{}, err
 		}
-	}
-	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
-		return envelope.Result{}, err
 	}
 	return s.canonicalRegistrationOutcome(req.CommandID, res), nil
 }
@@ -1691,17 +1694,22 @@ func (s *Service) seedRoundDifferential(ctx context.Context, req CommandRequest,
 		return prior, nil
 	}
 	if !uow.Exists() {
-		return s.rejectSeedingUoW(uow, req, correlationID, tournamentID, "tournament_not_found")
+		return s.rejectSeedingUoW(ctx, uow, req, correlationID, tournamentID, "tournament_not_found")
 	}
 	decision := domain.DecideSeedRoundKickoff(uow.KickoffContext(), seedCmd)
-	return s.commitSeedingOutcome(uow, req, decision, tournamentID, correlationID)
+	return s.commitSeedingOutcome(ctx, uow, req, decision, tournamentID, correlationID)
 }
 
-func (s *Service) commitSeedingOutcome(uow SeedingUnitOfWork, req CommandRequest, decision domain.SeedRoundKickoffDecision, tournamentID, correlationID string) (envelope.Result, error) {
+func (s *Service) commitSeedingOutcome(ctx context.Context, uow SeedingUnitOfWork, req CommandRequest, decision domain.SeedRoundKickoffDecision, tournamentID, correlationID string) (envelope.Result, error) {
 	out := decision.Outcome
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(SeedingCommitRequest{
 			TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 			CorrelationID: correlationID, Outcome: res, Decision: decision,
@@ -1709,11 +1717,6 @@ func (s *Service) commitSeedingOutcome(uow SeedingUnitOfWork, req CommandRequest
 			if prior, ok := store.AsPriorCommandOutcome(err); ok {
 				return prior, nil
 			}
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return s.canonicalSeedingOutcome(req.CommandID, res), nil
@@ -1751,7 +1754,7 @@ func (s *Service) canonicalSeedingOutcome(commandID string, fallback envelope.Re
 
 func (s *Service) rejectSeeding(ctx context.Context, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID == "" {
-		return s.reject(req, correlationID, tournamentID, reason)
+		return s.reject(ctx, req, correlationID, tournamentID, reason)
 	}
 	uow, err := s.seeding.BeginStandaloneCommand(ctx, req.CommandID)
 	if err != nil {
@@ -1765,6 +1768,11 @@ func (s *Service) rejectSeeding(ctx context.Context, req CommandRequest, correla
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(SeedingCommitRequest{
 		TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 		CorrelationID: correlationID, Outcome: res,
@@ -1773,18 +1781,18 @@ func (s *Service) rejectSeeding(ctx context.Context, req CommandRequest, correla
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalSeedingOutcome(req.CommandID, res), nil
 }
 
-func (s *Service) rejectSeedingUoW(uow SeedingUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
+func (s *Service) rejectSeedingUoW(ctx context.Context, uow SeedingUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if err := uow.Commit(SeedingCommitRequest{
 		TournamentID: tournamentID, CommandID: req.CommandID, CommandType: req.Type,
 		CorrelationID: correlationID, Outcome: res,
@@ -1793,11 +1801,6 @@ func (s *Service) rejectSeedingUoW(uow SeedingUnitOfWork, req CommandRequest, co
 		if prior, ok := store.AsPriorCommandOutcome(err); ok {
 			return prior, nil
 		}
-		return envelope.Result{}, err
-	}
-	rec := audit.NewRejection(req.CommandID, firstNonEmpty(correlationID, req.CommandID), req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
 		return envelope.Result{}, err
 	}
 	return s.canonicalSeedingOutcome(req.CommandID, res), nil
@@ -1812,7 +1815,7 @@ func (s *Service) persistSeedingRejectStandalone(ctx context.Context, req Comman
 	if prior, ok := uow.LookupOutcome(req.CommandID); ok {
 		return prior, nil
 	}
-	return s.commitSeedingOutcome(uow, req, decision, tournamentID, correlationID)
+	return s.commitSeedingOutcome(ctx, uow, req, decision, tournamentID, correlationID)
 }
 
 // Memory/capability RecordMatchResult still uses BeginExisting + persistTournamentTx
@@ -2128,13 +2131,18 @@ func standingsProjectionToMap(page store.StandingsProjection) map[string]any {
 	}
 }
 
-func (s *Service) commitOutcome(uow TournamentUnitOfWork, req CommandRequest, t *domain.Tournament, out domain.CommandOutcome, tournamentID, correlationID string, matchSource *MatchResultSource, extraPayload ...map[string]any) (envelope.Result, error) {
+func (s *Service) commitOutcome(ctx context.Context, uow TournamentUnitOfWork, req CommandRequest, t *domain.Tournament, out domain.CommandOutcome, tournamentID, correlationID string, matchSource *MatchResultSource, extraPayload ...map[string]any) (envelope.Result, error) {
 	if prior, ok := uow.LookupOutcome(req.CommandID); ok {
 		return prior, nil
 	}
 	if out.Rejected() {
 		reason := string(out.Rejection.Code)
 		res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+		rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+			WithTournament(tournamentID)
+		if err := s.audit.RecordRejection(ctx, rec); err != nil {
+			return envelope.Result{}, err
+		}
 		if err := uow.Commit(CommitRequest{
 			Tournament:        t,
 			CommandID:         req.CommandID,
@@ -2142,11 +2150,6 @@ func (s *Service) commitOutcome(uow TournamentUnitOfWork, req CommandRequest, t 
 			MatchResultSource: matchSource,
 			ProjectionChanged: false,
 		}); err != nil {
-			return envelope.Result{}, err
-		}
-		rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-			WithTournament(tournamentID)
-		if err := s.audit.RecordRejection(rec); err != nil {
 			return envelope.Result{}, err
 		}
 		return res, nil
@@ -2201,6 +2204,7 @@ func (s *Service) commitOutcome(uow TournamentUnitOfWork, req CommandRequest, t 
 	}); err != nil {
 		return envelope.Result{}, err
 	}
+	recordCommittedTournamentCompletion(context.Background(), out)
 	return res, nil
 }
 
@@ -2243,7 +2247,7 @@ func factChangesPublicBracketProjection(f domain.Fact) bool {
 	}
 }
 
-func (s *Service) rejectUoW(uow TournamentUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
+func (s *Service) rejectUoW(ctx context.Context, uow TournamentUnitOfWork, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID != "" {
 		if prior, ok := uow.LookupOutcome(req.CommandID); ok {
 			return prior, nil
@@ -2253,6 +2257,11 @@ func (s *Service) rejectUoW(uow TournamentUnitOfWork, req CommandRequest, correl
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if req.CommandID != "" {
 		if err := uow.Commit(CommitRequest{
 			CommandID: req.CommandID,
@@ -2263,15 +2272,10 @@ func (s *Service) rejectUoW(uow TournamentUnitOfWork, req CommandRequest, correl
 	} else {
 		_ = uow.Rollback()
 	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
-		return envelope.Result{}, err
-	}
 	return res, nil
 }
 
-func (s *Service) reject(req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
+func (s *Service) reject(ctx context.Context, req CommandRequest, correlationID, tournamentID, reason string) (envelope.Result, error) {
 	if req.CommandID != "" {
 		if prior, ok := s.repo.LookupOutcome(req.CommandID); ok {
 			return prior, nil
@@ -2281,6 +2285,11 @@ func (s *Service) reject(req CommandRequest, correlationID, tournamentID, reason
 		correlationID = req.CommandID
 	}
 	res := envelope.Rejected(req.CommandID, req.Type, reason, nil)
+	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
+		WithTournament(tournamentID)
+	if err := s.audit.RecordRejection(ctx, rec); err != nil {
+		return envelope.Result{}, err
+	}
 	if req.CommandID != "" {
 		if err := s.repo.Commit(CommitRequest{
 			CommandID: req.CommandID,
@@ -2288,11 +2297,6 @@ func (s *Service) reject(req CommandRequest, correlationID, tournamentID, reason
 		}); err != nil {
 			return envelope.Result{}, err
 		}
-	}
-	rec := audit.NewRejection(req.CommandID, correlationID, req.SessionID, req.PlayerID, reason, s.clock.Now()).
-		WithTournament(tournamentID)
-	if err := s.audit.RecordRejection(rec); err != nil {
-		return envelope.Result{}, err
 	}
 	return res, nil
 }

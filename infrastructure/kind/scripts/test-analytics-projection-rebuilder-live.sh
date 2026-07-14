@@ -30,14 +30,30 @@ kafka() {
 }
 
 ch_admin() {
-  kubectl -n "${KIND_NAMESPACE}" exec -i deploy/clickhouse -- \
+  kubectl -n "${KIND_NAMESPACE}" exec deploy/clickhouse -- \
     clickhouse-client --user clickhouse_admin --password local-only-ch-admin --multiquery "$@"
 }
 
 ch_runtime() {
-  kubectl -n "${KIND_NAMESPACE}" exec -i deploy/clickhouse -- \
-    clickhouse-client --user analytics_runtime --password local-only-analytics-runtime \
-      --database "${DB}" "$@"
+  local retries="${KIND_ANALYTICS_QUERY_RETRIES:-5}" attempt output rc=1
+  [[ "${retries}" =~ ^[1-9][0-9]*$ ]] && (( retries <= 20 )) \
+    || die "KIND_ANALYTICS_QUERY_RETRIES must be an integer from 1 to 20"
+  # This helper is intentionally SELECT-only. A transient API-server websocket
+  # EOF may be retried without replaying a mutation or rebuild request.
+  for ((attempt = 1; attempt <= retries; attempt++)); do
+    if output="$(kubectl -n "${KIND_NAMESPACE}" exec deploy/clickhouse -- \
+        clickhouse-client --user analytics_runtime --password local-only-analytics-runtime \
+          --database "${DB}" "$@" 2>&1)"; then
+      printf '%s\n' "${output}"
+      return 0
+    else
+      rc=$?
+    fi
+    (( attempt < retries )) && sleep 2
+  done
+  echo "ClickHouse read failed after ${retries} attempts" >&2
+  printf '%s\n' "${output}" >&2
+  return "${rc}"
 }
 
 cleanup() {
@@ -102,15 +118,34 @@ metadata:
   labels:
     app: analytics-projection-rebuilder-live-test
     uno-arena.local/live-test: "true"
+    app.kubernetes.io/name: analytics
+    unoarena.io/component: projection-rebuilder
+    unoarena.io/metrics-exposed: "true"
+    unoarena.io/metrics-scrape: pod
 spec:
+  serviceAccountName: analytics-projection-rebuilder
+  automountServiceAccountToken: false
   restartPolicy: Never
   terminationGracePeriodSeconds: 5
   containers:
     - name: projection-rebuilder
       image: uno-arena/analytics:local
       imagePullPolicy: IfNotPresent
+      ports: [{name: metrics, containerPort: 9090}]
       env:
         - {name: WORKER_ROLE, value: analytics-projection-rebuilder}
+        - {name: TELEMETRY_MODE, value: required}
+        - {name: SERVICE_NAME, value: analytics}
+        - {name: DEPLOYMENT_ENV, value: kind}
+        - {name: SERVICE_VERSION, value: local}
+        - {name: UNOARENA_COMPONENT, value: projection-rebuilder}
+        - {name: METRICS_ADDR, value: ":9090"}
+        - {name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://alloy-otlp.observability.svc.cluster.local:4317}
+        - {name: OTEL_EXPORTER_OTLP_PROTOCOL, value: grpc}
+        - {name: OTEL_TRACES_SAMPLER, value: parentbased_always_on}
+        - {name: OTEL_GO_X_OBSERVABILITY, value: "true"}
+        - name: POD_UID
+          valueFrom: {fieldRef: {fieldPath: metadata.uid}}
         - {name: CLICKHOUSE_URL, value: http://clickhouse.uno-arena.svc.cluster.local:8123}
         - {name: CLICKHOUSE_DB, value: "${DB}"}
         - {name: KAFKA_BROKERS, value: kafka.uno-arena.svc.cluster.local:9092}
@@ -135,7 +170,7 @@ YAML
 kubectl -n "${KIND_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Running "pod/${POD}" --timeout=60s >/dev/null \
   || { kubectl -n "${KIND_NAMESPACE}" describe "pod/${POD}"; die "rebuilder Pod did not start"; }
 deadline=$((SECONDS + 60))
-until kubectl -n "${KIND_NAMESPACE}" logs "${POD}" 2>/dev/null | grep -q projection_rebuilder_startup; do
+until kubectl -n "${KIND_NAMESPACE}" logs "${POD}" 2>/dev/null | grep -q projection_rebuilder_started; do
   (( SECONDS < deadline )) || { kubectl -n "${KIND_NAMESPACE}" logs "${POD}" >&2; die "rebuilder did not report startup"; }
   sleep 1
 done

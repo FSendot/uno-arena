@@ -441,7 +441,7 @@ type FailingAudit struct {
 	Err error
 }
 
-func (f FailingAudit) RecordRejection(audit.RejectionRecord) error {
+func (f FailingAudit) RecordRejection(context.Context, audit.RejectionRecord) error {
 	if f.Err != nil {
 		return f.Err
 	}

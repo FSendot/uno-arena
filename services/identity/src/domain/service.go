@@ -9,30 +9,38 @@ import (
 
 // ServiceDeps wires Identity application use-cases for the offline slice.
 type ServiceDeps struct {
-	Players      PlayerRepository
-	Sessions     SessionRepository
-	Hasher       PasswordHasher
-	IDs          IDGenerator
-	Tokens       TokenGenerator
-	Clock        Clock
-	SessionTTL   time.Duration
-	Transport    InvalidationTransport
-	DrainLimit   int
-	AllowedRoles []string // OIDC ACL allowlist; empty → DefaultAllowedRoles
+	Players       PlayerRepository
+	Sessions      SessionRepository
+	Hasher        PasswordHasher
+	IDs           IDGenerator
+	Tokens        TokenGenerator
+	Clock         Clock
+	SessionTTL    time.Duration
+	Transport     InvalidationTransport
+	DrainLimit    int
+	AllowedRoles  []string // OIDC ACL allowlist; empty → DefaultAllowedRoles
+	PlayerCreated PlayerCreationRecorder
+}
+
+// PlayerCreationRecorder owns Identity's post-commit player-creation signal.
+// Implementations must be process-local and must not add player identifiers as labels.
+type PlayerCreationRecorder interface {
+	RecordPlayerCreated(context.Context)
 }
 
 // Service implements register/login/session validation with single-active-session.
 type Service struct {
-	players      PlayerRepository
-	sessions     SessionRepository
-	hasher       PasswordHasher
-	ids          IDGenerator
-	tokens       TokenGenerator
-	clock        Clock
-	sessionTTL   time.Duration
-	transport    InvalidationTransport
-	drainLimit   int
-	allowedRoles []string
+	players       PlayerRepository
+	sessions      SessionRepository
+	hasher        PasswordHasher
+	ids           IDGenerator
+	tokens        TokenGenerator
+	clock         Clock
+	sessionTTL    time.Duration
+	transport     InvalidationTransport
+	drainLimit    int
+	allowedRoles  []string
+	playerCreated PlayerCreationRecorder
 }
 
 func NewService(d ServiceDeps) *Service {
@@ -53,16 +61,17 @@ func NewService(d ServiceDeps) *Service {
 		allowed = append([]string(nil), DefaultAllowedRoles...)
 	}
 	return &Service{
-		players:      d.Players,
-		sessions:     d.Sessions,
-		hasher:       d.Hasher,
-		ids:          d.IDs,
-		tokens:       d.Tokens,
-		clock:        clock,
-		sessionTTL:   ttl,
-		transport:    d.Transport,
-		drainLimit:   limit,
-		allowedRoles: allowed,
+		players:       d.Players,
+		sessions:      d.Sessions,
+		hasher:        d.Hasher,
+		ids:           d.IDs,
+		tokens:        d.Tokens,
+		clock:         clock,
+		sessionTTL:    ttl,
+		transport:     d.Transport,
+		drainLimit:    limit,
+		allowedRoles:  allowed,
+		playerCreated: d.PlayerCreated,
 	}
 }
 
@@ -112,6 +121,9 @@ func (s *Service) Register(ctx context.Context, username, password string) (Play
 	if err := s.players.RegisterWithDefaultACL(ctx, p, "player"); err != nil {
 		return Player{}, MapRepoError(err)
 	}
+	if s.playerCreated != nil {
+		s.playerCreated.RecordPlayerCreated(ctx)
+	}
 	return p, nil
 }
 
@@ -154,6 +166,9 @@ func (s *Service) EstablishOIDCSession(ctx context.Context, issuer, subject, use
 	player, _, err := s.players.LinkOrResolveExternal(ctx, issuer, subject, username, newPlayer, accepted)
 	if err != nil {
 		return LoginResult{}, MapRepoError(err)
+	}
+	if player.ID == newPlayer.ID && s.playerCreated != nil {
+		s.playerCreated.RecordPlayerCreated(ctx)
 	}
 	return s.establishSession(ctx, player)
 }

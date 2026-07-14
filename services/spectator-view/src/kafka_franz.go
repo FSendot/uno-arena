@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/plugin/kotel"
 )
 
 const (
@@ -36,6 +37,10 @@ func newFranzSpectatorSafeClient(cfg SpectatorSafeKafkaConfig) (*franzSpectatorS
 		return nil, fmt.Errorf("kafka group/topic/dlq required")
 	}
 	cl, err := kgo.NewClient(
+		kgo.WithHooks(kotel.NewKotel(kotel.WithTracer(kotel.NewTracer(
+			kotel.TracerProvider(processTracerProvider()),
+			kotel.TracerPropagator(processPropagator()),
+		))).Hooks()...),
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(cfg.Topic),
@@ -89,6 +94,7 @@ func (c *franzSpectatorSafeClient) PublishDLQ(ctx context.Context, original Cons
 		Key:     append([]byte(nil), original.Key...),
 		Value:   append([]byte(nil), original.Value...),
 		Headers: dlqHeaders(meta),
+		Context: ctx,
 	}
 	results := c.cl.ProduceSync(ctx, rec)
 	if err := results.FirstErr(); err != nil {
@@ -109,6 +115,7 @@ func consumerRecordFromKgo(r *kgo.Record) ConsumerRecord {
 		Offset:    r.Offset,
 		Key:       append([]byte(nil), r.Key...),
 		Value:     append([]byte(nil), r.Value...),
+		Context:   r.Context,
 	}
 	if len(r.Headers) > 0 {
 		rec.Headers = make(map[string]string, len(r.Headers))

@@ -11,6 +11,7 @@ export GOCACHE
 GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 
 .PHONY: help fmt-shared test-shared vet-shared \
+	test-telemetry \
 	test-analytics test-game-integrity test-game-integrity-integration deps-game-integrity \
 	test-gateway test-identity \
 	test-ranking test-room-gameplay test-spectator-view test-tournament-orchestration \
@@ -18,6 +19,13 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	test-capability-stack test-client-checkpoint test-client-dockerfile \
 	check build-shared \
 	kind-render kind-validate kind-create-cluster kind-build-load-bootstrap \
+	kind-verify-portable-images \
+	kind-install-istio kind-deploy-observability kind-wait-observability \
+	kind-test-observability-structure kind-test-observability-live \
+	kind-test-observability-business-live kind-test-observability-trace-live \
+	kind-test-observability-security-live kind-test-observability-outage-live \
+	kind-test-observability-persistence-live kind-test-observability-acceptance-live \
+	kind-port-forward-grafana \
 	kind-build-load-services kind-deploy-game-integrity kind-deploy-services \
 	kind-run-live-probes kind-clean-deploy kind-test-clean-deployment-structure \
 	kind-load-debezium-server kind-status-debezium-server kind-test-debezium-server-structure \
@@ -52,7 +60,8 @@ help:
 	@echo "Targets (no network fetch unless noted):"
 	@echo "  fmt-shared             gofmt shared module"
 	@echo "  test-shared            go test ./shared/... with GOWORK=off GOPROXY=off"
-	@echo "  test-modules           test shared + all eight service modules (GOWORK=off)"
+	@echo "  test-modules           test shared + platform telemetry + all eight service modules (GOWORK=off)"
+	@echo "  test-telemetry         offline platform telemetry tests (requires cached pinned modules)"
 	@echo "  vet-shared             go vet ./shared/... with GOPROXY=off"
 	@echo "  deps-game-integrity    NETWORKED: go mod download for GI (Kurrent client cache)"
 	@echo "  test-game-integrity    offline GI unit tests (requires module cache; run deps-game-integrity once)"
@@ -119,8 +128,21 @@ help:
 	@echo "  kind-render            offline AsyncAPI → kind Kafka topic artifacts"
 	@echo "  kind-validate          offline kind foundation checks incl. CDC/retention (no pull / no cluster)"
 	@echo "  kind-create-cluster    EXPLICIT: create disposable kind cluster uno-arena"
+	@echo "  kind-verify-portable-images NETWORKED/read-only: verify AMD64+ARM64 children for every generic OCI index"
 	@echo "  kind-build-load-bootstrap  EXPLICIT: docker build + kind load bootstrap image"
-	@echo "  kind-build-load-services   EXPLICIT/NETWORKED: build + load all 8 ARM64 service images"
+	@echo "  kind-build-load-services   EXPLICIT/NETWORKED: build + load all 8 services for the kind node architecture"
+	@echo "  kind-install-istio         EXPLICIT: install vendored Istio Ambient 1.30.2"
+	@echo "  kind-deploy-observability  EXPLICIT: install Alloy/Loki/Tempo/Prometheus/Grafana after MinIO"
+	@echo "  kind-wait-observability    read-only readiness wait for observability workloads"
+	@echo "  kind-test-observability-structure offline chart/storage/Istio deployment contracts"
+	@echo "  kind-test-observability-live EXPLICIT: data sources, dashboards, targets, and scoped RBAC"
+	@echo "  kind-test-observability-business-live EXPLICIT: real CLI flows + exact business counter contracts/deltas"
+	@echo "  kind-test-observability-trace-live EXPLICIT: GameCompleted Tempo trace + Loki trace/correlation linkage"
+	@echo "  kind-test-observability-security-live EXPLICIT: Prometheus-only 9090 and application-only OTLP ingress"
+	@echo "  kind-test-observability-outage-live EXPLICIT: gameplay continuity and trace recovery across Alloy outage"
+	@echo "  kind-test-observability-persistence-live EXPLICIT: Loki/Tempo evidence after backend + MinIO pod replacement"
+	@echo "  kind-test-observability-acceptance-live EXPLICIT: ordered application observability acceptance lane"
+	@echo "  kind-port-forward-grafana  EXPLICIT: loopback-only Grafana port-forward"
 	@echo "  kind-deploy-game-integrity EXPLICIT: helm upgrade --install Game Integrity (kind values)"
 	@echo "  kind-deploy-services       EXPLICIT: deploy all 8 services in dependency order"
 	@echo "  kind-run-live-probes       EXPLICIT/NETWORKED: run the complete kind acceptance probe lane"
@@ -239,9 +261,9 @@ test-tournament-helm:
 test-tournament-integration:
 	@test -n "$$TOURNAMENT_POSTGRES_URL" || (echo "TOURNAMENT_POSTGRES_URL required" >&2; exit 1)
 	cd services/tournament-orchestration/src && GOWORK=off GOPROXY=off GOSUMDB=off \
-		$(GO) test -count=1 -tags=integration -timeout 180s ./store/...
+		$(GO) test -count=1 -tags=integration -parallel 2 -timeout 300s ./store/...
 	cd services/tournament-orchestration/src && GOWORK=off GOPROXY=off GOSUMDB=off \
-		$(GO) test -count=1 -tags=integration -timeout 180s .
+		$(GO) test -count=1 -tags=integration -parallel 2 -timeout 300s .
 # EXPLICIT + NETWORKED: verifies kind-uno-arena, creates unoarena_tournament_test_*,
 # port-forwards postgres-tournament, runs store + main-package service integration
 # as tournament_runtime, drops DB.
@@ -419,7 +441,10 @@ kind-test-redis-aof:
 test-tournament-orchestration:
 	cd services/tournament-orchestration/src && $(GO_TEST_ENV) $(GO) test ./...
 
-test-modules: test-shared \
+test-telemetry:
+	cd platform/telemetry && $(GO_TEST_ENV) $(GO) test ./...
+
+test-modules: test-shared test-telemetry \
 	test-analytics test-game-integrity test-gateway test-identity \
 	test-ranking test-room-gameplay test-spectator-view test-tournament-orchestration
 
@@ -474,11 +499,55 @@ kind-validate:
 kind-create-cluster:
 	./infrastructure/kind/scripts/create-cluster.sh
 
+kind-verify-portable-images:
+	./infrastructure/kind/scripts/verify-portable-images.sh
+
 kind-build-load-bootstrap:
 	./infrastructure/kind/scripts/build-load-bootstrap.sh
 
 kind-build-load-services:
 	./infrastructure/kind/scripts/build-load-services.sh
+
+kind-install-istio:
+	./infrastructure/kind/scripts/install-istio.sh
+
+kind-deploy-observability:
+	./infrastructure/kind/scripts/deploy-observability.sh
+
+kind-wait-observability:
+	./infrastructure/kind/scripts/wait-observability.sh
+
+kind-test-observability-structure:
+	./infrastructure/kind/scripts/test-observability-structure.sh
+
+kind-test-observability-live:
+	./infrastructure/kind/scripts/test-observability-live.sh
+
+kind-test-observability-business-live:
+	./infrastructure/kind/scripts/test-observability-business-live.sh
+
+kind-test-observability-trace-live:
+	./infrastructure/kind/scripts/test-observability-trace-live.sh
+
+kind-test-observability-security-live:
+	./infrastructure/kind/scripts/test-observability-security-live.sh
+
+kind-test-observability-outage-live:
+	./infrastructure/kind/scripts/test-observability-outage-live.sh
+
+kind-test-observability-persistence-live:
+	./infrastructure/kind/scripts/test-observability-persistence-live.sh
+
+kind-test-observability-acceptance-live:
+	./infrastructure/kind/scripts/test-observability-live.sh
+	./infrastructure/kind/scripts/test-observability-business-live.sh
+	./infrastructure/kind/scripts/test-observability-trace-live.sh
+	./infrastructure/kind/scripts/test-observability-security-live.sh
+	./infrastructure/kind/scripts/test-observability-outage-live.sh
+	./infrastructure/kind/scripts/test-observability-persistence-live.sh
+
+kind-port-forward-grafana:
+	./infrastructure/kind/scripts/port-forward-grafana.sh
 
 kind-deploy-game-integrity:
 	./infrastructure/kind/scripts/deploy-game-integrity.sh

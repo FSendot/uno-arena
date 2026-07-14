@@ -28,6 +28,9 @@ func NewPool(ctx context.Context, dsn string) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
+	if tracer := pgxTracer(); tracer != nil {
+		cfg.ConnConfig.Tracer = tracer
+	}
 	p, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err

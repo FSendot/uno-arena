@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-logs-config
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+data:
+  config.alloy: |
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+
+    discovery.relabel "pod_logs" {
+      targets = discovery.kubernetes.pods.targets
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        regex = {{ .Values.applicationNamespace | quote }}
+        action = "keep"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        target_label = "service"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_unoarena_io_component"]
+        target_label = "component"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label = "container"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+        separator = "/"
+        replacement = "/var/log/pods/*$1/*.log"
+        target_label = "__path__"
+      }
+    }
+
+    local.file_match "pod_logs" {
+      path_targets = discovery.relabel.pod_logs.output
+    }
+
+    loki.source.file "pod_logs" {
+      targets = local.file_match.pod_logs.targets
+      forward_to = [loki.process.pod_logs.receiver]
+    }
+
+    loki.process "pod_logs" {
+      stage.cri {}
+      stage.json {
+        expressions = { level = "level" }
+      }
+      stage.labels { values = { level = "" } }
+      stage.label_drop {
+        values = ["filename", "service_name", "stream"]
+      }
+      forward_to = [loki.write.default.receiver]
+    }
+
+    loki.write "default" {
+      endpoint { url = "http://loki.{{ include "uno-observability.namespace" . }}.svc.cluster.local:3100/loki/api/v1/push" }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-otlp-config
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+data:
+  config.alloy: |
+    otelcol.receiver.otlp "default" {
+      grpc { endpoint = "0.0.0.0:4317" }
+      http { endpoint = "0.0.0.0:4318" }
+      output { traces = [otelcol.processor.batch.default.input] }
+    }
+
+    otelcol.processor.batch "default" {
+      timeout = "5s"
+      send_batch_size = 512
+      send_batch_max_size = 512
+      output { traces = [otelcol.exporter.otlp.tempo.input] }
+    }
+
+    otelcol.exporter.otlp "tempo" {
+      timeout = "30s"
+      sending_queue {
+        enabled = true
+        num_consumers = 2
+        queue_size = 2048
+      }
+      retry_on_failure {
+        enabled = true
+        max_elapsed_time = "10m"
+      }
+      client {
+        endpoint = "tempo.{{ include "uno-observability.namespace" . }}.svc.cluster.local:4317"
+        tls { insecure = true }
+      }
+    }

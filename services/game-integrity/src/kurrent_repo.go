@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
+	"go.opentelemetry.io/otel/trace"
 
 	"unoarena/services/game-integrity/domain"
 )
@@ -47,6 +48,7 @@ type KurrentStreamRepository struct {
 	provider        KeyProvider
 	pageSize        uint64
 	readinessStream string
+	tracer          trace.Tracer
 	mu              sync.Mutex
 	dekCache        map[string]cachedStreamDEK // stream -> committed DEK + wrap identity
 	roomStripes     [streamLockStripeCount]sync.Mutex
@@ -64,6 +66,23 @@ type KurrentStreamRepository struct {
 	// unitLoadDeckState / unitClaimGameBinding are optional test doubles for claim-lifecycle unit tests.
 	unitLoadDeckState    func(ctx context.Context, roomID domain.RoomID, gameID domain.GameID, stream string) (*DeckState, []*kurrentdb.ResolvedEvent, error)
 	unitClaimGameBinding func(ctx context.Context, gameID domain.GameID, roomID domain.RoomID) (string, error)
+}
+
+// WithTracer installs the process-owned tracer without relying on the global
+// OpenTelemetry tracer provider. Tests and offline constructors remain no-op.
+func (r *KurrentStreamRepository) WithTracer(tracer trace.Tracer) *KurrentStreamRepository {
+	if r != nil {
+		r.tracer = tracer
+	}
+	return r
+}
+
+func (r *KurrentStreamRepository) startSpan(ctx context.Context, name string) (context.Context, func()) {
+	if r == nil || r.tracer == nil {
+		return ctx, func() {}
+	}
+	ctx, span := r.tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
+	return ctx, func() { span.End() }
 }
 
 type cachedStreamDEK struct {
@@ -144,6 +163,8 @@ func (r *KurrentStreamRepository) Close() error {
 // Ready probes Kurrent with a bounded read, runs the key-provider ready check,
 // and decrypts a fixed encrypted readiness sentinel (create-once if absent).
 func (r *KurrentStreamRepository) Ready(ctx context.Context) error {
+	ctx, endSpan := r.startSpan(ctx, "game-integrity.kurrent.ready")
+	defer endSpan()
 	if r == nil || r.client == nil || r.provider == nil {
 		return errors.New("kurrent repository unwired")
 	}
@@ -843,6 +864,8 @@ func (r *KurrentStreamRepository) loadDeckState(ctx context.Context, roomID doma
 }
 
 func (r *KurrentStreamRepository) appendEncryptedJSON(ctx context.Context, stream string, roomID domain.RoomID, gameID domain.GameID, originalEventID, originalEventType string, body any, domainRev uint64, expected kurrentdb.StreamState) error {
+	ctx, endSpan := r.startSpan(ctx, "game-integrity.kurrent.append")
+	defer endSpan()
 	plain, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -1181,6 +1204,8 @@ func (r *KurrentStreamRepository) cachedDEKCount() int {
 }
 
 func (r *KurrentStreamRepository) readAllEvents(ctx context.Context, stream string) ([]*kurrentdb.ResolvedEvent, error) {
+	ctx, endSpan := r.startSpan(ctx, "game-integrity.kurrent.read")
+	defer endSpan()
 	var out []*kurrentdb.ResolvedEvent
 	var from kurrentdb.StreamPosition = kurrentdb.Start{}
 	for {
@@ -1233,6 +1258,8 @@ func (r *KurrentStreamRepository) readLatestEvent(ctx context.Context, stream st
 }
 
 func (r *KurrentStreamRepository) readOneEvent(ctx context.Context, stream string, direction kurrentdb.Direction, from kurrentdb.StreamPosition) (*kurrentdb.ResolvedEvent, error) {
+	ctx, endSpan := r.startSpan(ctx, "game-integrity.kurrent.read_one")
+	defer endSpan()
 	rs, err := r.client.ReadStream(ctx, stream, kurrentdb.ReadStreamOptions{
 		Direction: direction,
 		From:      from,

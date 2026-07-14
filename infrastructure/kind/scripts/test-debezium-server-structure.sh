@@ -27,9 +27,8 @@ grep -qEi 'SSE E2E not claimed|Gateway SSE E2E not claimed|not claim' "${LIVE_RE
   || die "live Redis script must disclaim Gateway SSE E2E"
 
 # --- Image: exact quay digest + Never; node-native crictl pull (no kind load / no local runtime tags) ---
-ARM64_DIGEST="sha256:3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08"
-MULTIARCH_DIGEST="sha256:d70982832b59186e364ab616fee3f5aec84d419dea14f18df354b55ac0dd1984"
-SOURCE_IMAGE="quay.io/debezium/server:3.6.0.Final@${ARM64_DIGEST}"
+MULTIARCH_DIGEST="sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d"
+SOURCE_IMAGE="quay.io/debezium/server:3.6.0.Final@${MULTIARCH_DIGEST}"
 STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 SHORT_STALE_TAG="uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 
@@ -54,13 +53,13 @@ grep -qF "${SHORT_STALE_TAG}" "${MANIFEST}" && die "manifest must not reference 
 grep -qF "${STALE_RUNTIME_TAG}" "${LOAD}" || die "load script must remove prior stale runtime tag ${STALE_RUNTIME_TAG}"
 grep -qF 'RUNTIME_IMAGE' "${MANIFEST}" && die "Server ConfigMap must not claim RUNTIME_IMAGE local tag"
 grep -qF 'SOURCE_IMAGE_REF' "${MANIFEST}" || die "ConfigMap must record SOURCE_IMAGE_REF"
-grep -qF "${ARM64_DIGEST}" "${MANIFEST}" || die "manifest must record ARM64 source digest"
 grep -qF "${MULTIARCH_DIGEST}" "${MANIFEST}" || die "manifest must record multiarch index digest"
 # Loader: docker exec + crictl pull exact digest; never kind load.
 grep -qF 'docker exec' "${LOAD}" || die "load script must docker exec into kind node"
 grep -qF 'crictl pull' "${LOAD}" || die "load script must crictl pull exact digest on node"
 grep -qF 'crictl inspecti' "${LOAD}" || die "load script must verify via crictl inspecti"
-grep -qF 'arm64' "${LOAD}" || die "load script must verify architecture arm64"
+grep -qF 'expected_arch="amd64"' "${LOAD}" || die "load script must resolve AMD64"
+grep -qF 'expected_arch="arm64"' "${LOAD}" || die "load script must resolve ARM64"
 grep -qF 'kind get nodes' "${LOAD}" || die "load script must identify kind node via kind get nodes"
 if grep -E 'kind[[:space:]]+load[[:space:]]+docker-image' "${LOAD}" >/dev/null 2>&1; then
   die "load script must not use kind load for Debezium"
@@ -72,8 +71,7 @@ if grep -E '^[[:space:]]*docker[[:space:]]+tag\b' "${LOAD}" >/dev/null 2>&1; the
   die "load script must not retag to local runtime tags"
 fi
 grep -qF 'crictl rmi' "${LOAD}" || die "load script must crictl rmi prior known refs before pull"
-grep -qF '3754ca3df34bd257bb21b030a3f6a5e0a31d574f8637f051803d0e1032b18d08' "${LOAD}" \
-  || die "load script must use ARM64 source digest"
+grep -qF "${MULTIARCH_DIGEST}" "${LOAD}" || die "load script must use multiarch index digest"
 # Fail-closed: reject kind-import aliases in repoDigests; do not encode containerd surgery.
 grep -qF 'docker.io/library/import-' "${LOAD}" \
   || die "load script must fail closed on docker.io/library/import- repoDigests"

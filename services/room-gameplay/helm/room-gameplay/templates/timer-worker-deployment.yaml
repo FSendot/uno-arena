@@ -20,14 +20,23 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-timer-worker
+        app.kubernetes.io/name: room-gameplay
         app.kubernetes.io/part-of: {{ .Release.Name }}
+        unoarena.io/component: room-timer-worker
+        unoarena.io/metrics-scrape: pod
+        unoarena.io/metrics-exposed: "true"
     spec:
+      serviceAccountName: {{ .Release.Name }}-timer-worker
       automountServiceAccountToken: false
       containers:
         - name: timer-worker
           image: {{ include "room-gameplay.image" . | quote }}
           imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
+            {{- include "room-gameplay.telemetryEnv" (dict "root" . "component" "room-timer-worker") | nindent 12 }}
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
             - name: DEPLOYMENT_ENV

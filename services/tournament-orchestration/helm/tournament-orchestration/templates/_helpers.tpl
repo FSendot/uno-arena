@@ -37,3 +37,28 @@
 IfNotPresent
 {{- end -}}
 {{- end -}}
+
+{{- define "tournament-orchestration.telemetryEnv" -}}
+- name: TELEMETRY_MODE
+  value: {{ .root.Values.telemetry.mode | quote }}
+- name: SERVICE_VERSION
+  value: {{ .root.Chart.AppVersion | quote }}
+- name: UNOARENA_COMPONENT
+  value: {{ .component | quote }}
+- name: POD_UID
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.uid
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ .root.Values.telemetry.otlpEndpoint | quote }}
+- name: OTEL_EXPORTER_OTLP_PROTOCOL
+  value: "grpc"
+- name: OTEL_TRACES_SAMPLER
+  value: {{ .root.Values.telemetry.tracesSampler | quote }}
+- name: OTEL_TRACES_SAMPLER_ARG
+  value: {{ .root.Values.telemetry.tracesSamplerArg | quote }}
+- name: OTEL_GO_X_OBSERVABILITY
+  value: "true"
+- name: METRICS_ADDR
+  value: ":9090"
+{{- end -}}

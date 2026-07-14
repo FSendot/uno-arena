@@ -4,6 +4,12 @@ image:
   repository: registry.gitlab.com/group/uno-arena/room-gameplay
   digest: ""
 
+telemetry:
+  mode: required
+  otlpEndpoint: http://alloy-otlp.observability.svc.cluster.local:4317
+  tracesSampler: parentbased_traceidratio
+  tracesSamplerArg: "0.001"
+
 # Peer URLs use Service port 8080 (cluster DNS). See README credential matrix.
 env:
   SERVICE_NAME: room-gameplay
@@ -46,6 +52,16 @@ topology:
     readinessTimeoutSeconds: 60
   runtime:
     mutationQueueCapacity: 16
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+    healthProbes:
+      timeoutSeconds: 1
+      failureThreshold: 3
   pgbouncer:
     enabled: true
     image: edoburu/pgbouncer:v1.24.1-p1@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e
@@ -122,3 +138,8 @@ resources:
   limits:
     cpu: 100m
     memory: 128Mi
+
+healthProbes:
+  periodSeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 3

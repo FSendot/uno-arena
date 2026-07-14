@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -96,22 +96,22 @@ func (w *ReconciliationWorker) loop() {
 func (w *ReconciliationWorker) tick(ctx context.Context) {
 	markers, err := w.store.ClaimPendingReconciliationMarkers(ctx, w.owner, w.batch, w.lease)
 	if err != nil {
-		log.Printf(`{"level":"warn","event":"reconciliation_claim_failed","error":%q}`, err.Error())
+		slog.WarnContext(ctx, "reconciliation claim failed", "event", "reconciliation_claim_failed", "error", err.Error())
 		return
 	}
 	for _, marker := range markers {
 		if err := w.reconcileWithLease(ctx, marker); err != nil {
-			log.Printf(`{"level":"warn","event":"reconciliation_failed","commandId":%q,"error":%q}`, marker.CommandID, err.Error())
+			slog.WarnContext(ctx, "reconciliation failed", "event", "reconciliation_failed", "commandId", marker.CommandID, "error", err.Error())
 			if errors.Is(err, errReconciliationLeaseLost) {
 				continue
 			}
 			if releaseErr := w.store.ReleaseReconciliationClaim(ctx, marker.CommandID, w.owner, reconciliationRetryDelay(marker.Attempts)); releaseErr != nil {
-				log.Printf(`{"level":"warn","event":"reconciliation_release_failed","commandId":%q,"error":%q}`, marker.CommandID, releaseErr.Error())
+				slog.WarnContext(ctx, "reconciliation release failed", "event", "reconciliation_release_failed", "commandId", marker.CommandID, "error", releaseErr.Error())
 			}
 		}
 	}
 	if len(markers) > 0 {
-		log.Printf(`{"level":"info","event":"reconciliation_tick","markers":%d}`, len(markers))
+		slog.InfoContext(ctx, "reconciliation batch processed", "event", "reconciliation_tick", "markers", len(markers))
 	}
 }
 

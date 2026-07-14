@@ -254,7 +254,7 @@ func NewMemoryAudit() *MemoryAudit {
 	return &MemoryAudit{records: make([]audit.RejectionRecord, 0)}
 }
 
-func (a *MemoryAudit) RecordRejection(record audit.RejectionRecord) error {
+func (a *MemoryAudit) RecordRejection(_ context.Context, record audit.RejectionRecord) error {
 	if err := record.Validate(); err != nil {
 		return err
 	}

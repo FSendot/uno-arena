@@ -52,4 +52,9 @@ kubectl -n "${KIND_NAMESPACE}" wait --for=condition=complete "job/register-debez
 echo "waiting for deployment/debezium-server-room-realtime"
 kubectl -n "${KIND_NAMESPACE}" rollout status "deployment/debezium-server-room-realtime" --timeout="${TIMEOUT}"
 
+kubectl -n observability rollout status deployment/minio --timeout="${TIMEOUT}"
+if kubectl -n observability get job/minio-create-observability-buckets >/dev/null 2>&1; then
+  kubectl -n observability wait --for=condition=complete job/minio-create-observability-buckets --timeout="${TIMEOUT}"
+fi
+
 echo "ok kind-wait"

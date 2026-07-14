@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+
 	"unoarena/services/spectator-view/domain"
 	"unoarena/services/spectator-view/store"
 )
@@ -22,6 +24,7 @@ type ConsumerRecord struct {
 	Value     []byte
 	// Headers are optional (DLQ operational metadata). Live safe-events apply ignores them.
 	Headers map[string]string
+	Context context.Context
 }
 
 // DLQFailureMeta is sanitized operational metadata published with a DLQ record.
@@ -302,6 +305,13 @@ func (c *SpectatorSafeKafkaConsumer) ProcessBatch(ctx context.Context, recs []Co
 }
 
 func (c *SpectatorSafeKafkaConsumer) processOne(ctx context.Context, rec ConsumerRecord) error {
+	if rec.Context != nil {
+		ctx = rec.Context
+	} else {
+		ctx = processPropagator().Extract(ctx, propagation.MapCarrier(rec.Headers))
+	}
+	ctx, span := processTracerProvider().Tracer("unoarena/services/spectator-view").Start(ctx, "spectator-view.kafka.process")
+	defer span.End()
 	key := strings.TrimSpace(string(rec.Key))
 	sourceTopic := firstNonEmpty(rec.Topic, c.cfg.Topic)
 

@@ -169,7 +169,7 @@ func TestRedis_RecoveryConcurrentApplyVsRebuild(t *testing.T) {
 	seedRoomSeq1(t, s, ctx, room)
 
 	var wg sync.WaitGroup
-	var applyOK, rebuildOK, rebuildStale atomic.Int64
+	var applyOK, applyCAS, rebuildOK, rebuildStale atomic.Int64
 	const n = 12
 	for i := 0; i < n; i++ {
 		wg.Add(2)
@@ -181,6 +181,12 @@ func TestRedis_RecoveryConcurrentApplyVsRebuild(t *testing.T) {
 				RoomID: room, Sequence: 2,
 				Payload: map[string]any{"currentPlayerId": "p1"},
 			}})
+			if errors.Is(err, store.ErrCASConflict) {
+				// Twelve concurrent generation swaps may exhaust Apply's bounded
+				// inner CAS retry budget. The Kafka caller owns the outer retry.
+				applyCAS.Add(1)
+				return
+			}
 			if err != nil {
 				t.Errorf("apply: %v", err)
 				return
@@ -216,8 +222,8 @@ func TestRedis_RecoveryConcurrentApplyVsRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if applyOK.Load() > 0 && seq < 2 {
-		t.Fatalf("Apply won but sequence regressed to %d (apply=%d rebuildOK=%d stale=%d)",
-			seq, applyOK.Load(), rebuildOK.Load(), rebuildStale.Load())
+		t.Fatalf("Apply won but sequence regressed to %d (apply=%d applyCAS=%d rebuildOK=%d stale=%d)",
+			seq, applyOK.Load(), applyCAS.Load(), rebuildOK.Load(), rebuildStale.Load())
 	}
 	if seq < 1 {
 		t.Fatalf("invalid final seq=%d", seq)

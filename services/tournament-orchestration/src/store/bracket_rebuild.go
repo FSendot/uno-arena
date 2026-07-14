@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,7 +218,7 @@ func (s *RedisBracketStore) reconcileBeginRebuild(
 	defer cancel()
 	m, liveGen, rebuilding, err := s.readMeta(ctx, tournamentID)
 	if err != nil {
-		log.Printf(`{"level":"error","service":"tournament-orchestration","event":"bracket_begin_reconcile_failed","err":%q}`, err.Error())
+		slog.ErrorContext(ctx, "bracket begin reconciliation failed", "event", "bracket_begin_reconcile_failed", "error", err.Error())
 		return false, nil
 	}
 	if rebuilding == newGen && m.RebuildToken == token {
@@ -238,8 +238,8 @@ func (s *RedisBracketStore) abortRebuildBestEffort(parent context.Context, tourn
 	defer cancel()
 	err := s.abortRebuild(ctx, tournamentID, gen, token)
 	if err != nil {
-		log.Printf(`{"level":"warn","service":"tournament-orchestration","event":"bracket_rebuild_abort_failed","tournamentId":%q,"err":%q}`,
-			tournamentID, err.Error())
+		slog.WarnContext(ctx, "bracket rebuild abort failed", "event", "bracket_rebuild_abort_failed",
+			"tournamentId", tournamentID, "error", err.Error())
 	}
 	return err
 }

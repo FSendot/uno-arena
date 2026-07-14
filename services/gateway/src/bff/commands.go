@@ -119,7 +119,7 @@ func (s *Server) handleSpectatorSnapshot(w http.ResponseWriter, r *http.Request)
 		token = tok
 		p, err := s.identity.ValidateSession(r.Context(), token, corr)
 		if err != nil {
-			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid session", "")
+			s.writeIdentityValidationError(w, r, err)
 			return
 		}
 		principal = &p
@@ -224,7 +224,7 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 		return
 	}
 	if !allowed {
-		if err := s.recordRejection(cmd, corr, principal, roomID, tournamentID, "rate_limited", nil); err != nil {
+		if err := s.recordRejection(r.Context(), cmd, corr, principal, roomID, tournamentID, "rate_limited", nil); err != nil {
 			s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
 			return
 		}
@@ -244,7 +244,7 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 	}
 
 	if pathRoomID != "" && backend == BackendTournament {
-		if err := s.recordRejection(cmd, corr, principal, pathRoomID, extractTournamentID(cmd.Payload), "tournament_on_room_route", nil); err != nil {
+		if err := s.recordRejection(r.Context(), cmd, corr, principal, pathRoomID, extractTournamentID(cmd.Payload), "tournament_on_room_route", nil); err != nil {
 			s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
 			return
 		}
@@ -259,7 +259,7 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 	if pathRoomID != "" {
 		payloadRoom := extractRoomID(cmd.Payload)
 		if payloadRoom != "" && payloadRoom != pathRoomID {
-			if err := s.recordRejection(cmd, corr, principal, pathRoomID, tournamentID, "room_id_mismatch", nil); err != nil {
+			if err := s.recordRejection(r.Context(), cmd, corr, principal, pathRoomID, tournamentID, "room_id_mismatch", nil); err != nil {
 				s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
 				return
 			}
@@ -310,7 +310,7 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 		if reason == "" {
 			reason = "rejected"
 		}
-		if err := s.recordRejection(cmd, corr, principal, roomID, tournamentID, reason, result.Sequence); err != nil {
+		if err := s.recordRejection(r.Context(), cmd, corr, principal, roomID, tournamentID, reason, result.Sequence); err != nil {
 			s.writeErr(w, r, http.StatusServiceUnavailable, "audit_unavailable", "unable to record rejection audit", cmd.CommandID)
 			return
 		}
@@ -406,7 +406,7 @@ func (s *Server) handleSpectatorStream(w http.ResponseWriter, r *http.Request) {
 		token = tok
 		p, err := s.identity.ValidateSession(r.Context(), token, corr)
 		if err != nil {
-			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid session", "")
+			s.writeIdentityValidationError(w, r, err)
 			return
 		}
 		principal = &p

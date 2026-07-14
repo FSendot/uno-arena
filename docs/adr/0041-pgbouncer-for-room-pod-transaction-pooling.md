@@ -18,7 +18,7 @@ All dedicated room pods connect to Room Gameplay Postgres through a Room-owned P
 - PgBouncer is an adapter inside the Room bounded context. It does not create another database, own domain state, or permit cross-context SQL access.
 - Local `kind` deploys the same transaction-pooling topology with disposable storage and local-only credentials.
 - Replica count, client admission, default backend pool, and reserve pool are environment-owned capacity values. Production begins with six replicas, 50,000 client slots per replica, and a 32+8 backend pool per replica for the one Room database/user pair; these are load-test inputs bounded by PostgreSQL `max_connections`, not proof of target throughput. Kind uses one replica, 100 client slots, and four backend connections.
-- Staging and production use SCRAM-SHA-256 authentication, TLS for runtime-to-PgBouncer and PgBouncer-to-Postgres connections, and an Istio strict-mTLS `PeerAuthentication` for the PgBouncer workload. Their Helm render fails if TLS material, secure auth, or strict mesh enforcement is absent. Kind alone permits local plaintext credentials and disabled database TLS inside the disposable cluster.
+- Staging and production use SCRAM-SHA-256 authentication plus application-layer TLS for runtime-to-PgBouncer and PgBouncer-to-Postgres connections. Their Helm render fails if TLS material, secure auth, or strict mesh enforcement is absent. Kind alone permits local plaintext database credentials and disabled application-layer database TLS inside the disposable cluster; it still installs Istio Ambient strict mTLS, so east-west transport never uses a plaintext mesh path.
 
 ## Consequences
 

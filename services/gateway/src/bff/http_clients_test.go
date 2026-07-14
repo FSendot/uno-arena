@@ -3,6 +3,7 @@ package bff_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -48,6 +49,18 @@ func TestHTTPIdentityClient_ValidateSession(t *testing.T) {
 	}
 	if p.PlayerID != "p1" || p.SessionID != "s1" {
 		t.Fatalf("%+v", p)
+	}
+}
+
+func TestHTTPIdentityClient_MissingPrincipalIsUpstreamFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	client := bff.NewHTTPIdentityClient(bff.HTTPClientConfig{BaseURL: srv.URL, HTTPClient: srv.Client()})
+	_, err := client.ValidateSession(context.Background(), "tok", correlation.Headers{})
+	if err == nil || errors.Is(err, bff.ErrUnauthorized) {
+		t.Fatalf("missing principal must be an upstream failure, got %v", err)
 	}
 }
 

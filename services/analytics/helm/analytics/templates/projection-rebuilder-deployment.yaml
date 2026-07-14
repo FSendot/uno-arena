@@ -1,6 +1,6 @@
 {{- /*
   Analytics projection-rebuilder: same image as API; WORKER_ROLE=analytics-projection-rebuilder
-  consumes analytics.projection.rebuild_requested (ADR-0039). HTTP-free — no ports/probes.
+  consumes analytics.projection.rebuild_requested (ADR-0039). HTTP-free — metrics port only, no HTTP probes.
   Least privilege: ClickHouse + Kafka rebuild/DLQ/follow-up + three producer URLs + three
   scoped pair credentials only (never ops credential / Gateway secrets).
   Default/staging/production/kind keep enabled=false until live recovery proof.
@@ -22,13 +22,22 @@ spec:
     metadata:
       labels:
         app: {{ .Release.Name }}-projection-rebuilder
+        app.kubernetes.io/name: analytics
         app.kubernetes.io/part-of: {{ .Release.Name }}
+        unoarena.io/component: projection-rebuilder
+        unoarena.io/metrics-exposed: "true"
+        unoarena.io/metrics-scrape: pod
     spec:
+      serviceAccountName: analytics-projection-rebuilder
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       containers:
         - name: projection-rebuilder
           image: {{ include "analytics.image" . | quote }}
           imagePullPolicy: {{ include "analytics.imagePullPolicy" . }}
+          ports:
+            - name: metrics
+              containerPort: 9090
           env:
             - name: SERVICE_NAME
               value: {{ .Values.env.SERVICE_NAME | quote }}
@@ -36,6 +45,28 @@ spec:
               value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
             - name: WORKER_ROLE
               value: "analytics-projection-rebuilder"
+            - name: TELEMETRY_MODE
+              value: "required"
+            - name: SERVICE_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+            - name: UNOARENA_COMPONENT
+              value: "projection-rebuilder"
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://alloy-otlp.observability.svc.cluster.local:4317"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            - name: OTEL_TRACES_SAMPLER
+              value: "parentbased_traceidratio"
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: "0.1"
+            - name: OTEL_GO_X_OBSERVABILITY
+              value: "true"
+            - name: METRICS_ADDR
+              value: ":9090"
             - name: CLICKHOUSE_URL
               value: {{ .Values.env.CLICKHOUSE_URL | quote }}
             - name: CLICKHOUSE_DB

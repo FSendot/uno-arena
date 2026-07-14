@@ -317,7 +317,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, status int, v
 	_ = httpx.WriteJSON(w, status, v)
 }
 
-func (s *Server) recordRejection(cmd envelope.Command, corr correlation.Headers, principal Principal, roomID, tournamentID, reason string, currentSeq *int64) error {
+func (s *Server) recordRejection(ctx context.Context, cmd envelope.Command, corr correlation.Headers, principal Principal, roomID, tournamentID, reason string, currentSeq *int64) error {
 	rec := audit.NewRejection(cmd.CommandID, corr.CorrelationID, principal.SessionID, principal.PlayerID, reason, s.clock())
 	if roomID != "" {
 		rec = rec.WithRoom(roomID)
@@ -326,7 +326,7 @@ func (s *Server) recordRejection(cmd envelope.Command, corr correlation.Headers,
 		rec = rec.WithTournament(tournamentID)
 	}
 	rec = rec.WithSequences(cmd.ExpectedSequenceNumber, currentSeq)
-	return s.audit.RecordRejection(rec)
+	return s.audit.RecordRejection(ctx, rec)
 }
 
 func (s *Server) authorizeProducer(r *http.Request, expected string) bool {
