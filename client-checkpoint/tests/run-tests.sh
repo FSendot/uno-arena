@@ -120,6 +120,7 @@ start_fake() {
 
 SESSION_DIR="$(mktemp -d /tmp/unoarena-session-XXXXXX)"
 export UNOARENA_SESSION_FILE="${SESSION_DIR}/session.json"
+export PYTHONPYCACHEPREFIX="${SESSION_DIR}/pycache"
 unset UNOARENA_TOKEN || true
 
 stop_fake() {
@@ -248,6 +249,12 @@ assert_eq "tournament close type" "CloseRegistration" "$(json_field "$TCLOSE" ty
 
 LB="$("$CLI" leaderboard --correlation-id corr-lb)"
 assert_contains "leaderboard entries" '"rating": 1200' "$LB"
+LB_TOUR="$("$CLI" leaderboard --board-type tournament_placement --limit 25 --cursor 'next page' --correlation-id corr-lb-tour)"
+assert_contains "tournament leaderboard entries" '"rating": 1200' "$LB_TOUR"
+assert_exit "leaderboard rejects unknown board type" 1 \
+  "$CLI" leaderboard --board-type seasonal
+assert_exit "leaderboard rejects limit above contract" 1 \
+  "$CLI" leaderboard --limit 501
 
 AN="$("$CLI" analytics --correlation-id corr-an)"
 assert_eq "analytics gamesPlayed" "42" "$(json_number_field "$AN" gamesPlayed)"
@@ -480,6 +487,14 @@ assert "/health" in paths
 assert "/v1/rankings/leaderboards" in paths
 assert "/v1/analytics/public" in paths
 assert "/v1/streams/control" in paths
+leaderboards = [r for r in requests if r["path"] == "/v1/rankings/leaderboards"]
+assert any(r["query"].get("boardType") == ["casual_elo"] for r in leaderboards), leaderboards
+assert any(
+    r["query"].get("boardType") == ["tournament_placement"]
+    and r["query"].get("limit") == ["25"]
+    and r["query"].get("cursor") == ["next page"]
+    for r in leaderboards
+), leaderboards
 '
 
 py_assert_request "no legacy identity paths" '

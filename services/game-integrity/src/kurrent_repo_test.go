@@ -50,6 +50,36 @@ func TestCommittedFirstEventMatchesCandidate_ExactLogicalEventOnly(t *testing.T)
 	}
 }
 
+func TestAmbiguousAppendCode(t *testing.T) {
+	if !isAmbiguousAppendFailure(context.DeadlineExceeded) {
+		t.Fatal("raw context deadline must trigger read-only first-write reconciliation")
+	}
+	if isAmbiguousAppendFailure(context.Canceled) {
+		t.Fatal("caller cancellation must remain a known failure")
+	}
+	for _, code := range []kurrentdb.ErrorCode{
+		kurrentdb.ErrorCodeDeadlineExceeded,
+		kurrentdb.ErrorCodeConnectionClosed,
+		kurrentdb.ErrorCodeInternalServer,
+		kurrentdb.ErrorAborted,
+		kurrentdb.ErrorUnavailable,
+	} {
+		if !isAmbiguousAppendCode(code) {
+			t.Fatalf("code %v must trigger read-only first-write reconciliation", code)
+		}
+	}
+	for _, code := range []kurrentdb.ErrorCode{
+		kurrentdb.ErrorCodeWrongExpectedVersion,
+		kurrentdb.ErrorCodeStreamRevisionConflict,
+		kurrentdb.ErrorCodeAccessDenied,
+		kurrentdb.ErrorCodeAppendRecordSizeExceeded,
+	} {
+		if isAmbiguousAppendCode(code) {
+			t.Fatalf("code %v is a known failure and must not be reconciled as ambiguous", code)
+		}
+	}
+}
+
 func TestDecryptRoomEntry_RejectsSelfConsistentWrongRoomMetadata(t *testing.T) {
 	keys, err := ParseDevKeyring("1:" + unitTestMasterKey)
 	if err != nil {

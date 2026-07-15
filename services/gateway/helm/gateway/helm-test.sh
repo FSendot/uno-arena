@@ -51,6 +51,8 @@ echo "${kind_out}" | grep -q 'KAFKA_SESSION_INVALIDATED_TOPIC'
 echo "${kind_out}" | grep -q 'KAFKA_SESSION_INVALIDATED_DLQ_TOPIC'
 echo "${kind_out}" | grep -q 'GATEWAY_SESSION_INVALIDATION_TTL'
 echo "${kind_out}" | grep -q 'value: "7h"'
+echo "${kind_out}" | grep -q 'GATEWAY_BACKEND_HTTP_TIMEOUT'
+echo "${kind_out}" | grep -q 'value: "12s"'
 # ADR-0029 kind rationale is asserted in values.kind.yaml (source 30m + DLQ 6h → 7h).
 grep -q 'ADR-0029' "${CHART}/values.kind.yaml"
 grep -q 'GATEWAY_SESSION_INVALIDATION_TTL: "7h"' "${CHART}/values.kind.yaml"

@@ -34,7 +34,8 @@ Usage:
   unoarena stream spectator --room-id <roomId> [--token <bearer-token>] [--last-event-id <id>]
   unoarena spectate <roomId> [--token <bearer-token>] [--last-event-id <id>]
   unoarena stream control --token <bearer-token> [--last-event-id <id>]
-  unoarena leaderboard
+  unoarena leaderboard [--board-type <casual_elo|tournament_placement>]
+                       [--limit <1..500>] [--cursor <opaque-cursor>]
   unoarena analytics
   unoarena countdown --expires-at <RFC3339> --opening-sequence <n>
                    [--now <RFC3339>] [--json]
@@ -1314,6 +1315,7 @@ parse_common_flags() {
   STATUS_FILTER=""
   LIMIT=""
   CURSOR=""
+  BOARD_TYPE="casual_elo"
   COUNT=""
   PREFIX=""
 
@@ -1393,6 +1395,11 @@ parse_common_flags() {
       --cursor)
         [ "$#" -ge 2 ] || usage
         CURSOR="$2"
+        shift 2
+        ;;
+      --board-type)
+        [ "$#" -ge 2 ] || usage
+        BOARD_TYPE="$2"
         shift 2
         ;;
       --count)
@@ -1582,7 +1589,22 @@ case "$command_name" in
     ;;
   leaderboard)
     parse_common_flags "$@"
-    http_json GET "/v1/rankings/leaderboards"
+    case "$BOARD_TYPE" in
+      casual_elo|tournament_placement) ;;
+      *) fail "board-type must be casual_elo or tournament_placement (got: ${BOARD_TYPE})" ;;
+    esac
+    leaderboard_path="/v1/rankings/leaderboards?boardType=$(urlencode "$BOARD_TYPE")"
+    if [ -n "$LIMIT" ]; then
+      require_uint "limit" "$LIMIT"
+      if [ "$LIMIT" -lt 1 ] || [ "$LIMIT" -gt 500 ]; then
+        fail "limit must be between 1 and 500 (got: ${LIMIT})"
+      fi
+      leaderboard_path+="&limit=${LIMIT}"
+    fi
+    if [ -n "$CURSOR" ]; then
+      leaderboard_path+="&cursor=$(urlencode "$CURSOR")"
+    fi
+    http_json GET "$leaderboard_path"
     ;;
   analytics)
     parse_common_flags "$@"

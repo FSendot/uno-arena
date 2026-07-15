@@ -157,7 +157,7 @@ fi
 
 # --- Heap must be explicit and below container memory limit (reject image default -Xmx2G) ---
 grep -E '^\s+- name: KAFKA_HEAP_OPTS\s*$' "${CONNECT_MANIFEST}" >/dev/null \
-  || die "Connect must set KAFKA_HEAP_OPTS (image default -Xmx2G exceeds 1536Mi limit)"
+  || die "Connect must set KAFKA_HEAP_OPTS (image default -Xmx2G exceeds the local limit)"
 python3 - "${CONNECT_MANIFEST}" <<'PY' || die "Connect KAFKA_HEAP_OPTS must keep -Xmx below memory limit"
 import pathlib, re, sys
 

@@ -289,7 +289,13 @@ confirmation:
 ```
 
 The live invocation validates offline, checks the required tools and Docker/node
-architecture before deletion, deletes and recreates only `uno-arena`, builds and
+architecture before deletion, deletes only `uno-arena`, then requires at least
+20 GiB of host filesystem headroom and 7 GiB of container-engine memory before
+recreating it. These gates prevent a complete image set from exhausting the engine's
+backing disk and prevent the full stack from entering reclaim/swap pressure; an
+operator may raise the floors with `KIND_MIN_HOST_FREE_GIB` and
+`KIND_MIN_ENGINE_MEMORY_GIB`, but lowering either is not a successful substitute for
+the acceptance run. The lane then builds and
 loads the bootstrap plus all eight application images for the detected node platform,
 validates every upstream multi-architecture index, selects the reviewed KurrentDB
 digest for AMD64 or ARM64, applies and waits for the foundation and Istio Ambient,
@@ -309,11 +315,23 @@ single-node contention spike that remains within the router request budget. The
 four Postgres pods and Redis run readiness checks every 15 seconds and liveness
 checks every 30 seconds; Debezium Connect uses 20- and 30-second checks. This avoids
 continuous local exec-probe process churn while preserving bounded failure detection.
+Because kind runs exactly one Connect worker, its scheduled-rebalance delay is ten
+seconds rather than the distributed five-minute default; a brief broker stall cannot
+leave all four local CDC connectors unassigned for five minutes.
+The co-located Kafka, Keycloak, Debezium Connect/Server, ClickHouse, KurrentDB,
+MinIO, and Grafana processes have kind-only runtime memory budgets. Kafka, Keycloak,
+and both Debezium JVMs use explicit heaps; ClickHouse has a 768 MiB server ceiling
+and bounded caches; MinIO and Grafana use 256 MiB Go memory targets. Heavy
+single-replica disposable Deployments use `Recreate`, so a manifest re-apply cannot
+temporarily duplicate them on the shared node. ClickHouse, KurrentDB, and Connect
+retain 1 GiB container ceilings for native, mapped, metaspace, and plugin headroom;
+these local controls do not alter production sizing.
 The business-acceptance bots use a five-second polling cadence, and the live lane runs
 their business/trace proof before adapter and projection-rebuilder probes accumulate
-load. The Tournament integration package caps Go test parallelism at two and uses a
-five-minute package timeout because it combines 189 real-Postgres tests with bounded
-Redis-fallback cases. These values prevent local CFS throttling from turning concurrent bot and
+load. The Tournament integration package caps Go test parallelism at two and uses an
+eight-minute package timeout because its 188 real-Postgres tests plus bounded
+Redis-fallback cases reached the final test at 4:58 in a measured loaded-cluster run.
+These values prevent local CFS throttling from turning concurrent bot and
 telemetry traffic into false liveness failures; they do not replace production
 capacity or probe tuning. Base, staging, and production application probes retain
 their ten-second cadence.

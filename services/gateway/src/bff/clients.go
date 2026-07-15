@@ -72,7 +72,8 @@ type TournamentClient interface {
 
 // ReadModelClient serves public read proxies (rankings/analytics).
 type ReadModelClient interface {
-	Leaderboard(ctx context.Context, corr correlation.Headers) (json.RawMessage, error)
+	// Leaderboard forwards the public Ranking query contract (boardType, cursor, limit).
+	Leaderboard(ctx context.Context, rawQuery string, corr correlation.Headers) (json.RawMessage, error)
 	PublicAnalytics(ctx context.Context, corr correlation.Headers) (json.RawMessage, error)
 }
 

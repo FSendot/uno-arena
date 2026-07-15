@@ -244,6 +244,14 @@ new_tempo_wal_uid="$(kubectl -n observability get pvc tempo-wal -o jsonpath='{.m
 new_minio_uid="$(wait_replacement_uid minio "${old_minio_uid}")"
 new_tempo_uid="$(wait_replacement_uid tempo "${old_tempo_uid}")"
 
+# Replace Loki once more after MinIO is Ready. This removes the first
+# replacement's local TSDB index/cache and makes the final query prove that a
+# cold Loki process can rebuild its view through the replaced S3 endpoint.
+post_minio_loki_name="$(ready_pod_name loki)"
+post_minio_loki_uid="$(kubectl -n observability get pod "${post_minio_loki_name}" -o jsonpath='{.metadata.uid}')"
+kubectl_mutation_retry kubectl -n observability delete pod "${post_minio_loki_name}" --ignore-not-found --wait=false
+final_loki_uid="$(wait_replacement_uid loki "${post_minio_loki_uid}")"
+
 obs_cleanup_forwards
 obs_forward observability service/loki "${LOKI_PORT}" 3100
 obs_forward observability service/tempo "${TEMPO_PORT}" 3200

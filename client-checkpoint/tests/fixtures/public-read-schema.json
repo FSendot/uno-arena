@@ -1,5 +1,5 @@
 {
-  "description": "Schema-only expectations for public ranking/analytics reads on a fresh capability stack. Arrays may be empty; do not require populated async projections.",
+  "description": "Schema-only expectations for public ranking/analytics reads on a fresh local deployment. Arrays may be empty; do not require populated async projections.",
   "leaderboard": {
     "requiredKeys": ["entries"],
     "entriesType": "array"

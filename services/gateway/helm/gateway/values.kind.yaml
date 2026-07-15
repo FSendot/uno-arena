@@ -35,6 +35,8 @@ env:
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
+  # Leave response headroom above Room's 10s routing bound on the shared node.
+  GATEWAY_BACKEND_HTTP_TIMEOUT: "12s"
   # Rate-limit buckets + session-invalidation store — dedicated DB 6.
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/6
   # Player feeds (room:{roomId}:player) — same Redis instance as Room timers (DB 2).

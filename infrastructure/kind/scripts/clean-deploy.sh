@@ -38,6 +38,7 @@ steps=(
   validate.sh
   verify-portable-images.sh
   reset.sh
+  preflight-host-capacity.sh
   create-cluster.sh
   install-istio.sh
   build-load-bootstrap.sh

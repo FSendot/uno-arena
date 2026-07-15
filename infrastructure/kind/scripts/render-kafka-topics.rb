@@ -17,10 +17,10 @@ PLAN_PATH = File.join(OUT_DIR, "kafka-topic-plan.yaml")
 SCRIPT_PATH = File.join(OUT_DIR, "kafka-create-topics.sh")
 JOB_PATH = File.join(OUT_DIR, "job-kafka-topics.yaml")
 
-KIND_HIGH_PARTITIONS = 8
-KIND_BUSINESS_PARTITIONS = 2
-# ADR-0039 rebuild-request topics keep prod partition count locally (RF stays kind=1).
-KIND_REBUILD_REQUEST_PARTITIONS = 32
+KIND_HIGH_PARTITIONS = 2
+KIND_BUSINESS_PARTITIONS = 1
+# Rebuild behavior is proven with keyed ordering, not production-scale concurrency.
+KIND_REBUILD_REQUEST_PARTITIONS = 2
 KIND_REPLICATION_FACTOR = 1
 
 # Kind-short retention.ms by ADR-0032 class (no production recovery-window claim).
@@ -33,8 +33,8 @@ KIND_RETENTION_MS = {
 
 CONNECT_TOPICS = [
   { "name" => "connect-configs", "partitions" => 1, "replicationFactor" => 1, "cleanupPolicy" => "compact", "class" => "connect-internal" },
-  { "name" => "connect-offsets", "partitions" => 8, "replicationFactor" => 1, "cleanupPolicy" => "compact", "class" => "connect-internal" },
-  { "name" => "connect-status", "partitions" => 3, "replicationFactor" => 1, "cleanupPolicy" => "compact", "class" => "connect-internal" }
+  { "name" => "connect-offsets", "partitions" => 1, "replicationFactor" => 1, "cleanupPolicy" => "compact", "class" => "connect-internal" },
+  { "name" => "connect-status", "partitions" => 1, "replicationFactor" => 1, "cleanupPolicy" => "compact", "class" => "connect-internal" }
 ].freeze
 
 REBUILD_REQUEST_TOPICS = [
@@ -42,8 +42,8 @@ REBUILD_REQUEST_TOPICS = [
   "analytics.projection.rebuild_requested"
 ].freeze
 
-# Documented consumers only (architecture integration table). Scaffolding topics;
-# consumers themselves remain pending — do not invent undeclared groups.
+# Documented consumer-owned DLQ declarations only (architecture integration table).
+# Topic scaffolding does not itself prove consumer deployment; do not invent undeclared groups.
 DOCUMENTED_DLQ_CONSUMERS = [
   { "source" => "identity.session.invalidated", "consumer" => "gateway" },
   { "source" => "room.game.completed", "consumer" => "ranking" },

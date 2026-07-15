@@ -62,8 +62,10 @@ for contract in \
   '"reason":"stale_sequence"' \
   'for attempt in $(seq 1 60)' \
   'OBS_BOT_POLL_INTERVAL_SECONDS:-5' \
+  'OBS_BOT_ACTION_INTERVAL_SECONDS:-2' \
+  '--action-interval "${bot_action_interval}"' \
   'client-checkpoint/bin/unoarena'; do
-  grep -Fq "${contract}" "${business}" || { echo "business proof missing ${contract}" >&2; exit 1; }
+  grep -Fq -- "${contract}" "${business}" || { echo "business proof missing ${contract}" >&2; exit 1; }
 done
 grep -Fq 'OTEL_TRACES_SAMPLER: x_parentbased_mutations' \
   "${ROOT}/services/gateway/helm/gateway/values.kind.yaml" || {

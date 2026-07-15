@@ -555,6 +555,37 @@ func TestLoadGatewayConfig_OutboundFallsBackToServiceCredential(t *testing.T) {
 	}
 }
 
+func TestLoadGatewayConfig_BackendHTTPTimeoutFromEnvironment(t *testing.T) {
+	t.Setenv("GATEWAY_BACKEND_HTTP_TIMEOUT", "10s")
+
+	cfg := loadGatewayConfig()
+	if cfg.BackendHTTPTimeout != 10*time.Second {
+		t.Fatalf("BackendHTTPTimeout=%s want 10s", cfg.BackendHTTPTimeout)
+	}
+}
+
+func TestLoadGatewayConfig_BackendHTTPTimeoutDefaultsToFiveSeconds(t *testing.T) {
+	t.Setenv("GATEWAY_BACKEND_HTTP_TIMEOUT", "")
+
+	cfg := loadGatewayConfig()
+	if cfg.BackendHTTPTimeout != 5*time.Second {
+		t.Fatalf("BackendHTTPTimeout=%s want 5s", cfg.BackendHTTPTimeout)
+	}
+}
+
+func TestLoadGatewayConfig_InvalidBackendHTTPTimeoutFallsBackToFiveSeconds(t *testing.T) {
+	for _, raw := range []string{"not-a-duration", "0s", "-1s", "31s"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("GATEWAY_BACKEND_HTTP_TIMEOUT", raw)
+
+			cfg := loadGatewayConfig()
+			if cfg.BackendHTTPTimeout != 5*time.Second {
+				t.Fatalf("BackendHTTPTimeout=%s want 5s", cfg.BackendHTTPTimeout)
+			}
+		})
+	}
+}
+
 func TestWireGatewayHTTPClients_UsesPerBackendOutboundCredentials(t *testing.T) {
 	var (
 		identityCred   string

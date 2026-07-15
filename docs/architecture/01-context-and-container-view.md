@@ -183,7 +183,7 @@ flowchart TB
 - `Kafka`
   - production uses at least three rack/zone-aware brokers; every domain, projection, DLQ, replacement, and Connect internal topic uses replication factor 3 with minimum ISR 2
   - all producers require `acks=all` and idempotence; unclean leader election is disabled
-  - local Docker Compose and `kind` may use a single replica only as an explicitly non-HA verification topology
+  - local `kind` may use a single replica only as an explicitly non-HA verification topology
 
 - `Backup and recovery plane`
   - stores encrypted Postgres WAL/base backups, KurrentDB/key-history recovery material, and ClickHouse backups outside the primary cluster failure domain using backup-only credentials
@@ -247,4 +247,4 @@ flowchart TB
 - **Offline capability adapters vs durable adapters:** capability mode uses real service HTTP paths (`GATEWAY_CAPABILITY_MODE` / `ROOM_CAPABILITY_MODE` / `ANALYTICS_CAPABILITY_MODE`) with bounded in-memory edge/principal limiters and a memory session repository where Postgres is absent, plus explicit Game Integrity memory. Isolated-test fakes remain behind `GATEWAY_ALLOW_FAKES` / `ROOM_ALLOW_FAKES` only. Room Gameplay HTTP bridges carry the same event *names* and canonical domain fields as AsyncAPI, but each sink receives a destination-specific HTTP body (documented transform — not identical to the Kafka envelope). Identity/Room/Ranking/Tournament Postgres, GI KurrentDB, Analytics ClickHouse HTTP, Spectator/Ranking/Tournament Redis projections, Room Redis timers, Gateway Redis rate-limit + direct LiveFeed SSE, and declared franz-go consumers are implemented when configured. A clean ARM64 kind deployment proved the foundation, all eight services, Connect/Server CDC, and both recovery workers. Capability/fakes retain the in-process Hub; configured Gateway `/ready` pings every configured Redis client. Migrations under `services/*/migrations/` document the durable schemas.
 - KurrentDB, Postgres, Redis, Kafka, and ClickHouse should all be exercised as real local containers once their adapters exist.
 - External ingress TLS, ambient east-west mTLS, Game Integrity envelope encryption, and encrypted storage/backups are independent layers; none substitutes for another.
-- All Helm/Kubernetes durable environments, including `kind`, retain the dedicated per-room pod topology. The explicitly non-Kubernetes Compose/capability harness may collapse Room into one process for semantic test speed and is not topology evidence.
+- All Helm/Kubernetes durable environments, including `kind`, retain the dedicated per-room pod topology. Offline capability-mode and fake-BFF checks may collapse Room into one process for semantic test speed and are not topology or deployment evidence.

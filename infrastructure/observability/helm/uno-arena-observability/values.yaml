@@ -57,6 +57,7 @@ grafana:
   adminPasswordKey: admin-password
   strategyType: RollingUpdate
   preinstallDisabled: true
+  goMemoryLimit: ""
 
 security:
   ambientRequired: true

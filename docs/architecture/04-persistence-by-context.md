@@ -105,6 +105,7 @@ Kafka provides bounded operational replay only. Spectator-safe expiry recovers t
 
 - Appends are immutable.
 - Streams are created lazily by the official Go adapter on first append; every append supplies the exact expected revision. Startup/readiness validates KurrentDB policy, credentials, transport security, and key-provider access rather than running schema DDL.
+- A first-append deadline, connection, internal-server, aborted, or unavailable response is an unknown outcome, not permission to replay the write. Game Integrity reads, authenticates, decrypts, and compares the committed first event: exact logical identity and plaintext confirms success, a different candidate with the deterministic event UUID returns `conflicting_duplicate`, and absent/unreadable/tampered state preserves the original error and fails closed.
 - Replay-sensitive event payloads are AES-256-GCM ciphertext under a per-game data key; KurrentDB retains readable event/stream/revision metadata, key version/nonce, and seed/order commitments only.
 - Replay is deterministic from the log.
 - The store is not a cache and should not be treated like one.

@@ -48,8 +48,9 @@ info:
     topics and call context-owned internal snapshot/backfill HTTP APIs; they never poll
     outboxes and never embed unbounded event arrays in Kafka. Worker-owned DLQs follow
     `<request-topic>.<consumer>.dlq`. Context-owned snapshot/backfill APIs and rebuilder
-    workers are implemented; Deployments remain disabled in default/staging/production/`kind`
-    until real end-to-end worker live recovery tests pass.
+    workers are implemented; their Deployments are enabled only in local `kind` after live
+    recovery proofs and remain disabled in default/staging/production until operators explicitly
+    enable and capacity-plan them.
 x-partitionPlanning:
   immutableAfterCreation: true
   highVolumeInitialPartitions: 256

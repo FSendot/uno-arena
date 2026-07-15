@@ -13,7 +13,7 @@ info:
     `snapshot_required` so clients resync via the snapshot routes before resuming SSE.
 servers:
   - url: http://localhost:8080
-    description: Local compose BFF (gateway)
+    description: Local kind Gateway/BFF through the loopback port-forward
 tags:
   - name: health
   - name: auth

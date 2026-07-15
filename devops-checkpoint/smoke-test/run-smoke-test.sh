@@ -13,7 +13,7 @@ json_string_field() {
 }
 
 echo "==> Registering user ${USERNAME} against ${API_URL}"
-REGISTER_RESP=$(unoarena register --user "$USERNAME" --pass "$PASSWORD" --json)
+REGISTER_RESP=$(unoarena register --user "$USERNAME" --pass "$PASSWORD")
 echo "$REGISTER_RESP"
 
 STATUS=$(json_string_field "$REGISTER_RESP" status)
@@ -22,8 +22,18 @@ if [ "$STATUS" != "ok" ]; then
   exit 1
 fi
 
+echo "==> Logging in as ${USERNAME}"
+LOGIN_RESP=$(unoarena login --user "$USERNAME" --pass "$PASSWORD")
+echo "$LOGIN_RESP"
+
+TOKEN=$(json_string_field "$LOGIN_RESP" token)
+if [ -z "$TOKEN" ]; then
+  echo "FAIL: login did not return a token"
+  exit 1
+fi
+
 echo "==> Calling whoami for ${USERNAME}"
-WHOAMI_RESP=$(unoarena whoami --user "$USERNAME" --json)
+WHOAMI_RESP=$(unoarena whoami --token "$TOKEN")
 echo "$WHOAMI_RESP"
 
 RETURNED_USERNAME=$(json_string_field "$WHOAMI_RESP" username)

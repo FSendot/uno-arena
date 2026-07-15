@@ -48,6 +48,7 @@ obs_forward "${KIND_NAMESPACE}" service/tournament-orchestration "${TOURNAMENT_M
 PROM="http://127.0.0.1:${PROM_PORT}"
 export UNOARENA_API_URL="http://127.0.0.1:${GATEWAY_PORT}"
 bot_poll_interval="${OBS_BOT_POLL_INTERVAL_SECONDS:-5}"
+bot_action_interval="${OBS_BOT_ACTION_INTERVAL_SECONDS:-2}"
 obs_wait_http "${PROM}/-/ready"
 obs_wait_http "${UNOARENA_API_URL}/ready"
 
@@ -115,10 +116,12 @@ tail -n 1 "${RUN_DIR}/game-reject.err" >"${RUN_DIR}/game-reject.json"
 obs_wait_prom_equal "${PROM}" 'sum(unoarena_games_completed_total)' "${games_before}" 20
 "${CLI}" bot --room "${room_id}" --token "${game_token_1}" --seed 101 \
   --poll-interval "${bot_poll_interval}" \
+  --action-interval "${bot_action_interval}" \
   --max-wait "${OBS_GAME_TIMEOUT_SECONDS:-900}" >"${RUN_DIR}/game-bot-1.jsonl" 2>&1 &
 game_bot_1=$!
 "${CLI}" bot --room "${room_id}" --token "${game_token_2}" --seed 202 \
   --poll-interval "${bot_poll_interval}" \
+  --action-interval "${bot_action_interval}" \
   --max-wait "${OBS_GAME_TIMEOUT_SECONDS:-900}" >"${RUN_DIR}/game-bot-2.jsonl" 2>&1 &
 game_bot_2=$!
 game_bot_failed=0
@@ -154,10 +157,12 @@ tournaments_increase_before="$(obs_prom_query "${PROM}" 'sum(increase(unoarena_t
 # internal lifecycle policy commands.
 "${CLI}" bot --tournament "${tournament_id}" --token "${tournament_token_1}" --seed 303 \
   --poll-interval "${bot_poll_interval}" \
+  --action-interval "${bot_action_interval}" \
   --max-wait "${OBS_TOURNAMENT_TIMEOUT_SECONDS:-900}" >"${RUN_DIR}/tournament-bot-1.jsonl" 2>&1 &
 tournament_bot_1=$!
 "${CLI}" bot --tournament "${tournament_id}" --token "${tournament_token_2}" --seed 404 \
   --poll-interval "${bot_poll_interval}" \
+  --action-interval "${bot_action_interval}" \
   --max-wait "${OBS_TOURNAMENT_TIMEOUT_SECONDS:-900}" >"${RUN_DIR}/tournament-bot-2.jsonl" 2>&1 &
 tournament_bot_2=$!
 tournament_bot_failed=0

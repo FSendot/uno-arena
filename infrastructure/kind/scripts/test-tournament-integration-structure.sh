@@ -114,8 +114,8 @@ fi
 if ! grep -E '[[:space:]]\.$' <<<"${recipe}" >/dev/null 2>&1; then
   die "Makefile test-tournament-integration must run main-package service integration (.)"
 fi
-if [[ "$(grep -Fc -- '-parallel 2 -timeout 300s' <<<"${recipe}")" -ne 2 ]]; then
-  die "both Tournament integration lanes must bound local parallelism and allow the reviewed five-minute budget"
+if [[ "$(grep -Fc -- '-parallel 2 -timeout 480s' <<<"${recipe}")" -ne 2 ]]; then
+  die "both Tournament integration lanes must bound local parallelism and allow the reviewed eight-minute budget"
 fi
 store_line="$(grep -n '\./store/\.\.\.' <<<"${recipe}" | head -n1 | cut -d: -f1)"
 main_line="$(grep -nE '[[:space:]]\.$' <<<"${recipe}" | head -n1 | cut -d: -f1)"

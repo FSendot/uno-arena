@@ -11,7 +11,6 @@ contracts/
 *.md
 .env
 .env.*
-!.env.example
 go.work
 go.work.sum
 **/helm/

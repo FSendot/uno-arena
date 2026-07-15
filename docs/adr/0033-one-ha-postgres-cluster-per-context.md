@@ -13,7 +13,7 @@ Production commits use synchronous commit and require WAL flush on the primary p
 
 Authoritative Identity session validation, Room commands and deadlines, Tournament registration/advancement, Ranking updates, bootstrap/schema checks, and outbox writes always use the read-write endpoint. Standby endpoints may serve only explicitly stale-tolerant reporting or rebuild reads whose contracts permit lag; they never authorize mutations or participate in a read-then-write decision. CDC connects through a promotion-aware writer path and must resume from durable source offsets after failover without skipping committed outbox records; failover tests must prove duplicate-safe recovery.
 
-Local Docker Compose and `kind` use one Postgres instance per context for bounded resources. That preserves database ownership, schemas, transactions, and endpoints but makes no HA, synchronous-replication, or automatic-failover claim.
+Local `kind` uses one Postgres instance per context for bounded resources. That preserves database ownership, schemas, transactions, and endpoints but makes no HA, synchronous-replication, or automatic-failover claim.
 
 ## Consequences
 A single Postgres pod/node failure can be recovered without losing an acknowledged commit, while each bounded context retains one physical persistence boundary. Synchronous replication adds write latency and may stop writes during correlated failures or maintenance rather than accept an RPO violation. Primary/standby health, replication lag, quorum, failover fencing, endpoint convergence, connection-pool recovery, CDC resume position, and unknown-outcome reconciliation become production concerns. Provider choice remains open as long as it satisfies this topology and behavior.

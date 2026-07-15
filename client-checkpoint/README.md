@@ -68,7 +68,7 @@ machine-readable JSON Lines contract.
 ```bash
 # Health / public reads
 unoarena health
-unoarena leaderboard
+unoarena leaderboard [--board-type casual_elo|tournament_placement] [--limit 1..500] [--cursor <opaque>]
 unoarena analytics
 
 # Auth / session
@@ -136,7 +136,7 @@ unoarena bot --tournament <tournamentId> (--user <u> --pass <p> | --token <token
 | `stream player` | `GET /v1/streams/player?roomId=…` |
 | `stream spectator` / `spectate` | `GET /v1/streams/spectator?roomId=…` |
 | `stream control` | `GET /v1/streams/control` |
-| `leaderboard` | `GET /v1/rankings/leaderboards` |
+| `leaderboard` | `GET /v1/rankings/leaderboards?boardType=…` (`casual_elo` by default; optional bounded page/cursor) |
 | `analytics` | `GET /v1/analytics/public` |
 | `countdown` | none (local advisory display) |
 | `play --casual` | `GET /v1/rooms`, optional `CreateRoom`/`JoinRoom`, player snapshot + SSE, room-scoped gameplay commands |
@@ -294,58 +294,38 @@ Dockerfile packaging structure (no build/pull):
 make test-client-dockerfile
 ```
 
-## Capability stack integration harness
+## Kind-native live client parity
 
-Repeatable Docker Compose integration against the capability overlay
-(`docker-compose.local.yml` + `docker-compose.capability.yml`). Speaks only to the
-CLI/BFF edge. Requires `bash`, `curl`, `python3`, and Docker (no `jq`, no GNU
-`timeout`).
+The disposable kind cluster is the single live deployment/test environment. The
+complete empty-cluster command deploys the durable architecture and runs the client
+parity probe as part of its ordered acceptance lane:
 
 ```bash
-make test-capability-stack
-# or:
-./client-checkpoint/tests/run-capability-stack.sh
+make kind-clean-deploy
 ```
 
-Behavior:
+Against an already-ready `uno-arena` cluster, run only the client proof with:
 
-- Unique `docker compose -p` project name per run; capability overlay scopes
-  both `uno_edge` and `uno_private` network names to the project. Gateway
-  attaches to non-internal edge (host publish) plus internal private
-  (interservice); backends stay private-only. Gateway host port is a concrete
-  free localhost port by default (Python `socket` bind; override with
-  `CAP_BFF_HOST_PORT`). Bind conflicts retry with another free port — never
-  published `0` (Compose 5.x leaves HostPort unbound). After `compose up`, the
-  harness polls `compose ps` + `docker inspect` until the published host port
-  matches the selected nonzero port, up to `CAP_READY_TIMEOUT_S` (default 180s
-  in the harness; 60s in the helper alone). On failure it prints `compose ps`
-  diagnostics
-- Capability overlay omits KurrentDB because GI uses explicit memory; harness `up`
-  uses resolved `config --services` so KurrentDB is never selected
-- Polls raw BFF `GET /health` before the first CLI call, then waits for `GET /ready`
-- Covers health/ready, register/login/whoami, session takeover with control SSE
-  subscribed first and exact `event: session_invalidated` + `data:` framing
-  (not a 401 JSON substring), public room create/join/lock/start, anonymous
-  spectator snapshots (`waiting`/`locked`/`in_progress`), spectator SSE
-  subscribed before `DrawCard` then exact canonical `event: SnapshotSanitized` +
-  non-empty `data:` (gateway forwards Room event type unchanged),
-  stale-sequence reject, tournament create/register/close with idempotent replay
-  (same-command-id responses compared on status/type/schemaVersion/sequenceNumber/payload),
-  leaderboard/analytics schema reads validated against
-  `fixtures/public-read-schema.json` (empty projections allowed), unknown
-  `Last-Event-ID` → `snapshot_required` (raw stream HTTP 409 + CLI evidence;
-  bounded so an open-SSE regression cannot hang), and `CancelRoom` as the deterministic
-  live representative of terminal spectator denial (raw stream HTTP 403 + CLI
-  evidence `403` or `spectator_denied`; no hang). `RoomCompleted` denial is
-  covered by existing room-gameplay / spectator-view domain and service tests —
-  this harness does not invent a nondeterministic full-game completion path
-- Background CLI streams run in their own process groups; trap cleanup reaps
-  descendants (pipelines / non-exec children) and is idempotent across INT→EXIT
-- Tears down with `down -v --remove-orphans` only for a stack this harness started
-- `KEEP_STACK=1` leaves a harness-started stack up (background PIDs are still reaped)
-- `CAP_SKIP_UP=1` reuses an existing stack at the caller’s `UNOARENA_API_URL`
-  (preserved; never synthesized). Does not tear down external projects/volumes
-  unless `CAP_TEARDOWN_EXTERNAL=1` and `CAP_COMPOSE_PROJECT` are set explicitly
+```bash
+./infrastructure/kind/scripts/test-client-parity-live.sh
+```
+
+The kind wrapper owns a loopback Gateway port-forward, exports that URL to the
+deployment-neutral parity runner, and reaps only its own background processes. The
+runner speaks exclusively to the public CLI/BFF edge and covers health/readiness,
+register/login/whoami, session takeover with exact control-SSE framing, public room
+create/join/lock/start, spectator snapshots and SSE, stale-sequence rejection,
+tournament create/register/close plus idempotent replay, leaderboard and Analytics
+schema reads, unknown `Last-Event-ID` resynchronization, and deterministic terminal
+spectator denial. Fake-BFF Stage A/B tests remain the fast offline client lane; they
+are not deployment evidence.
+
+The headless bot also has a hidden acceptance-only `--action-interval`. Its normal
+default is zero, so ordinary CLI behavior is unchanged. Kind business acceptance
+sets it to two seconds after each mutation with a known accepted or authoritative
+rejected result, including immediate `ChooseColor` and `CallUno` follow-ups. Unknown
+mutation outcomes still enter bounded authoritative safe-read recovery immediately
+and are never replayed; the pacing delay is not a recovery mechanism.
 
 Helpers live under `client-checkpoint/tests/lib/`; schema fixtures under
 `client-checkpoint/tests/fixtures/` (used to validate live public-read responses,
@@ -353,14 +333,6 @@ not merely asserted present on disk). Focused helper checks (no Docker stack):
 
 ```bash
 ./client-checkpoint/tests/test-capability-helpers.sh
-```
-
-Compose topology checks (resolved `config` only; no stack up):
-
-```bash
-make test-compose-topology
-# or:
-./client-checkpoint/tests/test-compose-topology.sh
 ```
 
 ## GUI status

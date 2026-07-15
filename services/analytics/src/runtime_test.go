@@ -1,9 +1,63 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type fakeDurableReadinessStore struct {
+	readyCalls int
+	pingCalls  int
+	readyErr   error
+	pingErr    error
+}
+
+func (f *fakeDurableReadinessStore) Ready(context.Context) error {
+	f.readyCalls++
+	return f.readyErr
+}
+
+func (f *fakeDurableReadinessStore) Ping(context.Context) error {
+	f.pingCalls++
+	return f.pingErr
+}
+
+func TestDurableReadiness_AuditsSchemaOnceThenPings(t *testing.T) {
+	dep := &fakeDurableReadinessStore{}
+	check := &durableReadiness{store: dep}
+
+	if err := check.check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if dep.readyCalls != 1 || dep.pingCalls != 1 {
+		t.Fatalf("ready calls=%d ping calls=%d", dep.readyCalls, dep.pingCalls)
+	}
+}
+
+func TestDurableReadiness_RetriesFailedSchemaAndSurfacesPingFailure(t *testing.T) {
+	dep := &fakeDurableReadinessStore{readyErr: errors.New("schema unavailable")}
+	check := &durableReadiness{store: dep}
+
+	if err := check.check(context.Background()); !errors.Is(err, dep.readyErr) {
+		t.Fatalf("first error=%v", err)
+	}
+	dep.readyErr = nil
+	if err := check.check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	dep.pingErr = errors.New("clickhouse unavailable")
+	if err := check.check(context.Background()); !errors.Is(err, dep.pingErr) {
+		t.Fatalf("ping error=%v", err)
+	}
+	if dep.readyCalls != 2 || dep.pingCalls != 1 {
+		t.Fatalf("ready calls=%d ping calls=%d", dep.readyCalls, dep.pingCalls)
+	}
+}
 
 func TestWireRuntime_CapabilityMemory(t *testing.T) {
 	t.Setenv("ANALYTICS_CAPABILITY_MODE", "1")

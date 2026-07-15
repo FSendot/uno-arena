@@ -735,6 +735,13 @@ def bot_action(gateway: Gateway, room: str, snapshot: dict[str, Any], player_id:
     return "DrawCard", {}, None
 
 
+def pace_bot_mutation(args: argparse.Namespace) -> None:
+    """Apply optional bot-only pacing after a mutation has a known result."""
+    interval = max(0.0, float(getattr(args, "action_interval", 0)))
+    if interval > 0:
+        time.sleep(interval)
+
+
 def play_bot_room(gateway: Gateway, room: str, player_id: str, username: str,
                   args: argparse.Namespace, metrics: Metrics) -> bool:
     metrics.room = room
@@ -764,6 +771,7 @@ def play_bot_room(gateway: Gateway, room: str, player_id: str, username: str,
                          "ok" if ok else "error", None if ok else 409,
                          snapshot.get("sequenceNumber"), corr)
             actions += 1
+            pace_bot_mutation(args)
             if not ok:
                 time.sleep(args.poll_interval)
                 continue
@@ -773,12 +781,14 @@ def play_bot_room(gateway: Gateway, room: str, player_id: str, username: str,
                 metrics.emit("choose_color", started, "ok" if ok else "error", None if ok else 409,
                              snapshot.get("sequenceNumber"), corr)
                 actions += 1
+                pace_bot_mutation(args)
             if len(snapshot.get("hand") or []) == 1:
                 started = time.monotonic()
                 snapshot, _, corr, ok = command_with_resync(gateway, room, snapshot, "CallUno", {})
                 metrics.emit("uno", started, "ok" if ok else "error", None if ok else 409,
                              snapshot.get("sequenceNumber"), corr)
                 actions += 1
+                pace_bot_mutation(args)
         except ClientError as exc:
             metrics.emit(kind.lower(), started, "error", exc.code, snapshot.get("sequenceNumber"), str(uuid.uuid4()))
             reconciled = recover_unknown_bot_outcome(
@@ -879,6 +889,7 @@ def parser() -> argparse.ArgumentParser:
     out.add_argument("--max-actions", type=int, default=10000, help=argparse.SUPPRESS)
     out.add_argument("--max-wait", type=float, default=900, help=argparse.SUPPRESS)
     out.add_argument("--poll-interval", type=float, default=.5, help=argparse.SUPPRESS)
+    out.add_argument("--action-interval", type=float, default=0, help=argparse.SUPPRESS)
     out.add_argument("--api-url", default=os.environ.get("UNOARENA_API_URL", ""), help=argparse.SUPPRESS)
     return out
 

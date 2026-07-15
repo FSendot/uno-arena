@@ -145,6 +145,14 @@ grep -Fq 'disk_full_threshold: 0.9' <<<"${production_out}" || {
   echo "production Loki WAL must retain its conservative disk safety threshold" >&2
   exit 1
 }
+grep -Fq 'name: GOMEMLIMIT' <<<"${kind_out}" || {
+  echo "kind Grafana must carry its bounded Go memory target" >&2
+  exit 1
+}
+if grep -Fq 'name: GOMEMLIMIT' <<<"${production_out}"; then
+  echo "production Grafana must not inherit the kind-only Go memory target" >&2
+  exit 1
+fi
 for checksum in alloy-logs-config alloy-otlp-config loki-config tempo-config; do
   grep -Fq "checksum/${checksum}:" <<<"${kind_out}" || {
     echo "missing rollout checksum for ${checksum}" >&2

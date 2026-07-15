@@ -18,7 +18,36 @@ type analyticsRuntime struct {
 	readyReason string
 	creds       ProducerCredentials
 	chStore     *store.AnalyticsStore
+	readiness   *durableReadiness
 	kafka       *analyticsKafkaLifecycle
+}
+
+type durableReadinessStore interface {
+	Ready(context.Context) error
+	Ping(context.Context) error
+}
+
+// durableReadiness performs the immutable schema/generation audit until it
+// succeeds once, then keeps steady-state probes cheap with a single Ping.
+// Failed bootstrap audits are not cached, so readiness continues to recover
+// when ClickHouse bootstrap completes.
+type durableReadiness struct {
+	store          durableReadinessStore
+	schemaVerified atomic.Bool
+}
+
+func (r *durableReadiness) check(ctx context.Context) error {
+	if r == nil || r.store == nil {
+		return fmt.Errorf("durable store unconfigured")
+	}
+	if !r.schemaVerified.Load() {
+		if err := r.store.Ready(ctx); err != nil {
+			return err
+		}
+		r.schemaVerified.Store(true)
+		return nil
+	}
+	return r.store.Ping(ctx)
 }
 
 type analyticsKafkaLifecycle struct {
@@ -185,12 +214,13 @@ func wireAnalyticsRuntime() (analyticsRuntime, error) {
 			return analyticsRuntime{}, err
 		}
 		rt := analyticsRuntime{
-			app:     chs,
-			mode:    "durable",
-			ready:   true,
-			creds:   creds,
-			chStore: chs,
-			kafka:   life,
+			app:       chs,
+			mode:      "durable",
+			ready:     true,
+			creds:     creds,
+			chStore:   chs,
+			readiness: &durableReadiness{store: chs},
+			kafka:     life,
 		}
 		return rt, nil
 	}
@@ -223,10 +253,10 @@ func newAnalyticsKafkaLifecycle(cfg AnalyticsKafkaConfig, app AnalyticsIngester)
 }
 
 func (rt analyticsRuntime) durableReady(ctx context.Context) error {
-	if rt.chStore == nil {
+	if rt.readiness == nil {
 		return fmt.Errorf("durable store unconfigured")
 	}
-	if err := rt.chStore.Ready(ctx); err != nil {
+	if err := rt.readiness.check(ctx); err != nil {
 		return err
 	}
 	if rt.kafka != nil && !rt.kafka.Healthy() {

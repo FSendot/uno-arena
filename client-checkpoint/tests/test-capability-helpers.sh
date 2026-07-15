@@ -5,8 +5,6 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/capability-assert.sh
 . "$TESTS_DIR/lib/capability-assert.sh"
-# shellcheck source=lib/capability-compose.sh
-. "$TESTS_DIR/lib/capability-compose.sh"
 # shellcheck source=lib/capability-fixtures.sh
 . "$TESTS_DIR/lib/capability-fixtures.sh"
 
@@ -26,6 +24,24 @@ check() {
     echo "not ok - $label" >&2
     fail=$((fail + 1))
   fi
+}
+
+# Select a free loopback port for the stdlib HTTP fixtures in this test. The
+# live kind wrapper owns Gateway port selection separately.
+free_localhost_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+localhost_port_usable() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
 # --- capability_run_bounded: immediate exit 7 must surface ---
@@ -97,6 +113,11 @@ fi
 printf 'event: SnapshotSanitized\ndata: {"schemaVersion":1,"roomId":"r1"}\n\n' >"$TMP/spec.sse"
 check "sse_frame_has_event accepts SnapshotSanitized frame" \
   capability_sse_frame_has_event "$TMP/spec.sse" "SnapshotSanitized"
+printf 'event: projection_updated\ndata: {"schemaVersion":1,"roomId":"r1","sequence":2}\n\n' >"$TMP/spec-projection.sse"
+check "sse_frame_has_event accepts projection_updated frame" \
+  capability_sse_frame_has_event "$TMP/spec-projection.sse" "projection_updated"
+check "sse_live_ok accepts projection_updated public frame" \
+  capability_sse_live_ok "$TMP/spec-projection.sse"
 printf 'event: SnapshotSanitized\ndata:\n\n' >"$TMP/spec-empty-data.sse"
 if capability_sse_frame_has_event "$TMP/spec-empty-data.sse" "SnapshotSanitized"; then
   echo "not ok - sse_frame_has_event rejects empty data" >&2
@@ -128,65 +149,17 @@ else
   pass=$((pass + 1))
 fi
 
-# --- port usability / parse helpers ---
-check "port 8080 usable" capability_compose_port_usable "8080"
-if capability_compose_port_usable "0"; then
-  echo "not ok - port 0 rejected" >&2
-  fail=$((fail + 1))
-else
-  echo "ok - port 0 rejected"
-  pass=$((pass + 1))
-fi
-check "parse 0.0.0.0:12345" test "$(capability_compose_parse_host_port '0.0.0.0:12345')" = "12345"
-check "parse [::]:23456" test "$(capability_compose_parse_host_port '[::]:23456')" = "23456"
-
 # --- free localhost port selector (Python socket) ---
-free1="$(capability_compose_free_host_port)"
-check "free_host_port returns usable nonzero" capability_compose_port_usable "$free1"
+free1="$(free_localhost_port)"
+check "free_localhost_port returns usable nonzero" localhost_port_usable "$free1"
 # Hold free1 so the next selection cannot reuse it while bound.
 python3 -c "import socket,time; s=socket.socket(); s.bind(('127.0.0.1', int('$free1'))); time.sleep(60)" &
 hold_pid=$!
 capability_track_pid "$hold_pid"
 sleep 0.2
-free2="$(capability_compose_free_host_port)"
-check "free_host_port second pick usable" capability_compose_port_usable "$free2"
-check "free_host_port second pick differs while first held" test "$free1" != "$free2"
-
-# --- up_ready bind-conflict retry picks another concrete free port (never 0) ---
-# Keep free1 held so the retry selector cannot reuse it.
-CAP_BFF_HOST_PORT="$free1"
-export BFF_HOST_PORT="$free1"
-CAP_COMPOSE_PROJECT="cap-helper-stub"
-CAP_REPO_ROOT="$TESTS_DIR"
-CAP_ENV_FILE=".env.example"
-CAP_COMPOSE_FILES=(-f /dev/null)
-up_stub_n=0
-capability_compose_up() {
-  up_stub_n=$((up_stub_n + 1))
-  if [ "$up_stub_n" -eq 1 ]; then
-    echo "Error: bind: address already in use" >&2
-    return 1
-  fi
-  return 0
-}
-capability_compose_down() { :; }
-capability_compose_gateway_host_port() {
-  # Discovery must surface the selected nonzero port (not Docker zero).
-  if ! capability_compose_port_usable "${CAP_BFF_HOST_PORT:-}"; then
-    echo "FAIL: stub discovery saw unusable CAP_BFF_HOST_PORT='${CAP_BFF_HOST_PORT:-}'" >&2
-    return 1
-  fi
-  printf '%s\n' "$CAP_BFF_HOST_PORT"
-}
-set +e
-capability_compose_up_ready 1
-up_rc=$?
-set -e
-check "up_ready bind retry succeeds" test "$up_rc" -eq 0
-check "up_ready retried once then succeeded" test "$up_stub_n" -eq 2
-check "up_ready retry port usable" capability_compose_port_usable "$CAP_BFF_HOST_PORT"
-check "up_ready retry never zero" test "$CAP_BFF_HOST_PORT" != "0"
-check "up_ready retry chose different free port" test "$CAP_BFF_HOST_PORT" != "$free1"
+free2="$(free_localhost_port)"
+check "free_localhost_port second pick usable" localhost_port_usable "$free2"
+check "free_localhost_port second pick differs while first held" test "$free1" != "$free2"
 capability_kill_bg_pids
 
 # --- value channel: assert ok diagnostics must not be command-substituted with values ---
@@ -366,7 +339,7 @@ fi
 
 # --- capability_http_code: optional CAP_HTTP_MAX_TIME bounds hung responses ---
 # Hang server: HTTP 200 + never-ending body (SSE-shaped). Without max-time this would block forever.
-hang_port="$(capability_compose_free_host_port)"
+hang_port="$(free_localhost_port)"
 python3 - "$hang_port" <<'PY' &
 import sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -443,7 +416,7 @@ check "http_code max-time stderr mentions timed out" \
 # Timed-out open stream must not look like a successful denial code.
 check "http_code max-time does not report 403" test "$hang_code" != "403"
 # Quick path without max-time still works (python stdlib echo).
-quick_port="$(capability_compose_free_host_port)"
+quick_port="$(free_localhost_port)"
 python3 - "$quick_port" <<'PY' &
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -517,7 +490,7 @@ fi
 # --- wait_http: timed-out 200 (hung body) must retry then fail; fast 200 must pass ---
 # Threading server: a hung body must not block the next probe (false-pass shape + wait_http).
 unset CAP_HTTP_BODY_FILE CAP_HTTP_MAX_TIME
-wait_hang_port="$(capability_compose_free_host_port)"
+wait_hang_port="$(free_localhost_port)"
 python3 - "$wait_hang_port" <<'PY' &
 import sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -606,7 +579,7 @@ check "wait_http overall timeout returns 1 on hung body" test "$wait_rc" -eq 1
 capability_kill_bg_pids
 
 # Fast-closing 200 must succeed (rc 0 + matching code).
-wait_ok_port="$(capability_compose_free_host_port)"
+wait_ok_port="$(free_localhost_port)"
 python3 - "$wait_ok_port" <<'PY' &
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer

@@ -16,7 +16,7 @@ Production uses these recovery objectives:
 
 Backups are encrypted in transit and at rest, use credentials separate from runtime/DDL roles, and reside outside the primary cluster failure domain. Production performs an automated quarterly restore drill into isolated infrastructure. A drill validates decryptability, schema/version compatibility, point-in-time selection, context invariants, KurrentDB commitments/replay, key-history access, CDC/checkpoint reconciliation, measured RPO/RTO, and secure teardown. Backup-upload success alone is not recovery evidence.
 
-Local Docker Compose and `kind` use disposable storage and make no backup, HA, RPO, or RTO claim. They may exercise restore tooling with fixtures, but production objectives are verified in an isolated production-like lane.
+Local `kind` uses disposable storage and makes no backup, HA, RPO, or RTO claim. It may exercise restore tooling with fixtures, but production objectives are verified in an isolated production-like lane.
 
 ## Consequences
 Authoritative contexts have explicit recovery bounds, while Redis remains rebuildable rather than becoming accidental truth. Backup storage, WAL/archive lag, cross-failure-domain bandwidth, encryption keys, restore automation, quarterly drills, and evidence retention become production responsibilities. A Game Integrity restore is unavailable if historical wrapping keys are unavailable even when KurrentDB bytes survived. Provider choice remains open if it meets the objectives and produces verifiable restore evidence.

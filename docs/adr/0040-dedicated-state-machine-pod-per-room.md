@@ -27,7 +27,7 @@ Each `waiting`, `locked`, or `in_progress` Room has one lifecycle-bound bare Kub
 - Direct pod-IP traffic carries a scoped runtime credential and remains inside the service-mesh mTLS boundary.
 - The stable Room boundary authenticates the original route-specific caller before pod lookup and credential upgrade. A runtime accepts only the authorized router hop for its pinned `roomId` and generation; raw caller identity fields never grant player-private access by themselves.
 - Terminal Room state is committed before teardown. Final reads remain available from Postgres/projections, and SSE closure follows the committed terminal event.
-- Every durable Kubernetes environment, including local `kind`, uses this topology. Compose/capability mode may collapse Room into one process only for semantic tests and is not topology evidence.
+- Every durable Kubernetes environment, including local `kind`, uses this topology. Offline capability-mode and fake-BFF checks may collapse Room into one process only for semantic tests and are not topology or deployment evidence.
 
 ## Consequences
 

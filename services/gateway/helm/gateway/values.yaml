@@ -23,6 +23,7 @@ env:
   SPECTATOR_VIEW_URL: http://spectator-view:8080
   RANKING_URL: http://ranking:8080
   ANALYTICS_URL: http://analytics:8080
+  GATEWAY_BACKEND_HTTP_TIMEOUT: "5s"
   REDIS_URL: redis://redis:6379/0
   # Base architecture mode: do not set GATEWAY_ALLOW_FAKES / GATEWAY_CAPABILITY_MODE.
   # Durable Redis requires REDIS_URL (rate-limit DB) plus GATEWAY_PLAYER_FEED_REDIS_URL

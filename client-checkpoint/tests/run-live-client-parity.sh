@@ -1,53 +1,45 @@
 #!/usr/bin/env bash
-# Repeatable Docker capability-stack integration harness.
-# Speaks only to the CLI/BFF external edge. Requires bash, curl, python3, docker.
+# Live client parity acceptance against a caller-provided external Gateway URL.
+# Speaks only to the CLI/BFF external edge. Requires bash, curl, and python3.
 #
 # Usage:
-#   ./client-checkpoint/tests/run-capability-stack.sh
-#   KEEP_STACK=1 ./client-checkpoint/tests/run-capability-stack.sh   # leave stack up
+#   UNOARENA_API_URL=http://127.0.0.1:8080 \
+#     ./client-checkpoint/tests/run-live-client-parity.sh
 #
 # Env:
-#   KEEP_STACK=1             skip teardown of a stack this harness started
-#   CAP_SKIP_UP=1            assume stack already running; requires caller UNOARENA_API_URL
-#                            (never overwritten). Never tears down external projects/volumes
-#                            unless CAP_TEARDOWN_EXTERNAL=1 (+ CAP_COMPOSE_PROJECT).
-#   CAP_TEARDOWN_EXTERNAL=1  explicit opt-in to down -v an external CAP_COMPOSE_PROJECT
-#   CAP_BFF_HOST_PORT        host port for gateway (default: free localhost port via Python)
-#   CAP_COMPOSE_PROJECT      compose project name (default: unique per run when starting)
+#   UNOARENA_API_URL         required external Gateway base URL; never overwritten
 #   CAP_READY_TIMEOUT_S      readiness wait (default 180)
+#   CAP_ROOM_READY_TIMEOUT_S first dedicated Room runtime wait (defaults to readiness wait)
+#   CAP_SPECTATOR_PROJECTION_TIMEOUT_S async spectator projection wait (default 60)
 set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLIENT_DIR="$(cd "$TESTS_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$CLIENT_DIR/.." && pwd)"
 CLI="${CLIENT_DIR}/bin/unoarena"
 
 # shellcheck source=lib/capability-assert.sh
 . "$TESTS_DIR/lib/capability-assert.sh"
-# shellcheck source=lib/capability-compose.sh
-. "$TESTS_DIR/lib/capability-compose.sh"
 # shellcheck source=lib/capability-fixtures.sh
 . "$TESTS_DIR/lib/capability-fixtures.sh"
 
 capability_require_cmds
-command -v docker >/dev/null 2>&1 || {
-  echo "FAIL: docker is required for the capability stack harness" >&2
-  exit 1
-}
 chmod +x "$CLI"
+
+if [ -z "${UNOARENA_API_URL:-}" ]; then
+  echo "FAIL: UNOARENA_API_URL is required for live client parity acceptance" >&2
+  exit 1
+fi
+# Preserve the caller's environment exactly; normalize only this local join base.
+BASE="${UNOARENA_API_URL%/}"
 
 CAP_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/uno-cap.XXXXXX")"
 CAP_HTTP_BODY_FILE="$CAP_TMPDIR/body.json"
 RUN_ID="$(capability_unique_run_id)"
 READY_TIMEOUT_S="${CAP_READY_TIMEOUT_S:-180}"
-# Export so compose gateway port discovery shares the same startup window.
-export CAP_READY_TIMEOUT_S="$READY_TIMEOUT_S"
+ROOM_READY_TIMEOUT_S="${CAP_ROOM_READY_TIMEOUT_S:-$READY_TIMEOUT_S}"
+SPECTATOR_PROJECTION_TIMEOUT_S="${CAP_SPECTATOR_PROJECTION_TIMEOUT_S:-60}"
 export CAP_TMPDIR
 
-STACK_STARTED=0
-KEEP_STACK="${KEEP_STACK:-0}"
-CAP_SKIP_UP="${CAP_SKIP_UP:-0}"
-CAP_TEARDOWN_EXTERNAL="${CAP_TEARDOWN_EXTERNAL:-0}"
 CAP_CLEANUP_DONE=0
 CAP_EXIT_CODE=0
 
@@ -67,26 +59,8 @@ cleanup() {
   fi
   CAP_CLEANUP_DONE=1
   trap - EXIT INT TERM
-  # Always reap background processes before temp cleanup (including KEEP_STACK=1).
+  # Always reap background streams and bounded commands before temp cleanup.
   capability_kill_bg_pids
-  if [ "$KEEP_STACK" = "1" ]; then
-    if [ "$STACK_STARTED" = "1" ]; then
-      echo "==> KEEP_STACK=1: leaving project ${CAP_COMPOSE_PROJECT:-?} on port ${HOST_PORT:-?} url=${UNOARENA_API_URL:-}"
-    else
-      echo "==> KEEP_STACK=1: leaving external stack at ${UNOARENA_API_URL:-}"
-    fi
-  elif [ "$STACK_STARTED" = "1" ]; then
-    echo "==> teardown project $CAP_COMPOSE_PROJECT (harness-started)"
-    capability_compose_down
-  elif [ "$CAP_TEARDOWN_EXTERNAL" = "1" ]; then
-    if [ -z "${CAP_COMPOSE_PROJECT:-}" ]; then
-      echo "WARN: CAP_TEARDOWN_EXTERNAL=1 set but CAP_COMPOSE_PROJECT empty; skip down" >&2
-    else
-      echo "==> CAP_TEARDOWN_EXTERNAL=1: teardown external project $CAP_COMPOSE_PROJECT"
-      capability_compose_down
-    fi
-  fi
-  # CAP_SKIP_UP without CAP_TEARDOWN_EXTERNAL: never touch external volumes/projects.
   rm -rf "$CAP_TMPDIR"
   exit "${CAP_EXIT_CODE}"
 }
@@ -97,6 +71,129 @@ trap 'CAP_EXIT_CODE=143; cleanup' TERM
 phase() {
   echo
   echo "==> phase: $*"
+}
+
+# A CreateRoom acceptance precedes the dedicated runtime becoming Ready. Gate the
+# first mutation on a safe, authenticated player-snapshot read; never retry the
+# JoinRoom command whose outcome would be ambiguous after an HTTP failure.
+wait_authenticated_player_snapshot() {
+  local label="$1"
+  local url="$2"
+  local token="$3"
+  local body_file="$4"
+  local timeout_s="$5"
+  local probe_max="${CAP_WAIT_HTTP_PROBE_MAX_TIME:-2}"
+  local start=$SECONDS
+  local code=""
+  local probe_rc=0
+  local elapsed=0
+
+  while [ "$((SECONDS - start))" -lt "$timeout_s" ]; do
+    probe_rc=0
+    code="$(
+      CAP_HTTP_BODY_FILE="$body_file" CAP_HTTP_MAX_TIME="$probe_max" \
+        capability_http_code -H "Authorization: Bearer ${token}" "$url" 2>/dev/null
+    )" || probe_rc=$?
+    elapsed=$((SECONDS - start))
+    if [ "$probe_rc" -eq 0 ] && [ "$code" = "200" ]; then
+      echo "ok - $label (${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+  done
+
+  elapsed=$((SECONDS - start))
+  echo "not ok - $label timed out after ${timeout_s}s (last=$code rc=$probe_rc)" >&2
+  if [ -f "$body_file" ]; then
+    echo "  body: $(head -c 1000 "$body_file")" >&2
+  fi
+  return 1
+}
+
+# Spectator View is an asynchronous Kafka projection. Poll only its safe GET
+# until it has reached the committed Room sequence; never retry the mutation
+# that produced the fact.
+wait_spectator_snapshot_status() {
+  local label="$1"
+  local url="$2"
+  local status="$3"
+  local min_sequence="$4"
+  local body_file="$5"
+  local timeout_s="$6"
+  local probe_max="${CAP_WAIT_HTTP_PROBE_MAX_TIME:-2}"
+  local start=$SECONDS
+  local code=""
+  local probe_rc=0
+  local elapsed=0
+
+  while [ "$((SECONDS - start))" -lt "$timeout_s" ]; do
+    probe_rc=0
+    code="$(
+      CAP_HTTP_BODY_FILE="$body_file" CAP_HTTP_MAX_TIME="$probe_max" \
+        capability_http_code "$url" 2>/dev/null
+    )" || probe_rc=$?
+    elapsed=$((SECONDS - start))
+    if [ "$probe_rc" -eq 0 ] && [ "$code" = "200" ] && \
+        python3 - "$body_file" "$status" "$min_sequence" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+
+path, status, min_sequence = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(path, encoding="utf-8") as source:
+    data = json.load(source)
+assert data.get("status") == status, data
+assert int(data.get("sequence", -1)) >= min_sequence, data
+assert data.get("streamClosed") is False, data
+PY
+    then
+      echo "ok - $label status=${status} sequence>=${min_sequence} (${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+  done
+
+  elapsed=$((SECONDS - start))
+  echo "not ok - $label timed out after ${timeout_s}s (last=$code rc=$probe_rc)" >&2
+  if [ -f "$body_file" ]; then
+    echo "  body: $(head -c 1000 "$body_file")" >&2
+  fi
+  return 1
+}
+
+# Terminal denial is projected asynchronously too. Poll only the safe snapshot
+# GET until Spectator View closes admission; never replay the terminal mutation.
+wait_http_status() {
+  local label="$1"
+  local url="$2"
+  local expected="$3"
+  local body_file="$4"
+  local timeout_s="$5"
+  local probe_max="${CAP_WAIT_HTTP_PROBE_MAX_TIME:-2}"
+  local start=$SECONDS
+  local code=""
+  local probe_rc=0
+  local elapsed=0
+
+  while [ "$((SECONDS - start))" -lt "$timeout_s" ]; do
+    probe_rc=0
+    code="$(
+      CAP_HTTP_BODY_FILE="$body_file" CAP_HTTP_MAX_TIME="$probe_max" \
+        capability_http_code "$url" 2>/dev/null
+    )" || probe_rc=$?
+    elapsed=$((SECONDS - start))
+    if [ "$probe_rc" -eq 0 ] && [ "$code" = "$expected" ]; then
+      echo "ok - $label HTTP ${expected} (${elapsed}s)"
+      return 0
+    fi
+    sleep 2
+  done
+
+  elapsed=$((SECONDS - start))
+  echo "not ok - $label timed out after ${timeout_s}s (last=$code rc=$probe_rc)" >&2
+  if [ -f "$body_file" ]; then
+    echo "  body: $(head -c 1000 "$body_file")" >&2
+  fi
+  return 1
 }
 
 # Login + assert only. Do not command-substitute this: must_cli_json and
@@ -110,50 +207,8 @@ login_token() {
     "assert data.get('token') and data.get('playerId') and data.get('sessionId'), data"
 }
 
-# --- bootstrap ---
-if [ "$CAP_SKIP_UP" = "1" ]; then
-  if [ -z "${UNOARENA_API_URL:-}" ]; then
-    echo "FAIL: CAP_SKIP_UP=1 requires caller UNOARENA_API_URL (not synthesized)" >&2
-    exit 1
-  fi
-  # Preserve caller UNOARENA_API_URL exactly (no synthesize/overwrite).
-  # BASE strips a trailing slash only for path joins; env URL is untouched.
-  BASE="${UNOARENA_API_URL%/}"
-  PROJECT="${CAP_COMPOSE_PROJECT:-}"
-  HOST_PORT="${CAP_BFF_HOST_PORT:-}"
-  if [ "$CAP_TEARDOWN_EXTERNAL" = "1" ]; then
-    if [ -z "$PROJECT" ]; then
-      echo "FAIL: CAP_TEARDOWN_EXTERNAL=1 requires CAP_COMPOSE_PROJECT" >&2
-      exit 1
-    fi
-    if [ -z "$HOST_PORT" ]; then
-      HOST_PORT="$(capability_compose_free_host_port)"
-    fi
-    capability_compose_init "$REPO_ROOT" "$PROJECT" "$HOST_PORT" ".env.example"
-  fi
-  echo "capability stack run_id=$RUN_ID CAP_SKIP_UP=1 url=$UNOARENA_API_URL"
-  echo "tmp=$CAP_TMPDIR"
-  echo "==> CAP_SKIP_UP=1: using existing UNOARENA_API_URL=$UNOARENA_API_URL (no overwrite)"
-else
-  PROJECT="${CAP_COMPOSE_PROJECT:-uno-cap-${RUN_ID}}"
-  if [ -n "${CAP_BFF_HOST_PORT:-}" ]; then
-    HOST_PORT="$CAP_BFF_HOST_PORT"
-  else
-    # Concrete free localhost port — Compose 5.x does not bind published=0.
-    HOST_PORT="$(capability_compose_free_host_port)"
-  fi
-  capability_compose_init "$REPO_ROOT" "$PROJECT" "$HOST_PORT" ".env.example"
-  echo "capability stack run_id=$RUN_ID project=$PROJECT port_request=$HOST_PORT"
-  echo "tmp=$CAP_TMPDIR"
-
-  phase "0 compose up (capability overlay)"
-  STACK_STARTED=1
-  capability_compose_up_ready 1
-  HOST_PORT="$CAP_BFF_HOST_PORT"
-  BASE="http://127.0.0.1:${HOST_PORT}"
-  export UNOARENA_API_URL="$BASE"
-  echo "==> gateway published at $UNOARENA_API_URL (project=$PROJECT)"
-fi
+echo "live client parity run_id=$RUN_ID url=$UNOARENA_API_URL"
+echo "tmp=$CAP_TMPDIR"
 
 # --- 1 readiness (raw /health before first CLI use) ---
 phase "1 health / ready"
@@ -250,13 +305,18 @@ capability_assert_accepted "CreateRoom accepted seq1" "$CAP_TMPDIR/create-main.j
 capability_json_assert "CreateRoom type" "$CAP_TMPDIR/create-main.json" \
   "assert data.get('type')=='CreateRoom', data"
 
+PLAYER_SNAP_URL="$BASE/v1/rooms/$(capability_urlencode "$ROOM_MAIN")/snapshot"
+wait_authenticated_player_snapshot \
+  "host player snapshot readiness before first JoinRoom" \
+  "$PLAYER_SNAP_URL" "$TOKEN_B" "$CAP_TMPDIR/host-snap-ready.json" \
+  "$ROOM_READY_TIMEOUT_S"
+
 # spectator waiting
 SPEC_URL="$BASE/v1/spectator/rooms/$(capability_urlencode "$ROOM_MAIN")/snapshot"
-code="$(CAP_HTTP_BODY_FILE="$CAP_TMPDIR/spec-waiting.json" capability_http_code "$SPEC_URL")"
-capability_assert_http "spectator snapshot waiting" "200" "$code"
-capability_json_assert "spectator waiting status" "$CAP_TMPDIR/spec-waiting.json" \
-  "assert data.get('status')=='waiting', data; assert data.get('streamClosed') is False, data"
+wait_spectator_snapshot_status "spectator snapshot waiting" "$SPEC_URL" waiting 1 \
+  "$CAP_TMPDIR/spec-waiting.json" "$SPECTATOR_PROJECTION_TIMEOUT_S"
 
+# This mutation is attempted exactly once after the safe-read readiness gate.
 must_cli_json "JoinRoom" "$CAP_TMPDIR/join-main.json" \
   command --token "$GUEST_TOKEN" --type JoinRoom --room-id "$ROOM_MAIN" \
   --command-id "cmd-join-main-$RUN_ID" --expected-sequence 1 --payload '{}' \
@@ -269,10 +329,8 @@ must_cli_json "LockRoom" "$CAP_TMPDIR/lock-main.json" \
   --correlation-id "corr-lock-main-$RUN_ID"
 capability_assert_accepted "LockRoom accepted seq3" "$CAP_TMPDIR/lock-main.json" 3
 
-code="$(CAP_HTTP_BODY_FILE="$CAP_TMPDIR/spec-locked.json" capability_http_code "$SPEC_URL")"
-capability_assert_http "spectator snapshot locked" "200" "$code"
-capability_json_assert "spectator locked status" "$CAP_TMPDIR/spec-locked.json" \
-  "assert data.get('status')=='locked', data; assert data.get('streamClosed') is False, data"
+wait_spectator_snapshot_status "spectator snapshot locked" "$SPEC_URL" locked 3 \
+  "$CAP_TMPDIR/spec-locked.json" "$SPECTATOR_PROJECTION_TIMEOUT_S"
 
 START_PAYLOAD="$(capability_payload_start_match "$GAME_ID")"
 must_cli_json "StartMatch" "$CAP_TMPDIR/start-main.json" \
@@ -281,10 +339,8 @@ must_cli_json "StartMatch" "$CAP_TMPDIR/start-main.json" \
   --correlation-id "corr-start-main-$RUN_ID"
 capability_assert_accepted "StartMatch accepted seq4" "$CAP_TMPDIR/start-main.json" 4
 
-code="$(CAP_HTTP_BODY_FILE="$CAP_TMPDIR/spec-progress.json" capability_http_code "$SPEC_URL")"
-capability_assert_http "spectator snapshot in_progress" "200" "$code"
-capability_json_assert "spectator in_progress status" "$CAP_TMPDIR/spec-progress.json" \
-  "assert data.get('status')=='in_progress', data; assert data.get('streamClosed') is False, data"
+wait_spectator_snapshot_status "spectator snapshot in_progress" "$SPEC_URL" in_progress 4 \
+  "$CAP_TMPDIR/spec-progress.json" "$SPECTATOR_PROJECTION_TIMEOUT_S"
 
 # stale sequence reject (after start; expectedSequence 1 is stale). The CLI
 # exits nonzero for HTTP 409 while preserving the rejected CommandResult in its
@@ -315,9 +371,10 @@ capability_assert_rejected "stale sequence rejected" "$CAP_TMPDIR/stale-join.jso
 
 # --- 4 DrawCard via player snapshot currentPlayer + spectator SSE after mutation ---
 phase "4 deterministic DrawCard + spectator SSE"
-# Spectator streams have no initial body: subscribe before the mutation, then require
-# exact canonical Room event SnapshotSanitized + non-empty data (gateway forwards
-# Room event type unchanged; not a projection_updated alias).
+# Spectator streams have no initial body: subscribe before the mutation, then
+# require Spectator View's public projection_updated event with non-empty data.
+# SnapshotSanitized is the upstream Room-to-Spectator Kafka fact, not the public
+# projection stream event owned by Spectator View.
 SPEC_LIVE="$CAP_TMPDIR/spec-live.sse"
 CAP_SPAWN_ERR="$SPEC_LIVE.err"
 capability_spawn_pg "$SPEC_LIVE" -- \
@@ -333,7 +390,6 @@ if ! kill -0 "$SPEC_PID" 2>/dev/null; then
 fi
 echo "ok - spectator SSE subscribed before DrawCard"
 
-PLAYER_SNAP_URL="$BASE/v1/rooms/$(capability_urlencode "$ROOM_MAIN")/snapshot"
 code="$(CAP_HTTP_BODY_FILE="$CAP_TMPDIR/host-snap.json" capability_http_code \
   -H "Authorization: Bearer ${TOKEN_B}" "$PLAYER_SNAP_URL")"
 capability_assert_http "host player snapshot" "200" "$code"
@@ -360,10 +416,10 @@ must_cli_json "DrawCard" "$CAP_TMPDIR/draw.json" \
   --correlation-id "corr-draw-$RUN_ID"
 capability_assert_accepted "DrawCard accepted" "$CAP_TMPDIR/draw.json" "$NEXT_SEQ"
 
-if capability_wait_sse_event "$SPEC_LIVE" "SnapshotSanitized" 20; then
-  echo "ok - spectator SSE event: SnapshotSanitized + data after DrawCard"
+if capability_wait_sse_event "$SPEC_LIVE" "projection_updated" 20; then
+  echo "ok - spectator SSE event: projection_updated + data after DrawCard"
 else
-  echo "not ok - spectator SSE missing exact event: SnapshotSanitized + data after DrawCard" >&2
+  echo "not ok - spectator SSE missing exact event: projection_updated + data after DrawCard" >&2
   echo "--- spectator stdout ---" >&2
   cat "$SPEC_LIVE" >&2 || true
   echo "--- spectator stderr ---" >&2
@@ -481,17 +537,23 @@ must_cli_json "CreateRoom term" "$CAP_TMPDIR/create-term.json" \
 capability_assert_accepted "CreateRoom term" "$CAP_TMPDIR/create-term.json" 1
 
 TERM_SPEC_URL="$BASE/v1/spectator/rooms/$(capability_urlencode "$ROOM_TERM")/snapshot"
-code="$(CAP_HTTP_BODY_FILE="$CAP_TMPDIR/spec-term-wait.json" capability_http_code "$TERM_SPEC_URL")"
-capability_assert_http "term spectator waiting" "200" "$code"
+TERM_PLAYER_SNAP_URL="$BASE/v1/rooms/$(capability_urlencode "$ROOM_TERM")/snapshot"
+wait_authenticated_player_snapshot \
+  "host player snapshot readiness before CancelRoom" \
+  "$TERM_PLAYER_SNAP_URL" "$TOKEN_B" "$CAP_TMPDIR/term-player-snap-ready.json" \
+  "$ROOM_READY_TIMEOUT_S"
+wait_spectator_snapshot_status "term spectator waiting" "$TERM_SPEC_URL" waiting 1 \
+  "$CAP_TMPDIR/spec-term-wait.json" "$SPECTATOR_PROJECTION_TIMEOUT_S"
 
+# This mutation is attempted exactly once after the safe-read readiness gate.
 must_cli_json "CancelRoom" "$CAP_TMPDIR/cancel-term.json" \
   command --token "$TOKEN_B" --type CancelRoom --room-id "$ROOM_TERM" \
   --command-id "cmd-cancel-term-$RUN_ID" --expected-sequence 1 --payload '{}'
 # CreateRoom accepted at seq 1; CancelRoom must advance to seq 2.
 capability_assert_accepted "CancelRoom" "$CAP_TMPDIR/cancel-term.json" 2
 
-code="$(CAP_HTTP_BODY_FILE="$CAP_TMPDIR/spec-term-denied.json" capability_http_code "$TERM_SPEC_URL")"
-capability_assert_http "term spectator snapshot 403" "403" "$code"
+wait_http_status "term spectator snapshot 403" "$TERM_SPEC_URL" 403 \
+  "$CAP_TMPDIR/spec-term-denied.json" "$SPECTATOR_PROJECTION_TIMEOUT_S"
 capability_json_assert "term spectator snapshot spectator_denied" "$CAP_TMPDIR/spec-term-denied.json" \
   "assert data.get('code')=='spectator_denied', data"
 
@@ -539,4 +601,4 @@ capability_assert_cli_terminal_denial "terminal stream denial CLI evidence" \
   "$(cat "$CAP_TMPDIR/spec-term-stream.out" 2>/dev/null || true)"
 
 echo
-echo "capability stack harness passed (project=${CAP_COMPOSE_PROJECT:-external} run_id=$RUN_ID url=$UNOARENA_API_URL)"
+echo "live client parity acceptance passed (run_id=$RUN_ID url=$UNOARENA_API_URL)"

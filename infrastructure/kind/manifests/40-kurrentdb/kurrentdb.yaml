@@ -32,6 +32,8 @@ metadata:
     uno-arena.local/kurrentdb-architecture-selected: "true"
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: kurrentdb
@@ -90,7 +92,8 @@ spec:
               cpu: 100m
               memory: 512Mi
             limits:
-              memory: 1536Mi
+              cpu: "1"
+              memory: 1024Mi
       volumes:
         - name: data
           emptyDir: {}

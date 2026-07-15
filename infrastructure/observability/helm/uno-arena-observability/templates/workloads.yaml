@@ -345,6 +345,9 @@ spec:
             - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "false"}
             - {name: GF_USERS_ALLOW_SIGN_UP, value: "false"}
             - {name: GF_PLUGINS_PREINSTALL_DISABLED, value: {{ .Values.grafana.preinstallDisabled | quote }}}
+            {{- with .Values.grafana.goMemoryLimit }}
+            - {name: GOMEMLIMIT, value: {{ . | quote }}}
+            {{- end }}
             - {name: GF_SECURITY_ADMIN_USER, valueFrom: {secretKeyRef: {name: {{ .Values.grafana.existingAdminSecret | quote }}, key: {{ .Values.grafana.adminUserKey | quote }}}}}
             - {name: GF_SECURITY_ADMIN_PASSWORD, valueFrom: {secretKeyRef: {name: {{ .Values.grafana.existingAdminSecret | quote }}, key: {{ .Values.grafana.adminPasswordKey | quote }}}}}
           ports:

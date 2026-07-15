@@ -34,6 +34,7 @@ storage:
 grafana:
   existingAdminSecret: uno-arena-local-observability
   strategyType: Recreate
+  goMemoryLimit: 256MiB
 
 security:
   # The kind acceptance lane proves strict Ambient mTLS and SPIFFE-scoped
@@ -66,4 +67,4 @@ resources:
     requests: {cpu: 10m, memory: 32Mi}
   grafana:
     requests: {cpu: 50m, memory: 64Mi}
-    limits: {cpu: "1", memory: 512Mi}
+    limits: {cpu: 500m, memory: 384Mi}

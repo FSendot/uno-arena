@@ -113,6 +113,8 @@ metadata:
     uno-arena.local/cdc-pipeline: room-realtime-redis
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: debezium-server-room-realtime
@@ -147,6 +149,8 @@ spec:
                 secretKeyRef:
                   name: uno-arena-local-credentials
                   key: room-cdc-realtime-password
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Xms64m -Xmx256m"
           volumeMounts:
             - name: config
               mountPath: /debezium/config
@@ -170,9 +174,10 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 512Mi
+              memory: 256Mi
             limits:
-              memory: 1536Mi
+              cpu: 500m
+              memory: 768Mi
       volumes:
         - name: config
           configMap:

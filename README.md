@@ -71,7 +71,7 @@ This repository contains the current UnoArena design package and the architectur
 - BFF contracts include player/spectator snapshot routes and SSE `409 snapshot_required` when `Last-Event-ID` is unknown or evicted.
 - This implementation uses the repo-owned simple CLI under `client-checkpoint/` as the sole client and test interface. A graphical interface is deferred for later refactoring and does not change the BFF-only external boundary.
 - Each active room executes in one dedicated, lifecycle-bound Kubernetes state-machine pod as defined by ADR-0040. The pod is that room's exclusive command executor; Room Gameplay's context-owned Postgres remains authoritative and supports reconstruction after pod replacement.
-- Every Helm/Kubernetes durable path, including `kind`, uses the dedicated Room topology. The explicitly non-Kubernetes Compose/capability harness may use one process for fast command-semantics tests and is not Kubernetes-topology evidence.
+- Every durable local deployment and live integration path uses the dedicated Room topology in `kind`. Fast fake-BFF and capability-mode tests remain offline process-level checks only; they are not a second deployment topology.
 
 ## Client Checkpoint
 
@@ -133,43 +133,45 @@ internal tournament commands.
 
 - [Client Checkpoint CLI](./client-checkpoint/README.md)
 
-## Local foundation (contracts + topology)
+## Local verification and deployment
 
-Offline-friendly foundation targets (no automatic module or image fetch):
+Offline-friendly contract targets (no automatic module or image fetch):
 
 ```bash
 make check
 # or individually:
-make fmt-shared test-shared validate-yaml
+make fmt-shared test-shared validate-yaml kind-validate
 ```
 
-Verified runtime pins (as of 2026-07-13; see `.env.example`, service Dockerfiles/CI, and ADR-0035): Go `1.26.0` with toolchain `go1.26.5`; builders `golang:1.26.5-alpine3.24`; runtime/CI Alpine `3.24.1`; local infra `postgres:18.4-alpine3.24`, `apache/kafka:4.3.1`, architecture-selected KurrentDB 26.0.3 (stable LTS AMD64 or experimental local-only ARM64, each pinned by digest), `redis:8.8.0-alpine`, and `clickhouse/clickhouse-server:26.6.1.1193`. OpenAPI 3.0.3 / AsyncAPI 2.6.0 / JSON Schema draft stay unchanged.
+Verified runtime pins (as of 2026-07-13; see `infrastructure/kind/manifests/01-local-secrets.yaml`, the kind manifests, service Dockerfiles/CI, and ADR-0035): Go `1.26.0` with toolchain `go1.26.5`; builders `golang:1.26.5-alpine3.24`; runtime/CI Alpine `3.24.1`; local infra `postgres:18.4-alpine3.24`, `apache/kafka:4.3.1`, architecture-selected KurrentDB 26.0.3 (stable LTS AMD64 or experimental local-only ARM64, each pinned by digest), `redis:8.8.0-alpine`, and `clickhouse/clickhouse-server:26.6.1.1193`. OpenAPI 3.0.3 / AsyncAPI 2.6.0 / JSON Schema draft stay unchanged.
 
 The observability implementation keeps that Go 1.26.5 build toolchain while pinning its current compatible source modules: OpenTelemetry `v1.44.0`, OTLP/gRPC exporter `v1.44.0`, Prometheus exporter `v0.66.0`, `otelhttp v0.69.0`, `kotel v1.7.0`, `redisotel v9.21.0`, `otelpgx v0.11.1`, and Prometheus client `v1.23.2`. Dependency language declarations are minimums; repository images are still built for the selected node architecture, independently of third-party OCI image pins.
 
-Local Compose topology uses two bridges: a non-internal **edge** network (`uno_edge`, only gateway) for host port publish, and an **internal private** network (`uno_private`, all services including gateway) for interservice traffic. Backends and infra must not attach to edge — a container on an internal-only network does not materialize `NetworkSettings.Ports` even when `HostConfig.PortBindings` is set. The capability overlay project-scopes both network names (`<project>_edge` / `<project>_private`) for `docker compose -p` isolation. Copy `.env.example` before overriding image tags. Postgres 18 uses named volumes `pg_*_data_v18` mounted at `/var/lib/postgresql`; prior PG16 volumes (`pg_*_data`) stay preserved and are not reused. Local KurrentDB uses native ARM64 26.0.3 storage at `/var/lib/kurrentdb`; the capability overlay still profiles it out (`architecture-kurrentdb`) because that lane intentionally uses GI memory:
+The disposable `uno-arena` kind cluster is the single local deployment and live-test lane. The destructive clean command begins with no cluster, builds and loads repository images for the detected node architecture, installs pinned Istio Ambient and the context-owned foundation, deploys observability and all eight services, waits for real readiness, and runs the complete probe lane. It deliberately retains the successful cluster for inspection; reset is a separate explicit action:
 
 ```bash
-cp .env.example .env
-docker compose -f docker-compose.local.yml --env-file .env config
-# capability overlay (real HTTP paths; GI memory; KurrentDB omitted):
-docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env config
-docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env config --services
-make validate-yaml validate-compose test-compose-topology
-# start when images are already available / built locally (this slice does not pull):
-# docker compose -f docker-compose.local.yml --env-file .env up -d --no-build
+make kind-clean-deploy   # destructive/networked: resets only the uno-arena kind cluster
+make kind-run-live-probes
+make kind-reset          # explicit teardown after inspection
 ```
 
-Service images build from the **repository root** context (`docker build -f services/<svc>/Dockerfile .`) so local `replace` modules resolve (`shared` for gateway/tournament; `shared` + spectator-view for room-gameplay). Compose `build.context` is `.` for every service. `GOWORK=off` and `CGO_ENABLED=0` produce static binaries; Go/Alpine pins stay at the verified versions above.
+Service images build from the **repository root** context (`docker build -f services/<svc>/Dockerfile .`) so local `replace` modules resolve (`shared` for gateway/tournament; `shared` + spectator-view for room-gameplay). `GOWORK=off` and `CGO_ENABLED=0` produce static binaries; Go/Alpine pins stay at the verified versions above.
 
-Repeatable capability integration (isolated compose project, CLI/BFF only;
-teardown only for stacks this harness started):
+The live lane includes the kind-native client parity probe. It port-forwards the
+ClusterIP Gateway and exercises only the public CLI/BFF surface, including session
+takeover, room lifecycle and SSE, stale-sequence rejection, tournament idempotency,
+public read schemas, snapshot resynchronization, and terminal spectator denial.
+Against an already-ready cluster it can also be run directly:
 
 ```bash
-make test-capability-stack
-# KEEP_STACK=1 make test-capability-stack   # leave harness-started stack up
-# CAP_SKIP_UP=1 UNOARENA_API_URL=http://127.0.0.1:8080 make test-capability-stack
+./infrastructure/kind/scripts/test-client-parity-live.sh
 ```
+
+Gateway outbound backend requests use a five-second base/production timeout. The
+single-node kind overlay uses twelve seconds, leaving two seconds of response
+headroom above the Room router's ten-second bound.
+`GATEWAY_BACKEND_HTTP_TIMEOUT` accepts only positive durations through 30 seconds;
+invalid, zero, negative, or above-maximum values fail safely to five seconds.
 
 Contracts live under `contracts/openapi/bff-v1.yaml` and `contracts/asyncapi/kafka-v1.yaml`. Shared stdlib helpers live under `shared/`; cross-service OpenTelemetry SDK/exporter/resource and `log/slog` JSON-handler bootstrap lives in the infrastructure-only `platform/telemetry` module. Context-owned instruments, spans, log events/fields, and recording seams remain inside their bounded-context services, and context-owned migrations live under `services/*/migrations/`.
 
@@ -185,7 +187,7 @@ Helm uses `existingSecret` + `secretKeyRef` only (no hardcoded secrets). Operato
 | Gateway → Spectator | `gateway-spectator-service-credential` | `spectator-view-internal-credential` | Explicit outbound; distinct from Tournament (kind maps exact local secret keys) |
 | Gateway inbound Identity producer | `gateway-identity-credential` | Identity SessionInvalidated / invalidation producer | Not reused for Gateway→Identity HTTP |
 | Room → Gateway | `room-to-gateway-credential` | `gateway-room-credential` | Room producer into Gateway control/ingest |
-| Room → Identity | `room-identity-credential` | `identity-internal-credential` | Distinct from Gateway→Identity only if operators choose separate values; default local compose may share |
+| Room → Identity | `room-identity-credential` | `identity-internal-credential` | Distinct from Gateway→Identity only if operators choose separate values; the local kind Secret may share |
 | Room → Game Integrity | `game-integrity-internal-credential` (room chart) | `game-integrity-internal-credential` (GI chart) | Same key name, equal values across charts |
 | Room → Ranking | `ranking-internal-credential` (room) | `ranking-internal-credential` (ranking) | Same key name, equal values |
 | Room → Analytics | `analytics-room-credential` (room) | `analytics-room-credential` (analytics) | Room→Analytics offline HTTP bridge credential |

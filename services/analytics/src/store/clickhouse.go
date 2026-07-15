@@ -55,6 +55,15 @@ func NewAnalyticsStore(c *Client) *AnalyticsStore {
 // Client exposes the underlying HTTP client (tests/ops).
 func (s *AnalyticsStore) Client() *Client { return s.httpClient }
 
+// Ping verifies the live ClickHouse connection without repeating the immutable
+// schema audit performed by Ready during process bootstrap.
+func (s *AnalyticsStore) Ping(ctx context.Context) error {
+	if s.httpClient == nil {
+		return fmt.Errorf("analytics ready: HTTP ClickHouse client required")
+	}
+	return s.httpClient.Ping(ctx)
+}
+
 // Ready verifies schema and ensures an active completed generation exists.
 func (s *AnalyticsStore) Ready(ctx context.Context) error {
 	if s.httpClient == nil {

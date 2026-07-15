@@ -19,6 +19,8 @@ ruby "${SCRIPT_DIR}/render-kafka-topics.rb" >/dev/null
 ruby "${KIND_DIR}/tests/kafka_retention_dlq_test.rb"
 ruby "${KIND_DIR}/tests/validate_kind.rb"
 bash "${SCRIPT_DIR}/test-observability-structure.sh"
+bash "${SCRIPT_DIR}/test-observability-persistence-structure.sh"
+bash "${SCRIPT_DIR}/test-client-parity-structure.sh"
 
 # Shell / Ruby syntax checks (offline).
 require_cmd bash
@@ -41,7 +43,10 @@ bash -n "${SCRIPT_DIR}/deploy-observability.sh"
 bash -n "${SCRIPT_DIR}/wait-observability.sh"
 bash -n "${SCRIPT_DIR}/port-forward-grafana.sh"
 bash -n "${SCRIPT_DIR}/test-observability-structure.sh"
+bash -n "${SCRIPT_DIR}/test-observability-persistence-structure.sh"
 bash -n "${SCRIPT_DIR}/test-observability-live.sh"
+bash -n "${SCRIPT_DIR}/test-client-parity-live.sh"
+bash -n "${SCRIPT_DIR}/test-client-parity-structure.sh"
 bash -n "${SCRIPT_DIR}/test-clean-deployment-structure.sh"
 bash -n "${SCRIPT_DIR}/test-game-integrity-adapter.sh"
 bash -n "${SCRIPT_DIR}/test-game-integrity-adapter-structure.sh"

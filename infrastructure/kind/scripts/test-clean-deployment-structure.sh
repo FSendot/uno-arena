@@ -8,7 +8,8 @@ deploy="${SCRIPT_DIR}/deploy-services.sh"
 probes="${SCRIPT_DIR}/run-live-probes.sh"
 clean="${SCRIPT_DIR}/clean-deploy.sh"
 
-for file in "${build}" "${deploy}" "${probes}" "${clean}" "${SCRIPT_DIR}/deploy-game-integrity.sh" "${SCRIPT_DIR}/verify-portable-images.sh"; do
+capacity="${SCRIPT_DIR}/preflight-host-capacity.sh"
+for file in "${build}" "${deploy}" "${probes}" "${clean}" "${capacity}" "${SCRIPT_DIR}/deploy-game-integrity.sh" "${SCRIPT_DIR}/verify-portable-images.sh"; do
   [[ -f "${file}" ]] || { echo "FAIL: missing ${file}" >&2; exit 1; }
   bash -n "${file}"
 done
@@ -39,6 +40,7 @@ done
 grep -Fq 'load-debezium-connect.sh' "${clean}" || { echo "FAIL: Connect image staging missing" >&2; exit 1; }
 grep -Fq 'load-debezium-server.sh' "${clean}" || { echo "FAIL: Server image staging missing" >&2; exit 1; }
 grep -Fq 'run-live-probes.sh' "${clean}" || { echo "FAIL: live probes missing" >&2; exit 1; }
+grep -Fq 'test-client-parity-live.sh' "${probes}" || { echo "FAIL: live client parity probe missing" >&2; exit 1; }
 grep -Fq 'test-room-integration.sh' "${probes}" || { echo "FAIL: Room live integration probe missing" >&2; exit 1; }
 grep -Fq 'test-analytics-projection-rebuilder-live.sh' "${probes}" || { echo "FAIL: Analytics recovery live probe missing" >&2; exit 1; }
 grep -Fq 'test-spectator-projection-rebuilder-live.sh' "${probes}" || { echo "FAIL: Spectator recovery live probe missing" >&2; exit 1; }
@@ -54,6 +56,22 @@ portable_line="$(grep -n '/verify-portable-images.sh' <<<"${plan}" | cut -d: -f1
 reset_line="$(grep -n '/reset.sh' <<<"${plan}" | cut -d: -f1)"
 (( portable_line < reset_line )) || { echo "FAIL: portable index preflight must precede reset" >&2; exit 1; }
 grep -Fq '/reset.sh' <<<"${plan}" || { echo "FAIL: dry-run omits reset" >&2; exit 1; }
+capacity_line="$(grep -n '/preflight-host-capacity.sh' <<<"${plan}" | cut -d: -f1)"
+create_line="$(grep -n '/create-cluster.sh' <<<"${plan}" | cut -d: -f1)"
+(( reset_line < capacity_line && capacity_line < create_line )) || {
+  echo "FAIL: host capacity preflight must run after reset and before create" >&2
+  exit 1
+}
+grep -Fq 'KIND_MIN_HOST_FREE_GIB:-20' "${capacity}" || { echo "FAIL: 20 GiB capacity floor missing" >&2; exit 1; }
+grep -Fq 'KIND_MIN_ENGINE_MEMORY_GIB:-7' "${capacity}" || { echo "FAIL: 7 GiB engine-memory floor missing" >&2; exit 1; }
+if KIND_MIN_HOST_FREE_GIB=19 KIND_MIN_ENGINE_MEMORY_GIB=7 "${capacity}" >/dev/null 2>&1; then
+  echo "FAIL: host capacity override must not lower the 20 GiB floor" >&2
+  exit 1
+fi
+if KIND_MIN_HOST_FREE_GIB=20 KIND_MIN_ENGINE_MEMORY_GIB=6 "${capacity}" >/dev/null 2>&1; then
+  echo "FAIL: engine-memory override must not lower the 7 GiB floor" >&2
+  exit 1
+fi
 grep -Fq '/deploy-services.sh' <<<"${plan}" || { echo "FAIL: dry-run omits service deploy" >&2; exit 1; }
 grep -Fq '/run-live-probes.sh' <<<"${plan}" || { echo "FAIL: dry-run omits probes" >&2; exit 1; }
 

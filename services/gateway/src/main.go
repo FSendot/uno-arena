@@ -21,6 +21,11 @@ import (
 	"unoarena/services/gateway/bff/store"
 )
 
+const (
+	defaultGatewayBackendHTTPTimeout = 5 * time.Second
+	maxGatewayBackendHTTPTimeout     = 30 * time.Second
+)
+
 func main() {
 	if err := runGateway(); err != nil {
 		slog.ErrorContext(context.Background(), "gateway stopped", "event", "service_exit_failure", "error", err)
@@ -49,7 +54,7 @@ func runGateway() error {
 		telemetryRuntime.Logger.ErrorContext(rootCtx, "gateway audit configuration failed", "event", "startup_failure", "error", err)
 		return err
 	}
-	client := gatewayHTTPClient(telemetryRuntime, &http.Client{Timeout: 5 * time.Second})
+	client := gatewayHTTPClientForConfig(telemetryRuntime, cfg)
 	built, err := buildGatewayRuntimeWithTelemetry(cfg, client, newGatewayClientInstrumentation(telemetryRuntime))
 	if err != nil {
 		telemetryRuntime.Logger.ErrorContext(rootCtx, "gateway runtime failed", "event", "startup_failure", "error", err)
@@ -117,6 +122,7 @@ type gatewayConfig struct {
 	PlayerFeedRedisURL          string
 	SpectatorRedisURL           string
 	SpectatorRedisKeyPrefix     string
+	BackendHTTPTimeout          time.Duration
 	SessionInvalidationTTL      time.Duration
 	EdgeRateLimit               int
 	EdgeRateWindow              time.Duration
@@ -178,6 +184,7 @@ func loadGatewayConfig() gatewayConfig {
 		PlayerFeedRedisURL:          strings.TrimSpace(os.Getenv("GATEWAY_PLAYER_FEED_REDIS_URL")),
 		SpectatorRedisURL:           strings.TrimSpace(os.Getenv("GATEWAY_SPECTATOR_REDIS_URL")),
 		SpectatorRedisKeyPrefix:     strings.TrimSpace(os.Getenv("GATEWAY_SPECTATOR_REDIS_KEY_PREFIX")),
+		BackendHTTPTimeout:          envDurationMax("GATEWAY_BACKEND_HTTP_TIMEOUT", defaultGatewayBackendHTTPTimeout, maxGatewayBackendHTTPTimeout),
 		SessionInvalidationTTL:      envDuration("GATEWAY_SESSION_INVALIDATION_TTL", store.DefaultSessionInvalidationTTL),
 		EdgeRateLimit:               envInt("GATEWAY_EDGE_RATE_LIMIT", 1000),
 		EdgeRateWindow:              envDuration("GATEWAY_EDGE_RATE_WINDOW", time.Minute),
@@ -820,6 +827,14 @@ func envDuration(key string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+func envDurationMax(key string, def, max time.Duration) time.Duration {
+	d := envDuration(key, def)
+	if d > max {
 		return def
 	}
 	return d

@@ -539,7 +539,8 @@ capability_sse_live_ok() {
   if grep -qiE 'HTTP[[:space:]]+403|spectator_denied|returned HTTP [45][0-9][0-9]' "$file" 2>/dev/null; then
     return 1
   fi
-  if capability_sse_frame_has_event "$file" "SnapshotSanitized" \
+  if capability_sse_frame_has_event "$file" "projection_updated" \
+    || capability_sse_frame_has_event "$file" "SnapshotSanitized" \
     || capability_sse_frame_has_event "$file" "snapshot" \
     || capability_sse_frame_has_event "$file" "session_invalidated"; then
     return 0

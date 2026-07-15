@@ -91,3 +91,7 @@ func gatewayHTTPClient(runtime *telemetry.Runtime, timeoutClient *http.Client) *
 	)
 	return &clone
 }
+
+func gatewayHTTPClientForConfig(runtime *telemetry.Runtime, cfg gatewayConfig) *http.Client {
+	return gatewayHTTPClient(runtime, &http.Client{Timeout: cfg.BackendHTTPTimeout})
+}

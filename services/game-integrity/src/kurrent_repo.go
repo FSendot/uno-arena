@@ -926,6 +926,19 @@ func (r *KurrentStreamRepository) appendEncryptedJSON(ctx context.Context, strea
 	defer cancel()
 	_, err = r.client.AppendToStream(opCtx, stream, kurrentdb.AppendToStreamOptions{StreamState: expected}, event)
 	if err != nil {
+		// A first append can time out after Kurrent has accepted either this
+		// deterministic event UUID or a concurrent candidate using the same UUID.
+		// Resolve only from the authenticated committed event; never replay the
+		// uncertain write. If no committed event can be proved, preserve the
+		// original error so the caller remains fail-closed.
+		if firstWrite && isAmbiguousAppendFailure(err) {
+			reconcileCtx, reconcileCancel := context.WithTimeout(ctx, kurrentOpTimeout)
+			defer reconcileCancel()
+			reconcileErr := r.anchorCommittedStreamDEK(reconcileCtx, stream, keyVersion, dek, wrapped, wrapNonce, meta, plain)
+			if reconcileErr == nil || errors.Is(reconcileErr, errCommittedFirstEventConflict) {
+				return reconcileErr
+			}
+		}
 		// Candidate DEK lived only on the stack; append failure leaves no cache entry.
 		return err
 	}
@@ -1318,6 +1331,27 @@ func isStreamNotFound(err error) bool {
 
 func isRevisionConflict(err error) bool {
 	return isKurrentCode(err, kurrentdb.ErrorCodeWrongExpectedVersion) || isKurrentCode(err, kurrentdb.ErrorCodeStreamRevisionConflict)
+}
+
+func isAmbiguousAppendFailure(err error) bool {
+	var kurrentErr *kurrentdb.Error
+	if !errors.As(err, &kurrentErr) {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
+	return isAmbiguousAppendCode(kurrentErr.Code())
+}
+
+func isAmbiguousAppendCode(code kurrentdb.ErrorCode) bool {
+	switch code {
+	case kurrentdb.ErrorCodeDeadlineExceeded,
+		kurrentdb.ErrorCodeConnectionClosed,
+		kurrentdb.ErrorCodeInternalServer,
+		kurrentdb.ErrorAborted,
+		kurrentdb.ErrorUnavailable:
+		return true
+	default:
+		return false
+	}
 }
 
 func deterministicEventUUID(stream, originalEventID string) uuid.UUID {

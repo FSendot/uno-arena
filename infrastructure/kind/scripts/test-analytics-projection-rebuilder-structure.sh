@@ -79,15 +79,15 @@ if [[ -f "${PLAN}" ]]; then
     t = domain.find { |x| x["name"] == "analytics.projection.rebuild_requested" }
     d = dlq.find { |x| x["name"] == "analytics.projection.rebuild_requested.analytics.dlq" }
     abort "FAIL: rebuild topic missing" unless t
-    abort "FAIL: rebuild partitions=#{t["partitions"]} want 32" unless t["partitions"].to_i == 32
+    abort "FAIL: rebuild partitions=#{t["partitions"]} want 2" unless t["partitions"].to_i == 2
     abort "FAIL: rebuild RF=#{t["replicationFactor"]} want 1" unless t["replicationFactor"].to_i == 1
     abort "FAIL: rebuild DLQ missing" unless d
-    abort "FAIL: rebuild DLQ partitions=#{d["partitions"]} want 32" unless d["partitions"].to_i == 32
+    abort "FAIL: rebuild DLQ partitions=#{d["partitions"]} want 2" unless d["partitions"].to_i == 2
   ' "${PLAN}" || fail=1
 fi
 if [[ -f "${CREATE}" ]]; then
-  check "${CREATE}" 'create_or_assert_topic "analytics.projection.rebuild_requested" 32'
-  check "${CREATE}" 'create_or_assert_topic "analytics.projection.rebuild_requested.analytics.dlq" 32'
+  check "${CREATE}" 'create_or_assert_topic "analytics.projection.rebuild_requested" 2'
+  check "${CREATE}" 'create_or_assert_topic "analytics.projection.rebuild_requested.analytics.dlq" 2'
 fi
 
 if command -v helm >/dev/null 2>&1; then

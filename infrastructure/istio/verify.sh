@@ -35,5 +35,12 @@ ztunnel_render="$(${HELM} template ztunnel "${ROOT}/charts/ztunnel" -n istio-sys
 grep -Fq 'docker.io/istio/pilot@sha256:d158739d5286f7899bc039589d248720c2a9b6622d54eeb7a3fdfbb65200c22c' <<<"${istiod_render}"
 grep -Fq 'docker.io/istio/install-cni@sha256:b2eb80818fc345e3e9033f424ec7757cbf1a9d9a6494fea79648dab4887f2f7f' <<<"${cni_render}"
 grep -Fq 'docker.io/istio/ztunnel@sha256:64d7c4ea9621fdad66160744dcf76999995fcc0ac399d04aba76d6d0aae72242' <<<"${ztunnel_render}"
+for component in istiod cni ztunnel; do
+  render_var="${component}_render"
+  grep -Fq 'imagePullPolicy: IfNotPresent' <<<"${!render_var}" || {
+    echo "Istio ${component} render must explicitly use imagePullPolicy: IfNotPresent" >&2
+    exit 1
+  }
+done
 
 echo "ok istio-vendored version=1.30.2"

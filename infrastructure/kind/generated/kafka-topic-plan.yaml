@@ -11,8 +11,8 @@ spec:
   replicationFactor: 1
   minInSyncReplicas: 1
   partitionPolicy:
-    high: 8
-    business: 2
+    high: 2
+    business: 1
     note: Reduced kind counts preserving high-vs-low classes; RF1 non-HA
   retentionPolicy:
     kindShortMs:
@@ -26,7 +26,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 32
+    partitions: 2
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -34,7 +34,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -42,7 +42,7 @@ spec:
     class: business
     retentionClass: metrics-control
     retentionMs: 1800000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -50,7 +50,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -58,7 +58,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -66,7 +66,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -74,7 +74,7 @@ spec:
     class: high
     retentionClass: metrics-control
     retentionMs: 1800000
-    partitions: 8
+    partitions: 2
     replicationFactor: 1
     productionPlanningPartitions: 256
     cleanupPolicy: delete
@@ -82,7 +82,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -90,7 +90,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -98,7 +98,7 @@ spec:
     class: high
     retentionClass: spectator-safe
     retentionMs: 600000
-    partitions: 8
+    partitions: 2
     replicationFactor: 1
     productionPlanningPartitions: 256
     cleanupPolicy: delete
@@ -106,7 +106,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 32
+    partitions: 2
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -114,7 +114,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -122,7 +122,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -130,7 +130,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -138,7 +138,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -146,7 +146,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -154,7 +154,7 @@ spec:
     class: business
     retentionClass: business
     retentionMs: 7200000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     productionPlanningPartitions: 32
     cleanupPolicy: delete
@@ -163,7 +163,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 32
+    partitions: 2
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: analytics.projection.rebuild_requested
@@ -173,7 +173,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: identity.session.invalidated
@@ -183,7 +183,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: ranking.leaderboard_snapshot_published
@@ -193,7 +193,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: ranking.player_rating_updated
@@ -203,7 +203,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.game.completed
@@ -213,7 +213,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.gameplay.metrics
@@ -223,7 +223,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.match.completed
@@ -233,7 +233,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.match.completed
@@ -243,7 +243,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.runtime.ready
@@ -253,7 +253,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: room.spectator-safe.events
@@ -263,7 +263,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 32
+    partitions: 2
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: spectator.projection.rebuild_requested
@@ -273,7 +273,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.completed
@@ -283,7 +283,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.completed
@@ -293,7 +293,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.match.assigned
@@ -303,7 +303,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.match.result_recorded
@@ -313,7 +313,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.players.advanced
@@ -323,7 +323,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.players.advanced
@@ -333,7 +333,7 @@ spec:
     class: dlq
     retentionClass: dlq
     retentionMs: 21600000
-    partitions: 2
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: delete
     sourceTopic: tournament.round.completed
@@ -346,12 +346,12 @@ spec:
     cleanupPolicy: compact
     class: connect-internal
   - name: connect-offsets
-    partitions: 8
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: compact
     class: connect-internal
   - name: connect-status
-    partitions: 3
+    partitions: 1
     replicationFactor: 1
     cleanupPolicy: compact
     class: connect-internal

@@ -38,15 +38,17 @@ Authority: `docs/architecture/*`, ADR-0027/0028/0030/0031/0035, and
 - Single-node Kafka KRaft broker with **RF1 / minISR1** (explicit non-HA).
 - Redis with local AOF (`appendonly yes`, `appendfsync everysec` under
   emptyDir `/data/appendonlydir`) so same-pod Redis container restart can
-  reload recent keys; digest-pinned experimental ARM64 KurrentDB 26.0.3,
-  ClickHouse, Keycloak 26.7.0 `start-dev` with a minimal `unoarena`
-  realm/client/test user.
+  reload recent keys; architecture-selected digest-pinned KurrentDB 26.0.3
+  (reviewed AMD64 image or local-only experimental ARM64 image), ClickHouse,
+  and Keycloak 26.7.0 `start-dev` with a minimal `unoarena` realm/client/test
+  user.
 - Bootstrap Jobs for Identity/Room/Tournament/Ranking Postgres, Analytics
   ClickHouse, and AsyncAPI-derived Kafka topics (plus Connect internal topics,
   kind-short `retention.ms` by ADR-0032 class, and consumer-owned DLQ topic
   scaffolding).
-- Debezium Kafka Connect 3.6.0.Final (exact quay.io ARM64 digest staged by
-  node-native `crictl pull` via `make kind-load-debezium-connect`;
+- Debezium Kafka Connect 3.6.0.Final (exact quay.io multi-architecture index
+  staged by node-native `crictl pull`, with the runtime resolving the reviewed
+  AMD64 or ARM64 child, via `make kind-load-debezium-connect`;
   `imagePullPolicy: Never` — workload never pulls) with an
   idempotent Job registering exactly four PostgreSQL Outbox Event Router connectors
   (identity / room integration / tournament / ranking) using `snapshot.mode=no_data`.
@@ -98,29 +100,38 @@ the literal reset confirmation:
 
 It performs, in order:
 
-1. validate offline and preflight all required tools plus Docker ARM64 before deletion;
-2. delete and recreate only kind cluster `uno-arena`;
+1. validate offline and preflight all required tools plus the Docker architecture before deletion;
+2. delete only kind cluster `uno-arena`, require at least 20 GiB of host filesystem
+   headroom, and then recreate it;
 3. build/load the bootstrap and all eight `uno-arena/*:local` service images;
-4. fail closed unless the kind node is ARM64, matching the selected digest-pinned
-   KurrentDB 26.0.3 experimental ARM64 image;
-5. stage the exact Debezium Connect and Server ARM64 images inside the node;
+4. fail closed unless the kind node is AMD64 or ARM64 and select the matching
+   reviewed digest-pinned KurrentDB 26.0.3 image;
+5. stage the exact Debezium Connect and Server multi-architecture indexes and
+   verify that the node resolved their matching AMD64 or ARM64 children;
 6. apply/wait for datastores, schema/topic bootstrap, Connect, and Server;
-7. deploy Identity, Game Integrity, Ranking, Tournament, Analytics, Spectator,
+7. deploy MinIO plus Alloy, Loki, Tempo, Prometheus, kube-state-metrics, and
+   Grafana, then wait for the complete observability stack;
+8. deploy Identity, Game Integrity, Ranking, Tournament, Analytics, Spectator,
    Room, and finally Gateway with their kind Helm overlays; and
-8. run the existing CDC delivery, durable adapter, ephemeral-store integration,
-   Kafka-to-ClickHouse, Redis projection, gateway admission, and AOF probes.
+9. run observability baseline/security/persistence checks, prove the three
+   authoritative player/game/tournament counters and canonical cross-context
+   trace, run all eight client-parity phases, then run CDC delivery, durable
+   adapter, ephemeral-store integration, Kafka-to-ClickHouse, recovery-worker,
+   Redis projection, Gateway admission, and AOF probes.
 
 This command is destructive to the disposable cluster and requires networked
 image access. `--skip-probes` may be used for startup diagnosis, but is not a
 successful acceptance run.
 
-Observed acceptance status: the clean ARM64 foundation and all eight services
-have deployed successfully; Connect and Server CDC ran live; the Analytics and
-Spectator end-to-end projection-rebuilder proofs passed. The kind overlays now
-enable those two rebuilders, while default/staging/production overlays do not.
-The Stage B CLI then completed a live casual best-of-three and a live tournament
-end to end, including assignment, Room play, asynchronous result consumption,
-lifecycle advancement, and terminal `TournamentCompleted`.
+Observed acceptance status: the clean foundation, full observability stack, and
+all eight services have deployed successfully on a reviewed node architecture;
+the three business counters, canonical trace, centralized-log linkage, and
+Loki/Tempo/MinIO recovery paths passed. Connect and Server CDC ran live, and the
+Analytics and Spectator end-to-end projection-rebuilder proofs passed. The kind
+overlays enable those two rebuilders, while default/staging/production overlays
+do not. The Stage B CLI completed a live casual best-of-three and a live
+tournament end to end, including assignment, Room play, asynchronous result
+consumption, lifecycle advancement, and terminal `TournamentCompleted`.
 
 For local CLI seeding, kind Identity uses an explicitly environment-gated,
 context-owned password test-account stub. This is a disposable exercise seam,
@@ -132,12 +143,14 @@ Create, apply, and reset are **never** implied by validate:
 
 ```bash
 make kind-create-cluster
+make kind-install-istio
 make kind-build-load-bootstrap
 ./infrastructure/kind/scripts/build-load-services.sh
 make kind-load-debezium-connect
 make kind-load-debezium-server
 make kind-apply
 make kind-wait
+make kind-deploy-observability
 ./infrastructure/kind/scripts/deploy-services.sh
 # ... local experiments ...
 make kind-reset

@@ -14,8 +14,6 @@ KIND = File.join(ROOT, "infrastructure/kind")
 BOOTSTRAP = File.join(ROOT, "infrastructure/bootstrap")
 MANIFESTS = File.join(KIND, "manifests")
 GENERATED = File.join(KIND, "generated")
-ENV_EXAMPLE = File.join(ROOT, ".env.example")
-COMPOSE = File.join(ROOT, "docker-compose.local.yml")
 ASYNCAPI = File.join(ROOT, "contracts/asyncapi/kafka-v1.yaml")
 DOCKERIGNORE = File.join(ROOT, ".dockerignore")
 
@@ -107,24 +105,18 @@ end
 puts "ok duplicate-resources" if failures.none? { |f| f.include?("duplicate") }
 
 # --- Image pins ---
-env = File.read(ENV_EXAMPLE)
-compose = File.read(COMPOSE)
 images_cm = File.read(File.join(MANIFESTS, "01-local-secrets.yaml"))
 
 {
-  "POSTGRES_IMAGE" => "postgres:18.4-alpine3.24",
-  "KAFKA_IMAGE" => "apache/kafka:4.3.1",
-  "REDIS_IMAGE" => "redis:8.8.0-alpine",
-  "CLICKHOUSE_IMAGE" => "clickhouse/clickhouse-server:26.6.1.1193",
-  "KEYCLOAK_IMAGE" => "quay.io/keycloak/keycloak:26.7.0",
+  "POSTGRES_IMAGE" => "postgres:18.4-alpine3.24@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
+  "KAFKA_IMAGE" => "apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837",
+  "REDIS_IMAGE" => "redis:8.8.0-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005",
+  "CLICKHOUSE_IMAGE" => "clickhouse/clickhouse-server:26.6.1.1193@sha256:1d1f6508eba2dccce2cee9913907c5f7766327debc57a6b1991f2c9e3176c163",
+  "KEYCLOAK_IMAGE" => "quay.io/keycloak/keycloak:26.7.0@sha256:2eb3cd316835c990e69e26ade292ffa78f6fb0db7d5fc6377463c162e1979ac0",
   "BOOTSTRAP_IMAGE" => "uno-arena/bootstrap:local"
 }.each do |key, value|
-  fail_collect(failures, ".env.example missing #{key}=#{value}") unless env.include?("#{key}=#{value}")
-  fail_collect(failures, "images ConfigMap missing #{value}") unless images_cm.include?(value)
+  fail_collect(failures, "images ConfigMap missing #{key}: #{value}") unless images_cm.include?("#{key}: #{value}")
 end
-
-fail_collect(failures, "Kurrent ARM digest missing from .env.example") unless env.include?(KURRENT_ARM_DIGEST)
-fail_collect(failures, "Kurrent ARM digest missing from compose") unless compose.include?(KURRENT_ARM_DIGEST)
 
 kurrent_manifest = File.read(File.join(MANIFESTS, "40-kurrentdb/kurrentdb.yaml"))
 fail_collect(failures, "Kurrent manifest must defer architecture selection") unless kurrent_manifest.include?("__KURRENTDB_IMAGE_BY_NODE_ARCH__")
@@ -151,6 +143,57 @@ unless kurrent_pod["enableServiceLinks"] == false
     "(Service-link KURRENTDB_* env vars collide with Kurrent config)"
   )
 end
+
+# The complete single-node profile must remain below the reviewed local runtime
+# budget. These are kind-only ceilings; production sizing is environment-owned.
+kind_infra_budgets = {
+  "30-kafka/kafka.yaml" => ["kafka", "kafka", "384Mi", "768Mi"],
+  "40-kurrentdb/kurrentdb.yaml" => ["kurrentdb", "kurrentdb", "512Mi", "1024Mi"],
+  "50-clickhouse/clickhouse.yaml" => ["clickhouse", "clickhouse", "512Mi", "1024Mi"],
+  "60-keycloak/keycloak.yaml" => ["keycloak", "keycloak", "256Mi", "768Mi"],
+  "80-debezium/connect.yaml" => ["debezium-connect", "connect", "384Mi", "1024Mi"],
+  "80-debezium-server/debezium-server-room-realtime.yaml" => ["debezium-server-room-realtime", "debezium-server", "256Mi", "768Mi"]
+}.freeze
+kind_infra_budgets.each do |relative_path, (deployment_name, container_name, request_memory, limit_memory)|
+  deployment = load_all_yaml(File.join(MANIFESTS, relative_path)).find do |doc|
+    doc.is_a?(Hash) && doc["kind"] == "Deployment" && doc.dig("metadata", "name") == deployment_name
+  end
+  container = (deployment&.dig("spec", "template", "spec", "containers") || []).find { |item| item["name"] == container_name }
+  fail_collect(failures, "#{deployment_name} container missing for kind memory budget") unless container
+  fail_collect(failures, "#{deployment_name} must not surge a second heavy kind pod") unless deployment&.dig("spec", "strategy", "type") == "Recreate"
+  next unless container
+
+  fail_collect(failures, "#{deployment_name} request memory drift") unless container.dig("resources", "requests", "memory") == request_memory
+  fail_collect(failures, "#{deployment_name} limit memory drift") unless container.dig("resources", "limits", "memory") == limit_memory
+end
+
+minio_docs = load_all_yaml(File.join(MANIFESTS, "90-observability-storage/minio.yaml"))
+minio_dep = minio_docs.find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "minio" }
+minio_container = minio_dep&.dig("spec", "template", "spec", "containers", 0) || {}
+minio_env = minio_container.fetch("env", []).to_h { |entry| [entry["name"], entry["value"]] }
+fail_collect(failures, "MinIO must not surge a second heavy kind pod") unless minio_dep&.dig("spec", "strategy", "type") == "Recreate"
+fail_collect(failures, "MinIO kind memory limit drift") unless minio_container.dig("resources", "limits", "memory") == "512Mi"
+fail_collect(failures, "MinIO kind Go memory target drift") unless minio_env["GOMEMLIMIT"] == "256MiB"
+
+kafka_budget_dep = load_all_yaml(File.join(MANIFESTS, "30-kafka/kafka.yaml")).find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" }
+kafka_budget_container = kafka_budget_dep&.dig("spec", "template", "spec", "containers", 0) || {}
+kafka_env = kafka_budget_container.fetch("env", []).to_h { |entry| [entry["name"], entry["value"]] }
+fail_collect(failures, "Kafka kind heap budget drift") unless kafka_env["KAFKA_HEAP_OPTS"] == "-Xms256M -Xmx512M"
+keycloak_dep = load_all_yaml(File.join(MANIFESTS, "60-keycloak/keycloak.yaml")).find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" }
+keycloak_container = keycloak_dep&.dig("spec", "template", "spec", "containers", 0) || {}
+keycloak_env = keycloak_container.fetch("env", []).to_h { |entry| [entry["name"], entry["value"]] }
+fail_collect(failures, "Keycloak kind heap budget drift") unless keycloak_env["JAVA_OPTS_KC_HEAP"] == "-Xms128m -Xmx384m"
+server_budget_dep = load_all_yaml(File.join(MANIFESTS, "80-debezium-server/debezium-server-room-realtime.yaml")).find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" }
+server_budget_container = server_budget_dep&.dig("spec", "template", "spec", "containers", 0) || {}
+server_env = server_budget_container.fetch("env", []).to_h { |entry| [entry["name"], entry["value"]] }
+fail_collect(failures, "Debezium Server kind heap budget drift") unless server_env["JAVA_TOOL_OPTIONS"] == "-Xms64m -Xmx256m"
+
+clickhouse_docs = load_all_yaml(File.join(MANIFESTS, "50-clickhouse/clickhouse.yaml"))
+clickhouse_memory = clickhouse_docs.find { |doc| doc.is_a?(Hash) && doc["kind"] == "ConfigMap" && doc.dig("metadata", "name") == "clickhouse-kind-memory" }
+clickhouse_memory_xml = clickhouse_memory&.dig("data", "99-kind-memory.xml").to_s
+fail_collect(failures, "ClickHouse kind server memory cap drift") unless clickhouse_memory_xml.include?("<max_server_memory_usage>805306368</max_server_memory_usage>")
+fail_collect(failures, "ClickHouse kind mark cache cap drift") unless clickhouse_memory_xml.include?("<mark_cache_size>67108864</mark_cache_size>")
+fail_collect(failures, "ClickHouse kind uncompressed cache cap drift") unless clickhouse_memory_xml.include?("<uncompressed_cache_size>33554432</uncompressed_cache_size>")
 puts "ok image-pins-and-kurrent"
 
 # --- Redis local AOF (same-pod emptyDir restart; disposable / not authoritative) ---
@@ -331,12 +374,14 @@ fail_collect(failures, "no Heartbeat SMT / heartbeat.action.query") if dc_text.m
 fail_collect(failures, "Connect Deployment missing readinessProbe") unless dc_text.include?("readinessProbe:")
 fail_collect(failures, "Connect Deployment missing livenessProbe") unless dc_text.include?("livenessProbe:")
 fail_collect(failures, "Connect probes should use curl") unless dc_text.include?("curl")
-# Heap must be explicit and safely below the container memory limit (image default -Xmx2G OOMs at 1536Mi).
+# Heap must be explicit and safely below the container memory limit (image default -Xmx2G is unbounded for kind).
 fail_collect(failures, "Connect must set KAFKA_HEAP_OPTS (reject image-default unbounded heap)") unless dc_text.match?(/^\s+- name: KAFKA_HEAP_OPTS\s*$/)
 dc_mem_limit = dc_text[/limits:\s*\n\s+memory:\s*(\d+)Mi/, 1]&.to_i
 dc_heap_opts = dc_text[/- name:\s*KAFKA_HEAP_OPTS\s*\n\s+value:\s*"([^"]+)"/, 1]
+dc_rebalance_delay = dc_text[/- name:\s*CONNECT_SCHEDULED_REBALANCE_MAX_DELAY_MS\s*\n\s+value:\s*"([^"]+)"/, 1]
 fail_collect(failures, "Connect memory limit Mi missing") if dc_mem_limit.nil? || dc_mem_limit <= 0
 fail_collect(failures, "Connect KAFKA_HEAP_OPTS value missing") if dc_heap_opts.nil? || dc_heap_opts.empty?
+fail_collect(failures, "kind singleton Connect scheduled rebalance delay must be 10000ms") unless dc_rebalance_delay == "10000"
 if dc_heap_opts
   fail_collect(failures, "Connect must not use image-default -Xmx2G") if dc_heap_opts.match?(/-Xmx2[Gg]/)
   xmx = dc_heap_opts.match(/-Xmx(\d+)([MmGg])/)
@@ -395,14 +440,6 @@ gi_keys = local_secrets[/game-integrity-envelope-dev-keys:\s*"?([^"\n]+)"?/, 1]
 if gi_keys.nil? || !gi_keys.match?(/\A\d+:[0-9a-fA-F]{64}\z/)
   fail_collect(failures, "GI local keyring must be version:64hex")
 end
-env_example = File.read(ENV_EXAMPLE)
-fail_collect(failures, ".env.example missing GAME_INTEGRITY_ENVELOPE_PROVIDER") unless env_example.include?("GAME_INTEGRITY_ENVELOPE_PROVIDER")
-fail_collect(failures, ".env.example missing GAME_INTEGRITY_ENVELOPE_DEV_KEYS") unless env_example.include?("GAME_INTEGRITY_ENVELOPE_DEV_KEYS")
-fail_collect(failures, ".env.example missing DEPLOYMENT_ENV") unless env_example.include?("DEPLOYMENT_ENV")
-compose_local = File.read(COMPOSE)
-fail_collect(failures, "compose local GI missing envelope provider env") unless compose_local.include?("GAME_INTEGRITY_ENVELOPE_PROVIDER")
-fail_collect(failures, "compose local GI missing envelope keyring env") unless compose_local.include?("GAME_INTEGRITY_ENVELOPE_DEV_KEYS")
-
 # Validator must render Helm / inspect binding, not string-only.
 gi_chart = File.join(ROOT, "services/game-integrity/helm/game-integrity")
 gi_kind_values = File.join(gi_chart, "values.kind.yaml")
@@ -1026,8 +1063,8 @@ if File.file?(plan_path)
   spec = plan.fetch("spec")
   fail_collect(failures, "kafka plan RF != 1") unless spec["replicationFactor"] == 1
   fail_collect(failures, "kafka plan minISR != 1") unless spec["minInSyncReplicas"] == 1
-  fail_collect(failures, "kafka high partitions != 8") unless spec.dig("partitionPolicy", "high") == 8
-  fail_collect(failures, "kafka business partitions != 2") unless spec.dig("partitionPolicy", "business") == 2
+  fail_collect(failures, "kafka high partitions != 2") unless spec.dig("partitionPolicy", "high") == 2
+  fail_collect(failures, "kafka business partitions != 1") unless spec.dig("partitionPolicy", "business") == 1
 
   async = YAML.load_file(ASYNCAPI)
   channels = async.fetch("channels").keys.sort
@@ -1041,16 +1078,16 @@ if File.file?(plan_path)
   fail_collect(failures, "domain topic set != AsyncAPI channels") unless domain_names == channels
   high.each do |name|
     t = domain.find { |x| x["name"] == name }
-    fail_collect(failures, "high-volume topic #{name} missing or wrong class") unless t && t["class"] == "high" && t["partitions"] == 8
+    fail_collect(failures, "high-volume topic #{name} missing or wrong class") unless t && t["class"] == "high" && t["partitions"] == 2
   end
   domain.each do |t|
     fail_collect(failures, "topic #{t['name']} RF != 1") unless t["replicationFactor"] == 1
     expected = if rebuild_requests.include?(t["name"])
-                 32
-               elsif t["class"] == "high"
-                 8
-               else
                  2
+               elsif t["class"] == "high"
+                 2
+               else
+                 1
                end
     fail_collect(failures, "topic #{t['name']} partitions=#{t['partitions']} expected=#{expected}") unless t["partitions"] == expected
     fail_collect(failures, "topic #{t['name']} missing retentionMs") if t["retentionMs"].nil? || t["retentionMs"].to_i <= 0
@@ -1068,7 +1105,7 @@ if File.file?(plan_path)
   fail_collect(failures, "missing ranking tournament.completed DLQ") unless dlq.any? { |t| t["name"] == "tournament.completed.ranking.dlq" }
   connect = spec.fetch("connectInternalTopics")
   %w[connect-configs connect-offsets connect-status].each do |name|
-    fail_collect(failures, "missing connect topic #{name}") unless connect.any? { |t| t["name"] == name && t["replicationFactor"] == 1 && t["cleanupPolicy"] == "compact" }
+    fail_collect(failures, "missing connect topic #{name}") unless connect.any? { |t| t["name"] == name && t["partitions"] == 1 && t["replicationFactor"] == 1 && t["cleanupPolicy"] == "compact" }
   end
 
   if File.file?(script_path)

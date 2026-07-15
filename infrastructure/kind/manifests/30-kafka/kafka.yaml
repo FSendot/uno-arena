@@ -34,6 +34,8 @@ metadata:
     uno-arena.local/kafka-ha: "false"
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: kafka
@@ -84,6 +86,10 @@ spec:
               value: "1"
             - name: KAFKA_MIN_INSYNC_REPLICAS
               value: "1"
+            # The image defaults to a 1 GiB initial heap. That minimum alone can
+            # push the complete single-node acceptance stack into swap.
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms256M -Xmx512M"
             - name: CLUSTER_ID
               valueFrom:
                 configMapKeyRef:
@@ -112,9 +118,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 384Mi
             limits:
-              memory: 1536Mi
+              cpu: "1"
+              memory: 768Mi
       volumes:
         - name: data
           emptyDir: {}

@@ -311,11 +311,13 @@ func (f *FakeTournament) DispatchCount() int {
 
 // FakeReads serves static public read models.
 type FakeReads struct {
-	LeaderboardJSON json.RawMessage
-	AnalyticsJSON   json.RawMessage
+	LeaderboardJSON      json.RawMessage
+	AnalyticsJSON        json.RawMessage
+	LastLeaderboardQuery string
 }
 
-func (f *FakeReads) Leaderboard(_ context.Context, _ correlation.Headers) (json.RawMessage, error) {
+func (f *FakeReads) Leaderboard(_ context.Context, rawQuery string, _ correlation.Headers) (json.RawMessage, error) {
+	f.LastLeaderboardQuery = rawQuery
 	if len(f.LeaderboardJSON) == 0 {
 		return json.RawMessage(`{"entries":[]}`), nil
 	}

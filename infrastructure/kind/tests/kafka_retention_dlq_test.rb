@@ -39,8 +39,10 @@ if File.file?(PLAN) && File.file?(SCRIPT)
   domain = plan.dig("spec", "domainTopics") || []
   dlq = plan.dig("spec", "dlqTopics") || []
   connect = plan.dig("spec", "connectInternalTopics") || []
+  total_partitions = (domain + dlq + connect).sum { |topic| topic["partitions"].to_i }
 
   fail_collect(failures, "domain topic set != AsyncAPI") unless domain.map { |t| t["name"] }.sort == channels
+  fail_collect(failures, "kind plan partitions=#{total_partitions} expected=44") unless total_partitions == 44
 
   spectator = domain.find { |t| t["name"] == "room.spectator-safe.events" }
   metrics = domain.find { |t| t["name"] == "room.gameplay.metrics" }
@@ -63,21 +65,22 @@ if File.file?(PLAN) && File.file?(SCRIPT)
   rebuild = domain.find { |t| t["name"] == "spectator.projection.rebuild_requested" }
   rebuild_dlq = dlq.find { |t| t["name"] == "spectator.projection.rebuild_requested.spectator-view.dlq" }
   fail_collect(failures, "missing spectator.projection.rebuild_requested") unless rebuild
-  fail_collect(failures, "spectator rebuild_requested must use 32 partitions") unless rebuild && rebuild["partitions"].to_i == 32
+  fail_collect(failures, "spectator rebuild_requested must use 2 kind partitions") unless rebuild && rebuild["partitions"].to_i == 2
   fail_collect(failures, "spectator rebuild_requested must use local RF=1") unless rebuild && rebuild["replicationFactor"].to_i == 1
   fail_collect(failures, "missing spectator rebuild DLQ") unless rebuild_dlq
-  fail_collect(failures, "spectator rebuild DLQ must use 32 partitions") unless rebuild_dlq && rebuild_dlq["partitions"].to_i == 32
+  fail_collect(failures, "spectator rebuild DLQ must use 2 kind partitions") unless rebuild_dlq && rebuild_dlq["partitions"].to_i == 2
 
   analytics_rebuild = domain.find { |t| t["name"] == "analytics.projection.rebuild_requested" }
   analytics_rebuild_dlq = dlq.find { |t| t["name"] == "analytics.projection.rebuild_requested.analytics.dlq" }
   fail_collect(failures, "missing analytics.projection.rebuild_requested") unless analytics_rebuild
-  fail_collect(failures, "analytics rebuild_requested must use 32 partitions") unless analytics_rebuild && analytics_rebuild["partitions"].to_i == 32
+  fail_collect(failures, "analytics rebuild_requested must use 2 kind partitions") unless analytics_rebuild && analytics_rebuild["partitions"].to_i == 2
   fail_collect(failures, "analytics rebuild_requested must use local RF=1") unless analytics_rebuild && analytics_rebuild["replicationFactor"].to_i == 1
   fail_collect(failures, "missing analytics rebuild DLQ") unless analytics_rebuild_dlq
-  fail_collect(failures, "analytics rebuild DLQ must use 32 partitions") unless analytics_rebuild_dlq && analytics_rebuild_dlq["partitions"].to_i == 32
+  fail_collect(failures, "analytics rebuild DLQ must use 2 kind partitions") unless analytics_rebuild_dlq && analytics_rebuild_dlq["partitions"].to_i == 2
 
   connect.each do |t|
     fail_collect(failures, "connect topic #{t['name']} must be compact") unless t["cleanupPolicy"] == "compact"
+    fail_collect(failures, "connect topic #{t['name']} must use 1 kind partition") unless t["partitions"].to_i == 1
     fail_collect(failures, "connect topic must not set retentionMs") if t.key?("retentionMs") && !t["retentionMs"].nil?
   end
 

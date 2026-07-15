@@ -15,8 +15,7 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	test-analytics test-game-integrity test-game-integrity-integration deps-game-integrity \
 	test-gateway test-identity \
 	test-ranking test-room-gameplay test-spectator-view test-tournament-orchestration \
-	test-modules validate-yaml validate-compose test-compose-topology \
-	test-capability-stack test-client-checkpoint test-client-dockerfile \
+	test-modules validate-yaml test-client-checkpoint test-client-dockerfile test-devops-smoke \
 	check build-shared \
 	kind-render kind-validate kind-create-cluster kind-build-load-bootstrap \
 	kind-verify-portable-images \
@@ -25,6 +24,7 @@ GO_TEST_ENV = GOWORK=off GOPROXY=off GOSUMDB=off
 	kind-test-observability-business-live kind-test-observability-trace-live \
 	kind-test-observability-security-live kind-test-observability-outage-live \
 	kind-test-observability-persistence-live kind-test-observability-acceptance-live \
+	kind-test-client-parity-structure kind-test-client-parity-live \
 	kind-port-forward-grafana \
 	kind-build-load-services kind-deploy-game-integrity kind-deploy-services \
 	kind-run-live-probes kind-clean-deploy kind-test-clean-deployment-structure \
@@ -117,13 +117,11 @@ help:
 	@echo "  test-spectator-integration   live Redis DB 14 integration (SPECTATOR_REDIS_URL required)"
 	@echo "  test-gateway-helm            offline Gateway helm lint/template checks"
 	@echo "  test-gateway-integration     live Redis DBs 11/12/13 (GATEWAY_*_REDIS_URL required)"
-	@echo "  validate-yaml          parse OpenAPI/AsyncAPI/compose YAML via Ruby stdlib"
-	@echo "  validate-compose       docker compose config (requires local docker; no pull)"
-	@echo "  test-compose-topology  edge+private network assertions on resolved config (no stack)"
-	@echo "  test-capability-stack  Docker capability overlay + CLI/BFF integration harness"
+	@echo "  validate-yaml          parse OpenAPI/AsyncAPI YAML via Ruby stdlib"
 	@echo "  test-client-checkpoint offline Client Checkpoint CLI tests (fake BFF, no Docker)"
 	@echo "  test-client-dockerfile Client Checkpoint Dockerfile structure (no build/pull)"
-	@echo "  check                  fmt + vet + test-modules + validate-yaml + git diff --check"
+	@echo "  test-devops-smoke      offline DevOps smoke-runner contract tests"
+	@echo "  check                  fmt + vet + modules + YAML + DevOps smoke + git diff --check"
 	@echo "  build-shared           go build ./shared/... with GOPROXY=off"
 	@echo "  kind-render            offline AsyncAPI → kind Kafka topic artifacts"
 	@echo "  kind-validate          offline kind foundation checks incl. CDC/retention (no pull / no cluster)"
@@ -142,6 +140,8 @@ help:
 	@echo "  kind-test-observability-outage-live EXPLICIT: gameplay continuity and trace recovery across Alloy outage"
 	@echo "  kind-test-observability-persistence-live EXPLICIT: Loki/Tempo evidence after backend + MinIO pod replacement"
 	@echo "  kind-test-observability-acceptance-live EXPLICIT: ordered application observability acceptance lane"
+	@echo "  kind-test-client-parity-structure offline kind-native CLI/BFF parity contract"
+	@echo "  kind-test-client-parity-live EXPLICIT: live CLI/BFF parity through the kind Gateway"
 	@echo "  kind-port-forward-grafana  EXPLICIT: loopback-only Grafana port-forward"
 	@echo "  kind-deploy-game-integrity EXPLICIT: helm upgrade --install Game Integrity (kind values)"
 	@echo "  kind-deploy-services       EXPLICIT: deploy all 8 services in dependency order"
@@ -261,9 +261,9 @@ test-tournament-helm:
 test-tournament-integration:
 	@test -n "$$TOURNAMENT_POSTGRES_URL" || (echo "TOURNAMENT_POSTGRES_URL required" >&2; exit 1)
 	cd services/tournament-orchestration/src && GOWORK=off GOPROXY=off GOSUMDB=off \
-		$(GO) test -count=1 -tags=integration -parallel 2 -timeout 300s ./store/...
+		$(GO) test -count=1 -tags=integration -parallel 2 -timeout 480s ./store/...
 	cd services/tournament-orchestration/src && GOWORK=off GOPROXY=off GOSUMDB=off \
-		$(GO) test -count=1 -tags=integration -parallel 2 -timeout 300s .
+		$(GO) test -count=1 -tags=integration -parallel 2 -timeout 480s .
 # EXPLICIT + NETWORKED: verifies kind-uno-arena, creates unoarena_tournament_test_*,
 # port-forwards postgres-tournament, runs store + main-package service integration
 # as tournament_runtime, drops DB.
@@ -456,18 +456,7 @@ build-shared:
 
 validate-yaml:
 	@command -v $(RUBY) >/dev/null 2>&1 || { echo "ruby unavailable; cannot validate YAML" >&2; exit 1; }
-	@$(RUBY) -ryaml -e 'paths=%w[contracts/openapi/bff-v1.yaml contracts/asyncapi/kafka-v1.yaml docker-compose.local.yml docker-compose.capability.yml]; paths.each{|p| YAML.load_file(p); puts "ok yaml: #{p}"}'
-
-validate-compose:
-	@docker compose -f docker-compose.local.yml --env-file .env.example config >/dev/null
-	@echo "ok compose config"
-	@docker compose -f docker-compose.local.yml -f docker-compose.capability.yml --env-file .env.example config >/dev/null
-	@echo "ok compose capability overlay"
-
-# Resolved config only (no up / no pull): gateway on edge+private, backends
-# private-only, concrete BFF_HOST_PORT, capability project-scoped network names.
-test-compose-topology:
-	./client-checkpoint/tests/test-compose-topology.sh
+	@$(RUBY) -ryaml -e 'paths=%w[contracts/openapi/bff-v1.yaml contracts/asyncapi/kafka-v1.yaml]; paths.each{|p| YAML.load_file(p); puts "ok yaml: #{p}"}'
 
 # Offline Client Checkpoint CLI against ephemeral stdlib fake BFF (no Docker).
 test-client-checkpoint:
@@ -477,15 +466,10 @@ test-client-checkpoint:
 test-client-dockerfile:
 	./client-checkpoint/tests/test-dockerfile-structure.sh
 
-# Boots an isolated compose project (-p), polls BFF /health then /ready, exercises
-# real-service capability paths via client-checkpoint CLI + curl, then
-# `down -v --remove-orphans` for a harness-started project only.
-# KEEP_STACK=1 leaves the stack up. CAP_SKIP_UP=1 reuses caller UNOARENA_API_URL
-# without tearing down external volumes (CAP_TEARDOWN_EXTERNAL=1 to opt in).
-test-capability-stack:
-	./client-checkpoint/tests/run-capability-stack.sh
+test-devops-smoke:
+	./devops-checkpoint/smoke-test/test-run-smoke-test.sh
 
-check: fmt-shared vet-shared test-modules validate-yaml
+check: fmt-shared vet-shared test-modules validate-yaml test-devops-smoke
 	@git diff --check
 	@echo "check passed"
 
@@ -537,6 +521,12 @@ kind-test-observability-outage-live:
 
 kind-test-observability-persistence-live:
 	./infrastructure/kind/scripts/test-observability-persistence-live.sh
+
+kind-test-client-parity-structure:
+	./infrastructure/kind/scripts/test-client-parity-structure.sh
+
+kind-test-client-parity-live:
+	./infrastructure/kind/scripts/test-client-parity-live.sh
 
 kind-test-observability-acceptance-live:
 	./infrastructure/kind/scripts/test-observability-live.sh

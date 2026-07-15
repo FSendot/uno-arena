@@ -6,6 +6,7 @@ CLI="${ROOT}/bin/unoarena"
 FAKE="${ROOT}/tests/fake_game_gateway.py"
 TMP="$(mktemp -d /tmp/unoarena-stage-b-XXXXXX)"
 trap 'kill "${PID:-}" 2>/dev/null || true; wait "${PID:-}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+export PYTHONPYCACHEPREFIX="${TMP}/pycache"
 
 python3 "$FAKE" >"$TMP/url" 2>"$TMP/fake.err" &
 PID=$!
@@ -273,6 +274,79 @@ for code in (502, 503):
         mod.Metrics(player="u"),
     )
     assert unknown.commands == 1, (code, unknown.commands)
+
+# The hidden bot action interval paces every known-result gameplay mutation,
+# including the immediate ChooseColor/CallUno follow-ups. An unknown transport
+# result must still enter authoritative safe-read recovery immediately instead
+# of treating a sleep as reconciliation.
+assert mod.parser().parse_args(["bot", "--room", "room"]).action_interval == 0
+assert "--action-interval" not in mod.parser().format_help()
+
+class BurstGateway:
+    def __init__(self):
+        self.command_times = []
+        self.kinds = []
+        self.sequence = 7
+        self.completed = False
+    def snapshot(self, _room):
+        return {
+            "roomId": "paced-room", "status": "completed" if self.completed else "in_progress",
+            "sequenceNumber": self.sequence, "hostId": "host",
+            "game": {"currentPlayer": "p", "activeColor": "red", "discardTop": {"face": "4"}},
+            "hand": [] if self.completed else [{"id": "wild", "color": "", "face": "wild"}],
+        }
+    def command(self, _room, kind, _sequence, _payload):
+        self.command_times.append(mod.time.monotonic())
+        self.kinds.append(kind)
+        self.sequence += 1
+        if kind == "CallUno":
+            self.completed = True
+        return {"status": "accepted", "sequenceNumber": self.sequence}, f"corr-{kind}"
+
+class RejectedGateway(BurstGateway):
+    def command(self, _room, kind, _sequence, _payload):
+        self.command_times.append(mod.time.monotonic())
+        self.kinds.append(kind)
+        self.completed = True
+        return {"status": "rejected", "reason": "not_allowed"}, f"corr-{kind}"
+
+class UnknownWithoutDelayGateway(BurstGateway):
+    def __init__(self):
+        super().__init__()
+        self.room_start_retry = mod.RoomStartRetryPolicy(timeout_seconds=60)
+    def command(self, _room, kind, _sequence, _payload):
+        self.command_times.append(mod.time.monotonic())
+        self.kinds.append(kind)
+        self.completed = True
+        raise mod.ClientError("HTTP 502", 502)
+
+real_monotonic, real_sleep = mod.time.monotonic, mod.time.sleep
+virtual_now = [0.0]
+mod.time.monotonic = lambda: virtual_now[0]
+mod.time.sleep = lambda seconds: virtual_now.__setitem__(0, virtual_now[0] + seconds)
+paced_args = SimpleNamespace(
+    max_wait=30, seed=1, max_actions=10, poll_interval=.01, action_interval=2,
+)
+try:
+    burst = BurstGateway()
+    assert mod.play_bot_room(burst, "paced-room", "p", "u", paced_args, mod.Metrics(player="u"))
+    assert burst.kinds == ["PlayCard", "ChooseColor", "CallUno"], burst.kinds
+    assert burst.command_times == [0.0, 2.0, 4.0], burst.command_times
+    assert virtual_now[0] == 6.0, virtual_now[0]
+
+    virtual_now[0] = 0.0
+    rejected = RejectedGateway()
+    assert mod.play_bot_room(rejected, "paced-room", "p", "u", paced_args, mod.Metrics(player="u"))
+    assert rejected.command_times == [0.0], rejected.command_times
+    assert virtual_now[0] >= 2.0, virtual_now[0]
+
+    virtual_now[0] = 0.0
+    unknown = UnknownWithoutDelayGateway()
+    assert mod.play_bot_room(unknown, "paced-room", "p", "u", paced_args, mod.Metrics(player="u"))
+    assert unknown.command_times == [0.0], unknown.command_times
+    assert virtual_now[0] == paced_args.poll_interval, virtual_now[0]
+finally:
+    mod.time.monotonic, mod.time.sleep = real_monotonic, real_sleep
 
 # Reconciliation uses the configured safe-read budget rather than a fixed
 # short window. Model a runtime replacement whose authoritative sequence does

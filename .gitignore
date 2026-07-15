@@ -1,3 +1,5 @@
 .DS_Store
 builds/
 .env
+__pycache__/
+*.py[cod]

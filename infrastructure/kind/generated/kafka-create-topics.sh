@@ -122,43 +122,43 @@ create_or_assert_topic() {
   fi
 }
 
-create_or_assert_topic "analytics.projection.rebuild_requested" 32 1 "delete" 1 7200000
-create_or_assert_topic "analytics.public_projection.updated" 2 1 "delete" 1 7200000
-create_or_assert_topic "identity.session.invalidated" 2 1 "delete" 1 1800000
-create_or_assert_topic "ranking.leaderboard_snapshot_published" 2 1 "delete" 1 7200000
-create_or_assert_topic "ranking.player_rating_updated" 2 1 "delete" 1 7200000
-create_or_assert_topic "room.game.completed" 2 1 "delete" 1 7200000
-create_or_assert_topic "room.gameplay.metrics" 8 1 "delete" 1 1800000
-create_or_assert_topic "room.match.completed" 2 1 "delete" 1 7200000
-create_or_assert_topic "room.runtime.ready" 2 1 "delete" 1 7200000
-create_or_assert_topic "room.spectator-safe.events" 8 1 "delete" 1 600000
-create_or_assert_topic "spectator.projection.rebuild_requested" 32 1 "delete" 1 7200000
-create_or_assert_topic "spectator.room_projection.updated" 2 1 "delete" 1 7200000
-create_or_assert_topic "tournament.completed" 2 1 "delete" 1 7200000
-create_or_assert_topic "tournament.match.assigned" 2 1 "delete" 1 7200000
-create_or_assert_topic "tournament.match.result_recorded" 2 1 "delete" 1 7200000
-create_or_assert_topic "tournament.players.advanced" 2 1 "delete" 1 7200000
-create_or_assert_topic "tournament.round.completed" 2 1 "delete" 1 7200000
-create_or_assert_topic "analytics.projection.rebuild_requested.analytics.dlq" 32 1 "delete" 1 21600000
-create_or_assert_topic "identity.session.invalidated.gateway.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "ranking.leaderboard_snapshot_published.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "ranking.player_rating_updated.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "room.game.completed.ranking.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "room.gameplay.metrics.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "room.match.completed.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "room.match.completed.tournament-orchestration.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "room.runtime.ready.tournament-orchestration.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "room.spectator-safe.events.spectator-view.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "spectator.projection.rebuild_requested.spectator-view.dlq" 32 1 "delete" 1 21600000
-create_or_assert_topic "tournament.completed.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "tournament.completed.ranking.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "tournament.match.assigned.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "tournament.match.result_recorded.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "tournament.players.advanced.analytics.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "tournament.players.advanced.ranking.dlq" 2 1 "delete" 1 21600000
-create_or_assert_topic "tournament.round.completed.analytics.dlq" 2 1 "delete" 1 21600000
+create_or_assert_topic "analytics.projection.rebuild_requested" 2 1 "delete" 1 7200000
+create_or_assert_topic "analytics.public_projection.updated" 1 1 "delete" 1 7200000
+create_or_assert_topic "identity.session.invalidated" 1 1 "delete" 1 1800000
+create_or_assert_topic "ranking.leaderboard_snapshot_published" 1 1 "delete" 1 7200000
+create_or_assert_topic "ranking.player_rating_updated" 1 1 "delete" 1 7200000
+create_or_assert_topic "room.game.completed" 1 1 "delete" 1 7200000
+create_or_assert_topic "room.gameplay.metrics" 2 1 "delete" 1 1800000
+create_or_assert_topic "room.match.completed" 1 1 "delete" 1 7200000
+create_or_assert_topic "room.runtime.ready" 1 1 "delete" 1 7200000
+create_or_assert_topic "room.spectator-safe.events" 2 1 "delete" 1 600000
+create_or_assert_topic "spectator.projection.rebuild_requested" 2 1 "delete" 1 7200000
+create_or_assert_topic "spectator.room_projection.updated" 1 1 "delete" 1 7200000
+create_or_assert_topic "tournament.completed" 1 1 "delete" 1 7200000
+create_or_assert_topic "tournament.match.assigned" 1 1 "delete" 1 7200000
+create_or_assert_topic "tournament.match.result_recorded" 1 1 "delete" 1 7200000
+create_or_assert_topic "tournament.players.advanced" 1 1 "delete" 1 7200000
+create_or_assert_topic "tournament.round.completed" 1 1 "delete" 1 7200000
+create_or_assert_topic "analytics.projection.rebuild_requested.analytics.dlq" 2 1 "delete" 1 21600000
+create_or_assert_topic "identity.session.invalidated.gateway.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "ranking.leaderboard_snapshot_published.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "ranking.player_rating_updated.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "room.game.completed.ranking.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "room.gameplay.metrics.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "room.match.completed.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "room.match.completed.tournament-orchestration.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "room.runtime.ready.tournament-orchestration.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "room.spectator-safe.events.spectator-view.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "spectator.projection.rebuild_requested.spectator-view.dlq" 2 1 "delete" 1 21600000
+create_or_assert_topic "tournament.completed.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "tournament.completed.ranking.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "tournament.match.assigned.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "tournament.match.result_recorded.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "tournament.players.advanced.analytics.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "tournament.players.advanced.ranking.dlq" 1 1 "delete" 1 21600000
+create_or_assert_topic "tournament.round.completed.analytics.dlq" 1 1 "delete" 1 21600000
 create_or_assert_topic "connect-configs" 1 1 "compact" 1
-create_or_assert_topic "connect-offsets" 8 1 "compact" 1
-create_or_assert_topic "connect-status" 3 1 "compact" 1
+create_or_assert_topic "connect-offsets" 1 1 "compact" 1
+create_or_assert_topic "connect-status" 1 1 "compact" 1
 
 echo "kafka topic bootstrap complete"

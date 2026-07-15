@@ -17,6 +17,8 @@ probes=(
   test-observability-business-live.sh
   test-observability-trace-live.sh
   test-observability-security-live.sh
+  # Preserve CLI/BFF behavioral parity in the authoritative local deployment lane.
+  test-client-parity-live.sh
   test-debezium-postgres-to-kafka-live.sh
   test-debezium-postgres-to-redis-live.sh
   test-game-integrity-adapter.sh

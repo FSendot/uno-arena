@@ -153,7 +153,7 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	corr := s.correlation(r)
-	raw, err := s.reads.Leaderboard(r.Context(), corr)
+	raw, err := s.reads.Leaderboard(r.Context(), r.URL.RawQuery, corr)
 	if err != nil {
 		s.writeErr(w, r, http.StatusBadGateway, "upstream_error", "leaderboard unavailable", "")
 		return

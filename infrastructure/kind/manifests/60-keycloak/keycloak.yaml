@@ -103,6 +103,8 @@ metadata:
     uno-arena.local/non-production: "true"
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: keycloak
@@ -137,6 +139,8 @@ spec:
                   key: keycloak-admin-password
             - name: KC_HEALTH_ENABLED
               value: "true"
+            - name: JAVA_OPTS_KC_HEAP
+              value: "-Xms128m -Xmx384m"
           volumeMounts:
             - name: realm
               mountPath: /opt/keycloak/data/import
@@ -161,9 +165,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 256Mi
             limits:
-              memory: 1536Mi
+              cpu: 500m
+              memory: 768Mi
       volumes:
         - name: realm
           configMap:

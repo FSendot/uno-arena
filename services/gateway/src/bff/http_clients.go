@@ -388,11 +388,15 @@ func NewHTTPReadModelClient(rankingURL, analyticsURL string, httpClient *http.Cl
 	return &HTTPReadModelClient{rankingURL: rankingURL, analyticsURL: analyticsURL, httpClient: httpClient}
 }
 
-func (c *HTTPReadModelClient) Leaderboard(ctx context.Context, corr correlation.Headers) (json.RawMessage, error) {
+func (c *HTTPReadModelClient) Leaderboard(ctx context.Context, rawQuery string, corr correlation.Headers) (json.RawMessage, error) {
 	if strings.TrimSpace(c.rankingURL) == "" {
 		return nil, fmt.Errorf("ranking URL not configured")
 	}
-	return c.get(ctx, strings.TrimRight(c.rankingURL, "/")+"/v1/rankings/leaderboards", corr)
+	endpoint := strings.TrimRight(c.rankingURL, "/") + "/v1/rankings/leaderboards"
+	if rawQuery != "" {
+		endpoint += "?" + rawQuery
+	}
+	return c.get(ctx, endpoint, corr)
 }
 
 func (c *HTTPReadModelClient) PublicAnalytics(ctx context.Context, corr correlation.Headers) (json.RawMessage, error) {
@@ -621,7 +625,7 @@ func (ClosedTournament) Assignment(context.Context, string, string, correlation.
 // ClosedReads rejects all read-model proxies.
 type ClosedReads struct{}
 
-func (ClosedReads) Leaderboard(context.Context, correlation.Headers) (json.RawMessage, error) {
+func (ClosedReads) Leaderboard(context.Context, string, correlation.Headers) (json.RawMessage, error) {
 	return nil, fmt.Errorf("read model client not configured")
 }
 func (ClosedReads) PublicAnalytics(context.Context, correlation.Headers) (json.RawMessage, error) {
