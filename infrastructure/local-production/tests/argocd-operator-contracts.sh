@@ -215,6 +215,13 @@ grep -Fq 'uno-arena-local-production-services uno-arena-local-production-platfor
 grep -Fq 'wait_for_applicationset uno-arena-local-production-services' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'wait_for_applicationset uno-arena-local-production-platform' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'validate-argocd-control-plane-application' "${LOCAL}/bin/acceptance.sh"
+grep -Fq 'argocd app get "${application}" --core --app-namespace argocd --output json' \
+  "${LOCAL}/bin/acceptance.sh"
+grep -Fq 'get appprojects.argoproj.io' "${LOCAL}/bin/acceptance.sh"
+if grep -Fq 'applicationprojects.argoproj.io' "${LOCAL}/bin/acceptance.sh"; then
+  echo "acceptance uses the nonexistent applicationprojects resource type" >&2
+  exit 1
+fi
 grep -Fqx '  "${SCRIPT_DIR}/acceptance.sh" --foundation-only' "${LOCAL}/bin/install-foundations.sh"
 grep -Fqx '  "${SCRIPT_DIR}/acceptance.sh" --pre-source' "${LOCAL}/bin/install-foundations.sh"
 grep -Fq -- '--defer-private-sources' "${LOCAL}/bin/install-foundations.sh"

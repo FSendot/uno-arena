@@ -165,11 +165,13 @@ if [[ "${pre_source}" == false ]]; then
   for role in root foundation; do
     application=uno-arena-local-production-root
     [[ "${role}" == foundation ]] && application=uno-arena-local-production-foundations
-    kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get application "${application}" -o json |
+    kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd \
+      exec argocd-application-controller-0 -- \
+      argocd app get "${application}" --core --app-namespace argocd --output json |
       "${SCRIPT_DIR}/validate-argocd-control-plane-application" "${role}" "${control_plane_mode}" ||
       die "repository-owned Argo control plane is not ready: ${application}"
   done
-  kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get applicationprojects.argoproj.io \
+  kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get appprojects.argoproj.io \
     uno-arena-bootstrap uno-arena-foundations uno-arena-workloads uno-arena-stateful-platform >/dev/null
   kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get applicationsets.argoproj.io \
     uno-arena-local-production-services uno-arena-local-production-platform >/dev/null
