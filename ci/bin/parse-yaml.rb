@@ -5,5 +5,5 @@ require "yaml"
 
 abort "usage: parse-yaml.rb FILE..." if ARGV.empty?
 ARGV.each do |path|
-  YAML.safe_load(File.read(path), [], [], true)
+  YAML.parse_stream(File.read(path), filename: path)
 end

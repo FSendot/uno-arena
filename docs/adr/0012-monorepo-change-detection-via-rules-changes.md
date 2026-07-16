@@ -3,6 +3,11 @@
 ## Status
 Superseded for production promotion by ADR-0048; retained for checkpoint validation and build selection
 
+The `RUN_SERVICE` examples and the decision not to use dynamic child pipelines
+below describe the earlier checkpoint pipeline. ADR-0048 now governs release
+selection through the typed `run_component` input, internal `RUN_COMPONENT`
+mapping, and generated impact child pipeline.
+
 ## Context
 All services live in a single GitLab repository. A push or merge request touching one service must not trigger rebuilds or deploys of unrelated services. GitLab provides two mechanisms: per-job `rules: changes:` path filters, and dynamic child pipelines that compute affected services at runtime. The system has 8 services, all placeholders, operated by two developers.
 

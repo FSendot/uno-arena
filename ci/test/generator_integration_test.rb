@@ -3,10 +3,29 @@
 require_relative "test_helper"
 
 class GeneratorIntegrationTest < Minitest::Test
+  def root_pipeline_documents
+    content = File.read(".gitlab-ci.yml")
+    header, pipeline = content.split(/^---\s*$\n?/, 2)
+    return [{}, YAML.safe_load(header, [], [], true)] unless pipeline
+
+    [YAML.safe_load(header, [], [], true), YAML.safe_load(pipeline, [], [], true)]
+  end
+
   def test_trigger_job_does_not_inherit_runner_tags
-    pipeline = YAML.safe_load(File.read(".gitlab-ci.yml"), [], [], true)
+    _header, pipeline = root_pipeline_documents
     assert_equal false, pipeline.dig("dispatch:impact", "inherit", "default")
     refute pipeline.fetch("dispatch:impact").key?("tags")
+  end
+
+  def test_manual_pipeline_exposes_release_selector_input
+    header, pipeline = root_pipeline_documents
+    input = header.dig("spec", "inputs", "run_component")
+
+    refute_nil input
+    assert_equal "all", input["default"]
+    assert_equal ["all"] + UnoArenaCI::ImpactMap.load("ci/impact-map.yaml").release_names,
+                 input["options"]
+    assert_equal "$[[ inputs.run_component ]]", pipeline.dig("variables", "RUN_COMPONENT")
   end
 
   def test_reconciliation_uses_read_only_argocd_api_without_cluster_credentials

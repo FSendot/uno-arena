@@ -1,3 +1,34 @@
+spec:
+  inputs:
+    run_component:
+      type: string
+      description: "Release one component, or all components, through the local-production GitOps pipeline."
+      default: all
+      options:
+        - all
+        - analytics
+        - game-integrity
+        - gateway
+        - identity
+        - ranking
+        - room-gameplay
+        - spectator-view
+        - tournament-orchestration
+        - clickhouse
+        - context-bootstrap
+        - debezium-connect
+        - debezium-server
+        - kafka
+        - keycloak
+        - kurrentdb
+        - local-retain-storage
+        - minio
+        - observability
+        - platform-secrets
+        - postgres-contexts
+        - redis
+---
+
 default:
   tags:
     - local-runner-sendot
@@ -15,8 +46,9 @@ stages:
 
 variables:
   GIT_DEPTH: "0"
-  # The local runner targets the long-lived simulator by default. Protected
-  # pipelines may explicitly select production or both environments.
+  RUN_COMPONENT: "$[[ inputs.run_component ]]"
+  # The local runner targets only the long-lived simulator. Production
+  # selection remains fail-closed until its external preflight is executable.
   DEPLOY_ENVIRONMENTS: "local-production"
 
 plan:impact:

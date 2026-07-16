@@ -217,6 +217,15 @@ the verification job re-fetches each reconciled
 `CI_JOB_TOKEN` and compares the bytes with the promoted
 `chart.packageSha256`.
 
+To start the first manual release, open **Build > Pipelines > New pipeline** in
+GitLab, select `main`, and leave the `run_component` input at its default value
+of `all`. The root pipeline intentionally contains only `plan:impact` and
+`dispatch:impact`: the planner writes the affected jobs to a dynamic child
+pipeline, and the dispatch job links to that downstream pipeline. Select one
+component instead of `all` only when intentionally limiting a manual release.
+Automatic pushes and merges to `main` continue to calculate their impact from
+the Git diff and ignore the manual selector.
+
 Internal services and platform components are not exposed for probing: the
 pipeline binds their evidence to the exact affected Argo CD Application and
 requires its resource tree to be non-empty and free of unhealthy resources.
