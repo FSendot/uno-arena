@@ -3,7 +3,6 @@ kind: Application
 metadata:
   name: uno-arena-local-production-foundations
   namespace: argocd
-  finalizers: []
 spec:
   project: uno-arena-foundations
   source:
@@ -15,6 +14,17 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: istio-validator-istio-system
+      jqPathExpressions:
+        - .webhooks[]?.failurePolicy
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: istiod-default-validator
+      jqPathExpressions:
+        - .webhooks[]?.failurePolicy
   syncPolicy:
     automated:
       prune: false
@@ -24,3 +34,4 @@ spec:
       - CreateNamespace=false
       - ServerSideApply=true
       - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true

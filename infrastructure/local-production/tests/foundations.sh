@@ -5,6 +5,48 @@ LOCAL="${ROOT}/infrastructure/local-production"
 
 "${LOCAL}/vendor/verify.sh" >/dev/null
 
+rendered_foundation="$(mktemp)"
+rendered_root="$(mktemp)"
+trap 'rm -f "${rendered_foundation}" "${rendered_root}"' EXIT
+"${LOCAL}/gitops/render-foundation.sh" "${rendered_foundation}"
+ruby -ryaml -e '
+  documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+  identities = documents.map do |document|
+    api_version = document.fetch("apiVersion")
+    group = api_version.include?("/") ? api_version.split("/", 2).first : ""
+    [group, document.fetch("kind"), document.dig("metadata", "namespace") || "", document.dig("metadata", "name")]
+  end
+  duplicates = identities.group_by(&:itself).select { |_identity, matches| matches.length > 1 }.keys
+  abort "foundation renders duplicate resources: #{duplicates.inspect}" unless duplicates.empty?
+' "${rendered_foundation}"
+
+helm template uno-arena-local-production-root \
+  "${ROOT}/environments/local-production/argocd" \
+  --set-string gitRepoURL=https://gitlab.test/group/project.git \
+  --set-string helmRepoURL=https://gitlab.test/api/v4/projects/17/packages/helm/stable \
+  >"${rendered_root}"
+ruby -ryaml -e '
+  applications = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+    .select { |document| document["kind"] == "Application" }
+  explicit_empty = applications.select do |application|
+    application.fetch("metadata").key?("finalizers") && application.dig("metadata", "finalizers") == []
+  end.map { |application| application.dig("metadata", "name") }
+  abort "Applications must omit empty finalizers: #{explicit_empty.inspect}" unless explicit_empty.empty?
+
+  foundation = applications.find do |application|
+    application.dig("metadata", "name") == "uno-arena-local-production-foundations"
+  end
+  ignored_webhooks = Array(foundation.dig("spec", "ignoreDifferences")).select do |rule|
+    rule["group"] == "admissionregistration.k8s.io" &&
+      rule["kind"] == "ValidatingWebhookConfiguration" &&
+      rule["jqPathExpressions"] == [".webhooks[]?.failurePolicy"]
+  end.map { |rule| rule["name"] }.sort
+  expected_webhooks = %w[istio-validator-istio-system istiod-default-validator]
+  abort "Istio validator drift must be ignored: #{ignored_webhooks.inspect}" unless ignored_webhooks == expected_webhooks
+  sync_options = Array(foundation.dig("spec", "syncPolicy", "syncOptions"))
+  abort "foundation must respect ignored differences during sync" unless sync_options.include?("RespectIgnoreDifferences=true")
+' "${rendered_root}"
+
 ruby -ryaml -e '
   docs = YAML.load_stream(File.read(ARGV.fetch(0))).compact
   expected = %w[argocd uno-arena observability secret-seed istio-system external-secrets cert-manager]

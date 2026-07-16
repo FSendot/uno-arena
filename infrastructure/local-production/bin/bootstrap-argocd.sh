@@ -50,6 +50,12 @@ EXPECTED_GIT_REPO_URL="${ARGOCD_GIT_REPO_URL}" ruby -ryaml -e '
 
 "${SCRIPT_DIR}/install-argocd-core.sh"
 "${SCRIPT_DIR}/configure-argocd-repositories.sh"
+# Argo CD 3.4 repo-server can retain a cached client for a repository URL after
+# its Secret changes. Recycle it before asking the root Application to compare.
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout restart \
+  deployment/argocd-repo-server
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
+  deployment/argocd-repo-server --timeout=300s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" apply -f "${tmp_dir}/root-seed.yaml"
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
   --for=jsonpath='{.status.sync.status}'=Synced \

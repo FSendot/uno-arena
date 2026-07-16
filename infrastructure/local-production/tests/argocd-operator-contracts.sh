@@ -119,6 +119,15 @@ if rg -F -e "${git_password}" -e "${helm_password}" "${bootstrap_log}"; then
   echo "bootstrap helper printed a credential" >&2
   exit 1
 fi
+ruby -e '
+  commands = File.readlines(ARGV.fetch(0), chomp: true)
+  restart = commands.index { |command| command.include?("rollout restart deployment/argocd-repo-server") }
+  rollout = commands.index { |command| command.include?("rollout status deployment/argocd-repo-server") }
+  root_apply = commands.index { |command| command.include?("root-seed.yaml") }
+  abort "bootstrap must restart repo-server after writing repository Secrets" unless restart
+  abort "bootstrap must wait for repo-server after restart" unless rollout && restart < rollout
+  abort "bootstrap must refresh repo-server before applying the root Application" unless root_apply && rollout < root_apply
+' "${tmp_dir}/bootstrap-kubectl.args"
 
 failed_bootstrap_log="${tmp_dir}/failed-bootstrap.log"
 failed_bootstrap_args="${tmp_dir}/failed-bootstrap-kubectl.args"
