@@ -31,6 +31,10 @@ echo "${kind_out}" | grep -q 'DATABASE_URL'
 echo "${kind_out}" | grep -q 'identity-database-url'
 echo "${kind_out}" | grep -q 'OIDC_ISSUER_URL'
 echo "${kind_out}" | grep -q 'DEPLOYMENT_ENV'
+echo "${kind_out}" | grep -q 'unoarena.io/principal-key-version: "keyring-v1"'
+echo "${kind_out}" | grep -q 'name: IDENTITY_INTERNAL_PRINCIPAL_ACTIVE_KEY_ID'
+echo "${kind_out}" | grep -q 'name: IDENTITY_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT'
+echo "${kind_out}" | grep -q 'key: "internal-principal-hmac-key-current"'
 # No public Service type / NodePort / LoadBalancer in kind render.
 ! echo "${kind_out}" | grep -E 'type:\s*(NodePort|LoadBalancer)'
 

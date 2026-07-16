@@ -1,0 +1,62 @@
+storage:
+  s3:
+    endpoint: http://minio.observability.svc.cluster.local:9000
+    region: us-east-1
+    forcePathStyle: true
+    insecure: true
+    existingSecret: minio-observability
+    lokiBucket: loki-logs
+    tempoBucket: tempo-traces
+  tempoWal:
+    storageClassName: uno-arena-local-retain
+  prometheus:
+    storageClassName: uno-arena-local-retain
+  alertmanager:
+    storageClassName: uno-arena-local-retain
+
+alertmanager:
+  receiver:
+    existingSecret: uno-arena-local-observability-alertmanager
+  webhookSink:
+    enabled: true
+
+prometheus:
+  scrapeInterval: 30s
+  evaluationInterval: 30s
+  scrapeTimeout: 10s
+
+grafana:
+  existingAdminSecret: uno-arena-local-observability
+  strategyType: Recreate
+  preinstallDisabled: true
+  goMemoryLimit: 256MiB
+
+security:
+  networkPoliciesEnabled: false
+
+postSyncEvidence:
+  enabled: true
+
+# Local production preserves the production topology and alert semantics while
+# reducing scheduling reservations for a laptop-sized three-node kind cluster.
+resources:
+  alloyLogs:
+    requests: {cpu: 10m, memory: 32Mi}
+  alloyOtlp:
+    requests: {cpu: 20m, memory: 64Mi}
+  loki:
+    requests: {cpu: 25m, memory: 128Mi}
+  tempo:
+    requests: {cpu: 25m, memory: 128Mi}
+  prometheus:
+    requests: {cpu: 25m, memory: 128Mi}
+  alertmanager:
+    requests: {cpu: 10m, memory: 32Mi}
+  redisExporter:
+    requests: {cpu: 5m, memory: 16Mi}
+  webhookSink:
+    requests: {cpu: 5m, memory: 8Mi}
+  kubeStateMetrics:
+    requests: {cpu: 10m, memory: 32Mi}
+  grafana:
+    requests: {cpu: 25m, memory: 64Mi}

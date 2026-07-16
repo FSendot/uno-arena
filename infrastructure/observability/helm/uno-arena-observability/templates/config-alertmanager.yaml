@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: environment-webhook
+      group_by: [alertname, service, severity]
+      group_wait: 5s
+      group_interval: 1m
+      repeat_interval: 4h
+    receivers:
+      - name: environment-webhook
+        webhook_configs:
+          - send_resolved: true
+            {{- with .Values.alertmanager.receiver.inlineUrl }}
+            url: {{ . | quote }}
+            {{- else }}
+            # The receiver Secret is directory-mounted so Kubernetes projected
+            # updates stay visible; Alertmanager reads url_file per notification.
+            url_file: /etc/alertmanager/receiver/{{ $.Values.alertmanager.receiver.key }}
+            {{- end }}
+{{- if .Values.alertmanager.receiver.externalSecret.enabled }}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ .Values.alertmanager.receiver.existingSecret }}
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.alertmanager.receiver.externalSecret.refreshInterval }}
+  secretStoreRef:
+    kind: {{ .Values.alertmanager.receiver.externalSecret.secretStoreRef.kind }}
+    name: {{ .Values.alertmanager.receiver.externalSecret.secretStoreRef.name }}
+  target:
+    name: {{ .Values.alertmanager.receiver.existingSecret }}
+    creationPolicy: Owner
+  data:
+    - secretKey: {{ .Values.alertmanager.receiver.key }}
+      remoteRef:
+        key: {{ .Values.alertmanager.receiver.externalSecret.remoteKey }}
+        property: {{ .Values.alertmanager.receiver.externalSecret.remoteProperty }}
+{{- end }}
+{{- if .Values.alertmanager.webhookSink.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-webhook-sink-config
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr notice;
+    events {}
+    http {
+      client_body_temp_path /tmp/client-body;
+      proxy_temp_path /tmp/proxy;
+      fastcgi_temp_path /tmp/fastcgi;
+      uwsgi_temp_path /tmp/uwsgi;
+      scgi_temp_path /tmp/scgi;
+      log_format webhook '$remote_addr [$time_iso8601] "$request" $status bytes=$request_length';
+      access_log /dev/stdout webhook;
+      server {
+        listen 8080;
+        location = /healthz { return 204; }
+        location = /alerts { return 204; }
+        location / { return 404; }
+      }
+    }
+{{- end }}

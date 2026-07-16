@@ -3,7 +3,6 @@ replicaCount: 2
 env:
   DEPLOYMENT_ENV: production
   GATEWAY_URL: http://gateway.uno-arena.svc.cluster.local:8080
-  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
@@ -53,3 +52,27 @@ resources:
   limits:
     cpu: 200m
     memory: 256Mi
+
+playerStreamCompactor:
+  enabled: true
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+imagePullSecrets:
+  - name: gitlab-registry

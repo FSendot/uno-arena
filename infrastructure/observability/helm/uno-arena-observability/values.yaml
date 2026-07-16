@@ -6,6 +6,9 @@ images:
   loki: grafana/loki@sha256:70b9f699fc9bb868b62f1cfd4f787dfa50242f1fd92e6089787d5d7daea75fe8
   tempo: grafana/tempo@sha256:cda87c212d8c584dc0b89e337e7ed648a5100feb657e5d528480ee4fa03dbbe3
   prometheus: prom/prometheus@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893
+  alertmanager: quay.io/prometheus/alertmanager:v0.32.1@sha256:51a825c2a40acc3e338fdd00d622e01ec090f72be2b3ea46be0839cd47a4d286
+  redisExporter: oliver006/redis_exporter:v1.87.0@sha256:9ca6f929a8abc518d78158757922444f1cf807661a2238f44b28c3cd08a1b652
+  webhookSink: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
   kubeStateMetrics: registry.k8s.io/kube-state-metrics/kube-state-metrics@sha256:85108987d044b18a098126732f98602df408888c0f7d456241f5abefb9744bc1
   grafana: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
   pullPolicy: IfNotPresent
@@ -42,11 +45,50 @@ storage:
     storageClassName: ""
     retentionTime: 24h
     retentionSize: 4GB
+  alertmanager:
+    size: 1Gi
+    storageClassName: ""
 
 prometheus:
   scrapeInterval: 15s
   evaluationInterval: 15s
   scrapeTimeout: 5s
+
+alertmanager:
+  receiver:
+    inlineUrl: ""
+    existingSecret: ""
+    key: webhook-url
+    externalSecret:
+      enabled: false
+      refreshInterval: 1h
+      secretStoreRef:
+        kind: ClusterSecretStore
+        name: ""
+      remoteKey: ""
+      remoteProperty: alertmanager-webhook-url
+  webhookSink:
+    enabled: false
+
+redisExporter:
+  address: redis://redis.uno-arena.svc.cluster.local:6379
+  existingSecret: ""
+  addressKey: redis-url
+
+productionPreflight:
+  redis:
+    enabled: false
+    image: redis:8.8.0-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+    existingSecret: platform-endpoints
+    urlKey: redis-url
+    timeoutSeconds: 10
+
+postSyncEvidence:
+  enabled: false
+  activeDeadlineSeconds: 1800
+  gatewayWaitAttempts: 180
+  evidenceWaitAttempts: 60
+  pollIntervalSeconds: 5
 
 probes:
   readinessTimeoutSeconds: 3
@@ -68,6 +110,7 @@ security:
     - room-gameplay-router
     - room-gameplay-runtime-controller
     - room-gameplay-runtime
+    - room-gameplay-player-stream-compactor
     - room-gameplay-timer-worker
     - room-gameplay-integrity-reconciler
     - game-integrity
@@ -98,6 +141,18 @@ resources:
   prometheus:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: "1", memory: 1Gi}
+  alertmanager:
+    requests: {cpu: 25m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+  redisExporter:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {cpu: 100m, memory: 128Mi}
+  webhookSink:
+    requests: {cpu: 5m, memory: 16Mi}
+    limits: {cpu: 50m, memory: 64Mi}
+  postSyncEvidence:
+    requests: {cpu: 5m, memory: 16Mi}
+    limits: {cpu: 100m, memory: 64Mi}
   kubeStateMetrics:
     requests: {cpu: 20m, memory: 64Mi}
     limits: {cpu: 200m, memory: 256Mi}

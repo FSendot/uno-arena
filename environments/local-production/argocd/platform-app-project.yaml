@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: uno-arena-stateful-platform
+  namespace: argocd
+spec:
+  description: Retained local-production platform components from immutable Helm packages.
+  sourceRepos:
+    - https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: uno-arena
+    - server: https://kubernetes.default.svc
+      namespace: observability
+  orphanedResources:
+    warn: true
+  namespaceResourceWhitelist:
+    - {group: "", kind: Service}
+    - {group: "", kind: ConfigMap}
+    - {group: "", kind: ServiceAccount}
+    - {group: "", kind: PersistentVolumeClaim}
+    - {group: "", kind: Secret}
+    - {group: apps, kind: Deployment}
+    - {group: apps, kind: DaemonSet}
+    - {group: apps, kind: StatefulSet}
+    - {group: batch, kind: Job}
+    - {group: external-secrets.io, kind: ExternalSecret}
+    - {group: networking.k8s.io, kind: NetworkPolicy}
+    - {group: security.istio.io, kind: PeerAuthentication}
+    - {group: security.istio.io, kind: AuthorizationPolicy}
+  clusterResourceWhitelist:
+    - {group: storage.k8s.io, kind: StorageClass}
+    - {group: rbac.authorization.k8s.io, kind: ClusterRole}
+    - {group: rbac.authorization.k8s.io, kind: ClusterRoleBinding}

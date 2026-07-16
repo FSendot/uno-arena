@@ -1,0 +1,6 @@
+apiVersion: v2
+name: context-bootstrap
+description: Idempotent context database migrations from an immutable bootstrap image
+type: application
+version: 0.1.0
+appVersion: "001_init"

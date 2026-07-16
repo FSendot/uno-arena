@@ -1,0 +1,6 @@
+apiVersion: v2
+name: postgres-contexts
+description: Single-replica durable Postgres contexts for local production
+type: application
+version: 0.1.0
+appVersion: "18.4"

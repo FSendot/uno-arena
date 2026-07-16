@@ -1,0 +1,15 @@
+{{- $digest := required "image.digest is required; publish the bootstrap image before enabling this release" .Values.image.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) }}{{ fail "image.digest must be sha256:<64 lowercase hex>" }}{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: context-bootstrap
+  namespace: uno-arena
+imagePullSecrets:
+  - name: gitlab-registry
+automountServiceAccountToken: false
+---
+{{- range $file := list "job-postgres-identity.yaml" "job-postgres-room-gameplay.yaml" "job-postgres-tournament.yaml" "job-postgres-ranking.yaml" "job-clickhouse-analytics.yaml" }}
+{{ tpl ($.Files.Get (printf "files/%s" $file)) $ }}
+---
+{{- end }}

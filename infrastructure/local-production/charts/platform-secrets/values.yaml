@@ -1,0 +1,9 @@
+secretStoreRef: local-kubernetes
+refreshInterval: 1h
+sourceSecret: uno-arena-local-credentials
+localPlatformSecrets:
+  enabled: true
+productionObservabilitySecrets:
+  enabled: false
+  s3Target: uno-arena-observability-s3
+  grafanaTarget: uno-arena-observability-grafana

@@ -13,6 +13,8 @@ spec:
       app: {{ .Release.Name }}-runtime-controller
   template:
     metadata:
+      annotations:
+        unoarena.io/principal-key-version: {{ .Values.principalKeyVersion | quote }}
       labels:
         app: {{ .Release.Name }}-runtime-controller
         app.kubernetes.io/name: room-gameplay
@@ -20,6 +22,19 @@ spec:
         unoarena.io/metrics-scrape: pod
         unoarena.io/metrics-exposed: "true"
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-runtime-controller
+      {{- end }}
       serviceAccountName: {{ .Release.Name }}-runtime-controller
       containers:
         - name: room-runtime-controller
@@ -42,6 +57,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: ROOM_RUNTIME_IMAGE
               value: {{ include "room-gameplay.image" . | quote }}
+            - name: ROOM_INTERNAL_PRINCIPAL_KEY_VERSION
+              value: {{ .Values.principalKeyVersion | quote }}
             - name: ROOM_DB_POOL_MAX_CONNS
               value: {{ .Values.topology.controller.dbPoolMaxConns | quote }}
             - name: ROOM_RUNTIME_CONTROLLER_CLAIM_BATCH
@@ -68,6 +85,16 @@ spec:
               value: {{ .Values.topology.runtime.healthProbes.timeoutSeconds | quote }}
             - name: ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD
               value: {{ .Values.topology.runtime.healthProbes.failureThreshold | quote }}
+            - name: ROOM_RUNTIME_NODE_SELECTOR_JSON
+              value: {{ .Values.nodeSelector | toJson | quote }}
+            - name: ROOM_RUNTIME_TOPOLOGY_SPREAD_ENABLED
+              value: {{ .Values.topologySpread.enabled | quote }}
+            - name: ROOM_RUNTIME_TOPOLOGY_KEY
+              value: "kubernetes.io/hostname"
+            - name: ROOM_RUNTIME_TOPOLOGY_MAX_SKEW
+              value: {{ .Values.topologySpread.maxSkew | quote }}
+            - name: ROOM_RUNTIME_TOPOLOGY_WHEN_UNSATISFIABLE
+              value: {{ .Values.topologySpread.whenUnsatisfiable | quote }}
             {{- range $name, $val := .Values.env }}
             - name: {{ $name }}
               value: {{ $val | quote }}

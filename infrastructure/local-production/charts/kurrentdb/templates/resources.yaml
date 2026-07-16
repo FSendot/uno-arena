@@ -1,0 +1,21 @@
+{{- if not (has .Values.image.architecture (list "amd64" "arm64")) }}{{ fail "image.architecture must be amd64 or arm64" }}{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kurrentdb, namespace: uno-arena}
+automountServiceAccountToken: false
+---
+{{ tpl (.Files.Get "files/base.yaml") . }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kurrentdb-data
+  namespace: uno-arena
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.storageClassName }}
+  resources:
+    requests: {storage: {{ .Values.storage }}}

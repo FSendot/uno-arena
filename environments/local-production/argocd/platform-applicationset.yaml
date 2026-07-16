@@ -1,0 +1,56 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: uno-arena-local-production-platform
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: [missingkey=error]
+  generators:
+    - git:
+        repoURL: https://gitlab.example.invalid/GROUP/PROJECT.git
+        revision: main
+        files:
+          - path: environments/local-production/platform/enabled/*.yaml
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["00-foundation"]}
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["10-stateful"]}
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["20-bootstrap"]}
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["30-cdc"]}
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["40-observability"]}
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  template:
+    metadata:
+      name: '{{.application}}'
+      namespace: argocd
+      labels:
+        unoarena.io/platform-stage: '{{.stage}}'
+      annotations:
+        unoarena.io/inventory-status: '{{.status}}'
+    spec:
+      project: uno-arena-stateful-platform
+      source:
+        repoURL: '{{.chart.repository}}'
+        chart: '{{.chart.name}}'
+        targetRevision: '{{.chart.version}}'
+        helm:
+          releaseName: '{{.component}}'
+          values: '{{ toJson .values }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{.destinationNamespace}}'
+      syncPolicy:
+        syncOptions:
+          - ApplyOutOfSyncOnly=true
+          - CreateNamespace=false
+          - FailOnSharedResource=true
+          - PruneLast=true

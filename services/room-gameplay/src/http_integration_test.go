@@ -13,6 +13,7 @@ import (
 
 	"unoarena/services/room-gameplay/app"
 	"unoarena/shared/envelope"
+	"unoarena/shared/internalprincipal"
 )
 
 const testCred = "room-test-credential"
@@ -28,6 +29,67 @@ type testEnv struct {
 	deals             *app.FakeDealSource
 	sessionsV         *app.FakeSessionValidator
 	analyticsBackfill *app.MemoryAnalyticsBackfillStore
+}
+
+func TestSignedInternalPrincipalIsRequiredAndBoundBeforeMutation(t *testing.T) {
+	e := newTestEnv(t)
+	key := []byte("room-principal-test-key-at-least-32-bytes")
+	signer, err := internalprincipal.NewSigner(internalprincipal.SignerConfig{
+		ActiveKey: internalprincipal.Key{ID: "current", Material: key}, Issuer: internalprincipal.DefaultIssuer, Audience: internalprincipal.DefaultRoomAudience,
+		TTL: 15 * time.Second, Now: e.clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := internalprincipal.NewVerifier(internalprincipal.VerifierConfig{
+		CurrentKey: internalprincipal.Key{ID: "current", Material: key}, Issuer: internalprincipal.DefaultIssuer, Audience: internalprincipal.DefaultRoomAudience,
+		MaxTTL: 20 * time.Second, FutureSkew: time.Second, Now: e.clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv.ConfigureInternalPrincipalVerifier(verifier)
+	binding, err := internalprincipal.NewRoomCommandBinding("accept-proof", "CreateRoom", "room-proof", nil, json.RawMessage(`{"roomId":"room-proof"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, _, err := signer.Issue(internalprincipal.IssueInput{PlayerID: "proof-host", SessionID: "proof-session", Eligible: true, Command: binding})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command := func(id, playerID, roomID string, payload map[string]any) map[string]any {
+		return cmdBody(id, "CreateRoom", nil, playerID, "proof-session", roomID, payload)
+	}
+	for _, tc := range []struct {
+		name, proof, playerID, commandID, roomID string
+		payload                                  map[string]any
+	}{
+		{name: "missing", playerID: "proof-host", commandID: "accept-proof", roomID: "room-proof", payload: map[string]any{"roomId": "room-proof"}},
+		{name: "tampered", proof: proof + "x", playerID: "proof-host", commandID: "accept-proof", roomID: "room-proof", payload: map[string]any{"roomId": "room-proof"}},
+		{name: "wrong body identity", proof: proof, playerID: "another-player", commandID: "accept-proof", roomID: "room-proof", payload: map[string]any{"roomId": "room-proof"}},
+		{name: "different command id", proof: proof, playerID: "proof-host", commandID: "other-command", roomID: "room-proof", payload: map[string]any{"roomId": "room-proof"}},
+		{name: "different resolved room", proof: proof, playerID: "proof-host", commandID: "accept-proof", roomID: "other-room", payload: map[string]any{"roomId": "room-proof"}},
+		{name: "different payload", proof: proof, playerID: "proof-host", commandID: "accept-proof", roomID: "room-proof", payload: map[string]any{"roomId": "other-room"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := e.auth()
+			if tc.proof != "" {
+				headers[internalprincipal.HeaderName] = tc.proof
+			}
+			w := e.do(t, http.MethodPost, "/internal/v1/commands", command(tc.commandID, tc.playerID, tc.roomID, tc.payload), headers)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+
+	headers := e.auth()
+	headers[internalprincipal.HeaderName] = proof
+	w := e.do(t, http.MethodPost, "/internal/v1/commands", command("accept-proof", "proof-host", "room-proof", map[string]any{"roomId": "room-proof"}), headers)
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid proof status=%d body=%s", w.Code, w.Body.String())
+	}
 }
 
 func newTestEnv(t *testing.T) *testEnv {

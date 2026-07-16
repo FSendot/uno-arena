@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: uno-arena-workloads
+  namespace: argocd
+spec:
+  description: Namespace-scoped UnoArena workload releases for local-production.
+  sourceRepos:
+    - https://gitlab.example.invalid/GROUP/PROJECT.git
+    - https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: uno-arena
+  orphanedResources:
+    warn: true
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: ServiceAccount
+    - group: apps
+      kind: Deployment
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: batch
+      kind: Job
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+    - group: security.istio.io
+      kind: PeerAuthentication
+  clusterResourceWhitelist: []

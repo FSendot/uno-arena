@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Offline helm lint/template checks for Room Gameplay chart overlays.
-set -euo pipefail
+# grep is the authoritative status in the assertion pipelines below. Avoid
+# pipefail here: grep -q intentionally closes early and large rendered charts
+# can otherwise make the producer report a nondeterministic SIGPIPE (141).
+set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 CHART="${ROOT}/services/room-gameplay/helm/room-gameplay"
 HELM="${HELM:-helm}"
@@ -43,6 +46,20 @@ echo "${kind_out}" | grep -q 'ROOM_RUNTIME_SECRET_ENV_JSON'
 echo "${kind_out}" | grep -q 'room-runtime-router-credential'
 echo "${kind_out}" | grep -q 'name: room-kind-integrity-reconciler'
 
+compactor_out="$("${HELM}" template room-kind "${CHART}" -f "${CHART}/values.kind.yaml" --show-only templates/player-stream-compactor-deployment.yaml)"
+echo "${compactor_out}" | grep -q 'name: room-kind-player-stream-compactor'
+echo "${compactor_out}" | grep -q 'replicas: 1'
+echo "${compactor_out}" | grep -q 'type: Recreate'
+echo "${compactor_out}" | grep -A1 'name: WORKER_ROLE' | grep -q 'room-player-stream-compactor'
+echo "${compactor_out}" | grep -A1 'name: ROOM_PLAYER_STREAM_MAXLEN' | grep -q 'value: "1024"'
+echo "${compactor_out}" | grep -A1 'name: ROOM_PLAYER_STREAM_COMPACTOR_PAGE_SIZE' | grep -q 'value: "100"'
+echo "${compactor_out}" | grep -A1 'name: ROOM_PLAYER_STREAM_TRIM_LIMIT' | grep -q 'value: "4096"'
+echo "${compactor_out}" | grep -q 'key: "room-pgbouncer-database-url"'
+echo "${compactor_out}" | grep -q 'automountServiceAccountToken: false'
+! echo "${compactor_out}" | grep -Eq 'name: (SERVICE_CREDENTIAL|ROOM_SERVICE_CREDENTIAL|GATEWAY_SERVICE_CREDENTIAL)$'
+! echo "${compactor_out}" | grep -q 'GAME_INTEGRITY_INTERNAL_CREDENTIAL'
+! echo "${compactor_out}" | grep -q 'ROOM_TIMER_SERVICE_CREDENTIAL'
+
 reconciler_doc="$(echo "${kind_out}" | awk '/name: room-kind-integrity-reconciler$/,/^---$/')"
 echo "${reconciler_doc}" | grep -q 'replicas: 2'
 echo "${reconciler_doc}" | grep -q 'value: "room-integrity-reconciler"'
@@ -65,7 +82,19 @@ echo "${controller_doc}" | grep -q 'key: "room-database-url"'
 echo "${controller_doc}" | grep -q 'ROOM_RUNTIME_CONTROLLER_CLAIM_BATCH'
 echo "${controller_doc}" | grep -q 'ROOM_RUNTIME_CONTROLLER_CONCURRENCY'
 echo "${controller_doc}" | grep -q '\\"ROOM_RUNTIME_ROUTER_CREDENTIAL\\"'
-echo "${controller_doc}" | grep -q '\\"IDENTITY_SERVICE_CREDENTIAL\\"'
+! echo "${controller_doc}" | grep -q '\\"IDENTITY_SERVICE_CREDENTIAL\\"'
+echo "${controller_doc}" | grep -q '\\"ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT\\"'
+echo "${controller_doc}" | grep -q '\\"ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS\\"'
+echo "${controller_doc}" | grep -A1 'name: ROOM_INTERNAL_PRINCIPAL_KEY_VERSION' | grep -q 'value: "keyring-v1"'
+echo "${kind_out}" | grep -q 'unoarena.io/principal-key-version: "keyring-v1"'
+echo "${kind_out}" | grep -q 'key: "internal-principal-hmac-key-current"'
+echo "${kind_out}" | grep -q 'key: "internal-principal-hmac-key-previous"'
+
+no_previous_out="$("${HELM}" template room-no-previous "${CHART}" -f "${CHART}/values.kind.yaml" \
+  --set-string env.ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID= \
+  --set-string secretEnv.ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS= \
+  --set-string runtimeSecretEnv.ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS=)"
+! echo "${no_previous_out}" | grep -q 'key: "internal-principal-hmac-key-previous"'
 echo "${controller_doc}" | grep -q '\\"GAME_INTEGRITY_INTERNAL_CREDENTIAL\\"'
 echo "${controller_doc}" | grep -q '\\"GAME_INTEGRITY_AUDIT_CREDENTIAL\\"'
 echo "${controller_doc}" | grep -q '\\"ROOM_PGBOUNCER_URL\\"'
@@ -174,6 +203,16 @@ echo "${pin_prod_full}" | grep -q 'replicas: 6'
 echo "${pin_prod_full}" | grep -q 'max_client_conn = 50000'
 echo "${pin_prod_full}" | grep -q 'default_pool_size = 32'
 echo "${pin_prod_full}" | grep -q 'reserve_pool_size = 8'
+echo "${pin_prod_full}" | grep -q 'name: room-pin-prod-full-player-stream-compactor'
+
+if "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" --set playerStreamCompactor.maxLen=0 >/dev/null 2>&1; then
+  echo "player stream maxLen=0 must fail schema validation" >&2
+  exit 1
+fi
+if "${HELM}" lint "${CHART}" -f "${CHART}/values.kind.yaml" --set playerStreamCompactor.pageSize=501 >/dev/null 2>&1; then
+  echo "player stream pageSize above bound must fail schema validation" >&2
+  exit 1
+fi
 
 for insecure_override in \
   'topology.pgbouncer.authType=plain' \

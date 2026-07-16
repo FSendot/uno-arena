@@ -1,0 +1,13 @@
+schemaVersion: 1
+component: object-storage
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  endpoint: {kind: Secret, name: observability-object-storage, key: endpoint}
+  credentials: {kind: Secret, name: observability-object-storage, key: secret-access-key}
+preflight:
+  - {type: dns, expect: object storage hostname resolves}
+  - {type: tls, expect: HTTPS server identity verifies}
+  - {type: s3, expect: Loki and Tempo buckets exist with encryption versioning and lifecycle policy}
+semantics: [separate buckets and least-privilege identities, backups and retention owned by environment, no local MinIO credentials]

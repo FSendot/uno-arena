@@ -1,0 +1,1 @@
+{{ include "unoArena.productionRenderFile" (list . "platform-app-project.yaml") }}

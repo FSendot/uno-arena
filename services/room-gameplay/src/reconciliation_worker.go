@@ -23,6 +23,7 @@ type ReconciliationWorker struct {
 	batch     int
 	lease     time.Duration
 	interval  time.Duration
+	jitter    func(time.Duration) time.Duration
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 }
@@ -44,6 +45,7 @@ func NewReconciliationWorker(sessions reconciliationQueue, integrity app.GameInt
 		batch:     32,
 		lease:     time.Minute,
 		interval:  2 * time.Second,
+		jitter:    randomJitterDuration,
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
@@ -81,14 +83,15 @@ func (w *ReconciliationWorker) Stop() {
 
 func (w *ReconciliationWorker) loop() {
 	defer close(w.doneCh)
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(w.jitter(w.interval))
+	defer timer.Stop()
 	for {
 		select {
 		case <-w.stopCh:
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			w.tick(context.Background())
+			timer.Reset(w.jitter(w.interval))
 		}
 	}
 }
@@ -105,7 +108,7 @@ func (w *ReconciliationWorker) tick(ctx context.Context) {
 			if errors.Is(err, errReconciliationLeaseLost) {
 				continue
 			}
-			if releaseErr := w.store.ReleaseReconciliationClaim(ctx, marker.CommandID, w.owner, reconciliationRetryDelay(marker.Attempts)); releaseErr != nil {
+			if releaseErr := w.store.ReleaseReconciliationClaim(ctx, marker.CommandID, w.owner, w.jitter(reconciliationRetryDelay(marker.Attempts))); releaseErr != nil {
 				slog.WarnContext(ctx, "reconciliation release failed", "event", "reconciliation_release_failed", "commandId", marker.CommandID, "error", releaseErr.Error())
 			}
 		}

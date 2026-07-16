@@ -28,6 +28,19 @@ spec:
         unoarena.io/metrics-exposed: "true"
         unoarena.io/metrics-scrape: pod
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-projection-rebuilder
+      {{- end }}
       serviceAccountName: analytics-projection-rebuilder
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45

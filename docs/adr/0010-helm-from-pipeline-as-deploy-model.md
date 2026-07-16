@@ -1,7 +1,7 @@
 # Helm from Pipeline as Deploy Model
 
 ## Status
-Accepted
+Superseded for production by ADR-0048; retained for the DevOps checkpoint staging demonstration
 
 ## Context
 The DevOps checkpoint requires a documented and justified deploy model for staging and production environments. Two options were evaluated: Helm releases applied directly from the GitLab CI pipeline, and GitOps via Argo CD or Flux watching a cluster-state path. The system is a single-cluster deployment across two namespaces (staging and production), operated by a two-person team, with placeholder services for this checkpoint.

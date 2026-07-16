@@ -23,6 +23,7 @@ import (
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
 	"unoarena/shared/httpx"
+	"unoarena/shared/internalprincipal"
 )
 
 const (
@@ -52,6 +53,13 @@ type Server struct {
 	runtimeGeneration           int64
 	runtimeCredential           string
 	mutationQueue               *RoomMutationQueue
+	principalVerifier           *internalprincipal.Verifier
+}
+
+// ConfigureInternalPrincipalVerifier enables fail-closed verification of the
+// Identity-issued principal on every non-system mutation.
+func (s *Server) ConfigureInternalPrincipalVerifier(verifier *internalprincipal.Verifier) {
+	s.principalVerifier = verifier
 }
 
 // ConfigureDedicatedRuntime pins this process to exactly one Room generation.
@@ -574,15 +582,6 @@ func (s *Server) dispatchCommand(w http.ResponseWriter, r *http.Request, pathRoo
 		// System issuer is derived server-side; clients cannot set asSystem.
 		asSystem = true
 	}
-
-	corr := correlation.FromHTTP(r.Header).WithDefaults()
-	if corr.CorrelationID == "" {
-		corr.CorrelationID = raw.CommandID
-	}
-	corr.CommandID = raw.CommandID
-	w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
-	w.Header().Set(correlation.HeaderCommandID, raw.CommandID)
-
 	roomID := pathRoomID
 	if roomID == "" {
 		roomID = raw.RoomID
@@ -594,6 +593,27 @@ func (s *Server) dispatchCommand(w http.ResponseWriter, r *http.Request, pathRoo
 		_ = json.Unmarshal(raw.Payload, &p)
 		roomID = p.RoomID
 	}
+	principalVerified := false
+	if !asSystem && s.principalVerifier != nil {
+		binding, err := internalprincipal.NewRoomCommandBinding(raw.CommandID, raw.Type, roomID, raw.ExpectedSequenceNumber, raw.Payload)
+		if err != nil {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid internal principal", "", raw.CommandID)
+			return
+		}
+		if _, err := s.principalVerifier.Verify(r.Header.Get(internalprincipal.HeaderName), raw.PlayerID, raw.SessionID, binding); err != nil {
+			_ = httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid internal principal", "", raw.CommandID)
+			return
+		}
+		principalVerified = true
+	}
+
+	corr := correlation.FromHTTP(r.Header).WithDefaults()
+	if corr.CorrelationID == "" {
+		corr.CorrelationID = raw.CommandID
+	}
+	corr.CommandID = raw.CommandID
+	w.Header().Set(correlation.HeaderCorrelationID, corr.CorrelationID)
+	w.Header().Set(correlation.HeaderCommandID, raw.CommandID)
 
 	input := app.CommandInput{
 		CommandID:              raw.CommandID,
@@ -606,6 +626,7 @@ func (s *Server) dispatchCommand(w http.ResponseWriter, r *http.Request, pathRoo
 		ExpectedSequenceNumber: raw.ExpectedSequenceNumber,
 		CorrelationID:          corr.CorrelationID,
 		AsSystem:               asSystem,
+		PrincipalVerified:      principalVerified,
 		RuntimeGeneration:      s.runtimeGeneration,
 	}
 	var res app.CommandResult
@@ -725,6 +746,33 @@ func (w *OutboxRetryWorker) loop() {
 	}
 }
 
+func runtimePodEnvironment(cfg roomRuntimeConfig) map[string]string {
+	return map[string]string{
+		"SERVICE_NAME": cfg.ServiceName, "DEPLOYMENT_ENV": cfg.DeploymentEnv,
+		"TELEMETRY_MODE": os.Getenv("TELEMETRY_MODE"), "SERVICE_VERSION": os.Getenv("SERVICE_VERSION"),
+		"UNOARENA_COMPONENT": "room-runtime", "OTEL_EXPORTER_OTLP_ENDPOINT": os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		"OTEL_EXPORTER_OTLP_PROTOCOL": os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"), "OTEL_TRACES_SAMPLER": os.Getenv("OTEL_TRACES_SAMPLER"),
+		"OTEL_TRACES_SAMPLER_ARG": os.Getenv("OTEL_TRACES_SAMPLER_ARG"), "OTEL_GO_X_OBSERVABILITY": os.Getenv("OTEL_GO_X_OBSERVABILITY"),
+		"METRICS_ADDR":                                os.Getenv("METRICS_ADDR"),
+		"GAME_INTEGRITY_URL":                          cfg.GameIntegrityURL,
+		"ROOM_INTERNAL_PRINCIPAL_ISSUER":              cfg.InternalPrincipalIssuer,
+		"ROOM_INTERNAL_PRINCIPAL_AUDIENCE":            cfg.InternalPrincipalAudience,
+		"ROOM_INTERNAL_PRINCIPAL_MAX_TTL_SECONDS":     strconv.Itoa(cfg.InternalPrincipalMaxTTLSeconds),
+		"ROOM_INTERNAL_PRINCIPAL_FUTURE_SKEW_SECONDS": strconv.Itoa(cfg.InternalPrincipalFutureSkewSeconds),
+		"ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID":      cfg.InternalPrincipalCurrentKeyID,
+		"ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID":     cfg.InternalPrincipalPreviousKeyID,
+		"ROOM_INTERNAL_PRINCIPAL_KEY_VERSION":         cfg.InternalPrincipalKeyVersion,
+		"GAME_INTEGRITY_HTTP_TIMEOUT_MILLIS":          strconv.FormatInt(cfg.GameIntegrityHTTPTimeout.Milliseconds(), 10),
+		"REDIS_URL":                                   cfg.RedisURL,
+		"GATEWAY_URL":                                 cfg.GatewayURL,
+		"SPECTATOR_VIEW_URL":                          cfg.SpectatorURL,
+		"RANKING_URL":                                 cfg.RankingURL,
+		"ANALYTICS_URL":                               cfg.AnalyticsURL,
+		"TOURNAMENT_URL":                              cfg.TournamentURL,
+		"ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY":        strconv.Itoa(cfg.RuntimeQueueCapacity),
+	}
+}
+
 func main() {
 	if err := runRoomProcess(); err != nil {
 		if roomProcessTelemetry != nil {
@@ -763,24 +811,15 @@ func runRoomProcess() error {
 			CPURequest: cfg.RuntimeCPURequest, MemoryRequest: cfg.RuntimeMemoryRequest,
 			CPULimit: cfg.RuntimeCPULimit, MemoryLimit: cfg.RuntimeMemoryLimit,
 			ProbeTimeoutSeconds: cfg.RuntimeProbeTimeoutSeconds, ProbeFailureThreshold: cfg.RuntimeProbeFailureThreshold,
+			NodeSelector: cfg.RuntimeNodeSelector, TopologySpreadEnabled: cfg.RuntimeTopologySpreadEnabled,
+			TopologyKey: cfg.RuntimeTopologyKey, TopologyMaxSkew: cfg.RuntimeTopologyMaxSkew,
+			TopologyWhenUnsatisfiable: cfg.RuntimeTopologyUnsatisfiable,
 		})
-		controller.ConfigureRuntimePod(cfg.RuntimeSecretName, cfg.RuntimeSecretEnv, map[string]string{
-			"SERVICE_NAME": cfg.ServiceName, "DEPLOYMENT_ENV": cfg.DeploymentEnv,
-			"TELEMETRY_MODE": os.Getenv("TELEMETRY_MODE"), "SERVICE_VERSION": os.Getenv("SERVICE_VERSION"),
-			"UNOARENA_COMPONENT": "room-runtime", "OTEL_EXPORTER_OTLP_ENDPOINT": os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-			"OTEL_EXPORTER_OTLP_PROTOCOL": os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"), "OTEL_TRACES_SAMPLER": os.Getenv("OTEL_TRACES_SAMPLER"),
-			"OTEL_TRACES_SAMPLER_ARG": os.Getenv("OTEL_TRACES_SAMPLER_ARG"), "OTEL_GO_X_OBSERVABILITY": os.Getenv("OTEL_GO_X_OBSERVABILITY"),
-			"METRICS_ADDR": os.Getenv("METRICS_ADDR"),
-			"IDENTITY_URL": cfg.IdentityURL, "GAME_INTEGRITY_URL": cfg.GameIntegrityURL,
-			"REDIS_URL": cfg.RedisURL, "GATEWAY_URL": cfg.GatewayURL,
-			"SPECTATOR_VIEW_URL": cfg.SpectatorURL, "RANKING_URL": cfg.RankingURL,
-			"ANALYTICS_URL": cfg.AnalyticsURL, "TOURNAMENT_URL": cfg.TournamentURL,
-			"ROOM_RUNTIME_MUTATION_QUEUE_CAPACITY": strconv.Itoa(cfg.RuntimeQueueCapacity),
-		})
+		controller.ConfigureRuntimePod(cfg.RuntimeSecretName, cfg.RuntimeSecretEnv, runtimePodEnvironment(cfg), cfg.InternalPrincipalKeyVersion)
 		slog.InfoContext(rootCtx, "room runtime controller started", "event", "room_runtime_controller_startup")
 		cadence := boundedRuntimeControllerCadence(cfg.RuntimeControllerCadence)
-		ticker := time.NewTicker(cadence)
-		defer ticker.Stop()
+		timer := time.NewTimer(controller.nextCadence(cadence))
+		defer timer.Stop()
 		for {
 			if err := controller.ReconcileOnce(rootCtx); err != nil && rootCtx.Err() == nil {
 				slog.ErrorContext(rootCtx, "room runtime reconciliation failed", "event", "room_runtime_controller_reconcile_failed", "error", err.Error())
@@ -788,9 +827,30 @@ func runRoomProcess() error {
 			select {
 			case <-rootCtx.Done():
 				return nil
-			case <-ticker.C:
+			case <-timer.C:
+				timer.Reset(controller.nextCadence(cadence))
 			}
 		}
+	}
+	if cfg.WorkerRole == "room-player-stream-compactor" {
+		if strings.TrimSpace(cfg.DatabaseURL) == "" || strings.TrimSpace(cfg.RedisURL) == "" {
+			return errors.New("room-player-stream-compactor requires Room Postgres and player-feed Redis")
+		}
+		pool, err := store.NewPool(rootCtx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		rdb, err := store.NewRedisFromURL(cfg.RedisURL)
+		if err != nil {
+			return fmt.Errorf("player stream Redis: %w", err)
+		}
+		defer rdb.Close()
+		worker := NewPlayerStreamCompactor(store.NewSessionStore(pool.Main), redisPlayerStreamTrimmer{client: rdb})
+		worker.Configure(cfg.PlayerStreamCompactorPage, cfg.PlayerStreamMaxLen, cfg.PlayerStreamTrimLimit, cfg.PlayerStreamCompactorCadence, cfg.PlayerStreamOperationTimeout)
+		slog.InfoContext(rootCtx, "player stream compactor started", "event", "room_player_stream_compactor_startup", "pageSize", cfg.PlayerStreamCompactorPage, "maxLen", cfg.PlayerStreamMaxLen)
+		worker.Run(rootCtx)
+		return nil
 	}
 	wired, err := wireRoomRuntime(cfg)
 	if err != nil {
@@ -837,6 +897,23 @@ func runRoomProcess() error {
 	}
 
 	srv := NewServerWithScopedCreds(wired.Service, cfg.ServiceCredential, cfg.TimerCredential, cfg.SpectatorRecoveryCredential, cfg.AnalyticsBackfillCredential, cfg.ServiceName)
+	if roomServesPlayerCommands(cfg.WorkerRole) || cfg.InternalPrincipalCurrentHMACKey != "" {
+		var previous *internalprincipal.Key
+		if cfg.InternalPrincipalPreviousKeyID != "" || cfg.InternalPrincipalPreviousHMACKey != "" {
+			previous = &internalprincipal.Key{ID: cfg.InternalPrincipalPreviousKeyID, Material: []byte(cfg.InternalPrincipalPreviousHMACKey)}
+		}
+		verifier, err := internalprincipal.NewVerifier(internalprincipal.VerifierConfig{
+			CurrentKey:  internalprincipal.Key{ID: cfg.InternalPrincipalCurrentKeyID, Material: []byte(cfg.InternalPrincipalCurrentHMACKey)},
+			PreviousKey: previous, Issuer: cfg.InternalPrincipalIssuer,
+			Audience:   cfg.InternalPrincipalAudience,
+			MaxTTL:     time.Duration(cfg.InternalPrincipalMaxTTLSeconds) * time.Second,
+			FutureSkew: time.Duration(cfg.InternalPrincipalFutureSkewSeconds) * time.Second,
+		})
+		if err != nil {
+			return fmt.Errorf("internal principal verifier: %w", err)
+		}
+		srv.ConfigureInternalPrincipalVerifier(verifier)
+	}
 	if cfg.WorkerRole == "room-runtime" {
 		if cfg.RuntimeRoomID == "" || cfg.RuntimeGeneration < 1 || cfg.RuntimeRouterCredential == "" {
 			return errors.New("room-runtime requires ROOM_RUNTIME_ROOM_ID, ROOM_RUNTIME_GENERATION, and ROOM_RUNTIME_ROUTER_CREDENTIAL")
@@ -874,7 +951,7 @@ func runRoomProcess() error {
 }
 
 func serveRoomHTTP(ctx context.Context, handler http.Handler) error {
-	server := &http.Server{Addr: ":8080", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	server := newRoomHTTPServer(handler)
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.ListenAndServe() }()
 	select {
@@ -884,9 +961,25 @@ func serveRoomHTTP(ctx context.Context, handler http.Handler) error {
 		}
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), roomShutdownTimeout)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
+	}
+}
+
+const roomShutdownTimeout = 5 * time.Second
+
+func newRoomHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		// WriteTimeout intentionally remains zero: Room can proxy streamed
+		// responses, and a global deadline would terminate healthy long-lived
+		// connections. Individual handlers own their operation deadlines.
 	}
 }
 

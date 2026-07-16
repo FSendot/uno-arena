@@ -1,0 +1,47 @@
+# Simulator overlay: render after values.production.yaml. The local simulator
+# uses the reviewed development envelope provider with ESO-projected keys.
+env:
+  DEPLOYMENT_ENV: local
+  GAME_INTEGRITY_ENVELOPE_PROVIDER: dev
+  GAME_INTEGRITY_ENVELOPE_KEY_VERSION: "1"
+
+secretEnv:
+  GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
+  GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
+  GAME_INTEGRITY_ENVELOPE_DEV_KEYS: game-integrity-envelope-dev-keys
+  GAME_INTEGRITY_ENVELOPE_DEV_MASTER_KEY: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+imagePullSecrets:
+  - name: gitlab-registry
+

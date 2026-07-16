@@ -1,0 +1,1 @@
+{{ include "unoArena.productionRenderFile" (list . "bootstrap-project.yaml") }}

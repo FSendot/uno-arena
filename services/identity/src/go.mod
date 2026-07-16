@@ -10,6 +10,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 	go.opentelemetry.io/otel/metric v1.44.0
 	unoarena/platform/telemetry v0.0.0
+	unoarena/shared v0.0.0
 )
 
 require (
@@ -51,3 +52,5 @@ require (
 )
 
 replace unoarena/platform/telemetry => ../../../platform/telemetry
+
+replace unoarena/shared => ../../../shared

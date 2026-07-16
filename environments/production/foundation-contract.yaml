@@ -1,0 +1,25 @@
+schemaVersion: 1
+environment: production
+mode: operator-prerequisite
+failClosed: true
+requiredApis:
+  - {group: argoproj.io, version: v1alpha1, kind: Application}
+  - {group: argoproj.io, version: v1alpha1, kind: ApplicationSet}
+  - {group: cert-manager.io, version: v1, kind: Certificate}
+  - {group: external-secrets.io, version: v1, kind: ExternalSecret}
+  - {group: gateway.networking.k8s.io, version: v1, kind: Gateway}
+  - {group: security.istio.io, version: v1, kind: AuthorizationPolicy}
+requiredControllers:
+  - {name: argocd-application-controller, namespace: argocd}
+  - {name: argocd-applicationset-controller, namespace: argocd}
+  - {name: cert-manager, namespace: cert-manager}
+  - {name: external-secrets, namespace: external-secrets}
+  - {name: istiod, namespace: istio-system}
+requiredObjects:
+  - {apiVersion: external-secrets.io/v1, kind: ClusterSecretStore, name: production-secrets}
+  - {apiVersion: gateway.networking.k8s.io/v1, kind: GatewayClass, name: istio}
+  - {apiVersion: cert-manager.io/v1, kind: ClusterIssuer, name: uno-arena-production}
+semantics:
+  - Provider installation remains operator-owned until its lifecycle contract is selected.
+  - The operator must pass infrastructure/production/bin/validate-foundations.sh before seeding the Argo root or enabling releases.
+  - No production provider credentials or endpoints are committed here.

@@ -1,0 +1,3 @@
+image:
+  repository: registry.gitlab.example.invalid/GROUP/PROJECT/bootstrap
+  digest: ""

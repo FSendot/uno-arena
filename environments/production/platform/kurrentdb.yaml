@@ -1,0 +1,12 @@
+schemaVersion: 1
+component: kurrentdb
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  endpoint: {kind: Secret, name: game-integrity-secrets, key: kurrentdb-url}
+preflight:
+  - {type: dns, expect: configured KurrentDB hostname resolves}
+  - {type: tls, expect: gRPC server identity verifies}
+  - {type: http, expect: cluster health reports writable quorum}
+semantics: [supported production topology, durable backups, TLS and authentication required]

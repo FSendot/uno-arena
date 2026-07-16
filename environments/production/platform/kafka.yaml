@@ -1,0 +1,12 @@
+schemaVersion: 1
+component: kafka
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  brokers: {kind: Secret, name: platform-endpoints, key: kafka-brokers}
+preflight:
+  - {type: dns, expect: every advertised broker hostname resolves}
+  - {type: tls, expect: broker certificates and SASL identity verify}
+  - {type: kafka-metadata, expect: required topics match released partitions replication factor min ISR and retention}
+semantics: [multi-broker HA, production topic plan from AsyncAPI, no broker auto topic creation, durable Connect internal topics]

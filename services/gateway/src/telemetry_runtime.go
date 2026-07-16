@@ -14,12 +14,14 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"unoarena/platform/telemetry"
+	"unoarena/services/gateway/bff"
 )
 
 type gatewayClientInstrumentation struct {
 	audit      slog.Handler
 	redis      func(redis.UniversalClient) error
 	kafkaHooks []kgo.Hook
+	breaker    bff.CircuitObserver
 }
 
 func newGatewayClientInstrumentation(runtime *telemetry.Runtime) gatewayClientInstrumentation {
@@ -44,6 +46,15 @@ func newGatewayClientInstrumentation(runtime *telemetry.Runtime) gatewayClientIn
 			)
 		},
 		kafkaHooks: kotel.NewKotel(kotel.WithTracer(tracer)).Hooks(),
+		breaker: func(event bff.CircuitEvent) {
+			runtime.Logger.WarnContext(context.Background(), "upstream circuit transition",
+				"event", "upstream_circuit_transition",
+				"upstream", event.Upstream,
+				"from", event.From,
+				"to", event.To,
+				"reason", event.Reason,
+			)
+		},
 	}
 }
 
@@ -93,5 +104,8 @@ func gatewayHTTPClient(runtime *telemetry.Runtime, timeoutClient *http.Client) *
 }
 
 func gatewayHTTPClientForConfig(runtime *telemetry.Runtime, cfg gatewayConfig) *http.Client {
-	return gatewayHTTPClient(runtime, &http.Client{Timeout: cfg.BackendHTTPTimeout})
+	return gatewayHTTPClient(runtime, &http.Client{
+		Timeout:   cfg.BackendHTTPTimeout,
+		Transport: newGatewayBackendTransport(cfg),
+	})
 }

@@ -1,0 +1,93 @@
+.default-tags:
+  tags:
+    - local-runner-sendot
+
+.validate-repository:
+  stage: validate
+  extends: .default-tags
+  script:
+    - ruby -Ici/lib ci/test/run.rb
+    - ruby ci/bin/parse-yaml.rb .gitlab-ci.yml ci/impact-map.yaml
+
+.validate-inventories:
+  stage: validate
+  extends: .default-tags
+  script:
+    - ruby ci/bin/validate-inventories.rb --all
+
+.test-component:
+  stage: test
+  extends: .default-tags
+  script:
+    - ci/bin/test-component
+
+.build-component-image:
+  stage: build
+  extends: .default-tags
+  script:
+    - ci/bin/build-component-image
+
+.lint-component-chart:
+  stage: build
+  extends: .default-tags
+  script:
+    - ci/bin/lint-component-chart
+
+.publish-component-image:
+  stage: publish
+  extends: .default-tags
+  script:
+    - ci/bin/publish-component-image
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - artifacts/*-image.json
+
+.publish-component-chart:
+  stage: publish
+  extends: .default-tags
+  script:
+    - ci/bin/publish-component-chart
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - artifacts/*-chart.json
+      - artifacts/*.tgz
+
+.promote-releases:
+  stage: promote
+  extends: .default-tags
+  # Same-repository desired-state writers are serialized across pipelines.
+  resource_group: uno-arena-production-desired-state
+  script:
+    - ci/bin/promote-releases
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - artifacts/rollback/
+      - artifacts/reconciliation-expectations.json
+      - artifacts/promotion.json
+
+.wait-for-reconciliation:
+  stage: reconcile
+  extends: .default-tags
+  script:
+    # Read-only Argo CD API calls only; this job never receives kubeconfig.
+    - ci/bin/wait-for-argocd
+
+.post-deploy-evidence:
+  stage: verify
+  extends: .default-tags
+  script:
+    - ci/bin/verify-chart-packages
+    - ruby ci/bin/post-deploy-evidence
+
+.rollback-releases:
+  stage: rollback
+  extends: .default-tags
+  resource_group: uno-arena-production-desired-state
+  when: on_failure
+  script:
+    # Restores only stateless service inventory pins through Git. Argo performs reconciliation.
+    - ci/bin/rollback-releases

@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: uno-arena-local-production-foundations
+  namespace: argocd
+  finalizers: []
+spec:
+  project: uno-arena-foundations
+  source:
+    repoURL: https://gitlab.example.invalid/GROUP/PROJECT.git
+    targetRevision: main
+    path: infrastructure/local-production/gitops/foundation
+    directory:
+      include: desired.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
+      - CreateNamespace=false
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

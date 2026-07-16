@@ -1,0 +1,441 @@
+schemaVersion: 1
+
+policy:
+  unownedChangedPath: error
+  ambiguousOwnership: error
+  unknownGraphNode: error
+  invalidManualSelection: error
+
+components:
+  gateway:
+    kind: service
+    dependsOn: [identity, room-gameplay, tournament-orchestration, ranking, spectator-view, analytics]
+    owns:
+      - services/gateway/Dockerfile
+      - services/gateway/ci/**
+      - services/gateway/helm/**
+      - services/gateway/src/**
+    testInputs:
+      - services/gateway/src/**
+    imageInputs:
+      - services/gateway/Dockerfile
+      - services/gateway/src/**
+      - shared/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/gateway/helm/**
+    testModule: services/gateway/src
+    dockerfile: services/gateway/Dockerfile
+    chartPath: services/gateway/helm/gateway
+    chartName: gateway
+
+  identity:
+    kind: service
+    dependsOn: [runtime-platform]
+    owns:
+      - services/identity/Dockerfile
+      - services/identity/ci/**
+      - services/identity/helm/**
+      - services/identity/migrations/**
+      - services/identity/src/**
+    testInputs:
+      - services/identity/migrations/**
+      - services/identity/src/**
+    imageInputs:
+      - services/identity/Dockerfile
+      - services/identity/src/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/identity/helm/**
+    testModule: services/identity/src
+    dockerfile: services/identity/Dockerfile
+    chartPath: services/identity/helm/identity
+    chartName: identity
+
+  room-gameplay:
+    kind: service
+    dependsOn: [identity, game-integrity, runtime-platform]
+    owns:
+      - services/room-gameplay/Dockerfile
+      - services/room-gameplay/ci/**
+      - services/room-gameplay/helm/**
+      - services/room-gameplay/migrations/**
+      - services/room-gameplay/src/**
+    testInputs:
+      - services/room-gameplay/migrations/**
+      - services/room-gameplay/src/**
+    imageInputs:
+      - services/room-gameplay/Dockerfile
+      - services/room-gameplay/src/**
+      - services/spectator-view/src/**
+      - shared/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/room-gameplay/helm/**
+    testModule: services/room-gameplay/src
+    dockerfile: services/room-gameplay/Dockerfile
+    chartPath: services/room-gameplay/helm/room-gameplay
+    chartName: room-gameplay
+
+  game-integrity:
+    kind: service
+    dependsOn: [runtime-platform]
+    owns:
+      - services/game-integrity/Dockerfile
+      - services/game-integrity/ci/**
+      - services/game-integrity/helm/**
+      - services/game-integrity/src/**
+    testInputs:
+      - services/game-integrity/src/**
+    imageInputs:
+      - services/game-integrity/Dockerfile
+      - services/game-integrity/src/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/game-integrity/helm/**
+    testModule: services/game-integrity/src
+    dockerfile: services/game-integrity/Dockerfile
+    chartPath: services/game-integrity/helm/game-integrity
+    chartName: game-integrity
+
+  tournament-orchestration:
+    kind: service
+    dependsOn: [room-gameplay, identity, runtime-platform]
+    owns:
+      - services/tournament-orchestration/Dockerfile
+      - services/tournament-orchestration/ci/**
+      - services/tournament-orchestration/helm/**
+      - services/tournament-orchestration/migrations/**
+      - services/tournament-orchestration/src/**
+    testInputs:
+      - services/tournament-orchestration/migrations/**
+      - services/tournament-orchestration/src/**
+    imageInputs:
+      - services/tournament-orchestration/Dockerfile
+      - services/tournament-orchestration/src/**
+      - shared/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/tournament-orchestration/helm/**
+    testModule: services/tournament-orchestration/src
+    dockerfile: services/tournament-orchestration/Dockerfile
+    chartPath: services/tournament-orchestration/helm/tournament-orchestration
+    chartName: tournament-orchestration
+
+  ranking:
+    kind: service
+    dependsOn: [room-gameplay, tournament-orchestration, runtime-platform]
+    owns:
+      - services/ranking/Dockerfile
+      - services/ranking/ci/**
+      - services/ranking/helm/**
+      - services/ranking/migrations/**
+      - services/ranking/src/**
+    testInputs:
+      - services/ranking/migrations/**
+      - services/ranking/src/**
+    imageInputs:
+      - services/ranking/Dockerfile
+      - services/ranking/src/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/ranking/helm/**
+    testModule: services/ranking/src
+    dockerfile: services/ranking/Dockerfile
+    chartPath: services/ranking/helm/ranking
+    chartName: ranking
+
+  spectator-view:
+    kind: service
+    dependsOn: [room-gameplay, runtime-platform]
+    owns:
+      - services/spectator-view/Dockerfile
+      - services/spectator-view/ci/**
+      - services/spectator-view/helm/**
+      - services/spectator-view/src/**
+    testInputs:
+      - services/spectator-view/src/**
+    imageInputs:
+      - services/spectator-view/Dockerfile
+      - services/spectator-view/src/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/spectator-view/helm/**
+    testModule: services/spectator-view/src
+    dockerfile: services/spectator-view/Dockerfile
+    chartPath: services/spectator-view/helm/spectator-view
+    chartName: spectator-view
+
+  analytics:
+    kind: service
+    dependsOn: [room-gameplay, ranking, tournament-orchestration, runtime-platform]
+    owns:
+      - services/analytics/Dockerfile
+      - services/analytics/ci/**
+      - services/analytics/helm/**
+      - services/analytics/migrations/**
+      - services/analytics/src/**
+    testInputs:
+      - services/analytics/migrations/**
+      - services/analytics/src/**
+    imageInputs:
+      - services/analytics/Dockerfile
+      - services/analytics/src/**
+      - platform/telemetry/**
+      - .dockerignore
+    chartInputs:
+      - services/analytics/helm/**
+    testModule: services/analytics/src
+    dockerfile: services/analytics/Dockerfile
+    chartPath: services/analytics/helm/analytics
+    chartName: analytics
+
+platformComponents:
+  local-retain-storage:
+    environments: [local-production]
+    dependsOn: []
+    owns: [infrastructure/local-production/charts/local-retain-storage/**]
+    chartInputs: [infrastructure/local-production/charts/local-retain-storage/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/local-retain-storage
+    chartName: local-retain-storage
+
+  platform-secrets:
+    environments: [production, local-production]
+    dependsOn: []
+    owns: [infrastructure/local-production/charts/platform-secrets/**]
+    chartInputs: [infrastructure/local-production/charts/platform-secrets/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/platform-secrets
+    chartName: platform-secrets
+
+  clickhouse:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/clickhouse/**]
+    chartInputs: [infrastructure/local-production/charts/clickhouse/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/clickhouse
+    chartName: clickhouse
+
+  kafka:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/kafka/**]
+    chartInputs: [infrastructure/local-production/charts/kafka/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/kafka
+    chartName: kafka
+
+  keycloak:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/keycloak/**]
+    chartInputs: [infrastructure/local-production/charts/keycloak/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/keycloak
+    chartName: keycloak
+
+  kurrentdb:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/kurrentdb/**]
+    chartInputs: [infrastructure/local-production/charts/kurrentdb/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/kurrentdb
+    chartName: kurrentdb
+
+  minio:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/minio/**]
+    chartInputs: [infrastructure/local-production/charts/minio/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/minio
+    chartName: minio
+
+  observability:
+    environments: [production, local-production]
+    dependsOn: [minio, platform-secrets]
+    owns: [infrastructure/observability/helm/uno-arena-observability/**]
+    chartInputs: [infrastructure/observability/helm/uno-arena-observability/**]
+    imageInputs: []
+    chartPath: infrastructure/observability/helm/uno-arena-observability
+    chartName: uno-arena-observability
+    chartValues: values.local-production.yaml
+
+  postgres-contexts:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/postgres-contexts/**]
+    chartInputs: [infrastructure/local-production/charts/postgres-contexts/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/postgres-contexts
+    chartName: postgres-contexts
+
+  redis:
+    environments: [local-production]
+    dependsOn: [local-retain-storage, platform-secrets]
+    owns: [infrastructure/local-production/charts/redis/**]
+    chartInputs: [infrastructure/local-production/charts/redis/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/redis
+    chartName: redis
+
+  context-bootstrap:
+    environments: [local-production]
+    dependsOn: [clickhouse, postgres-contexts, platform-secrets]
+    owns:
+      - infrastructure/bootstrap/**
+      - infrastructure/local-production/charts/context-bootstrap/**
+    chartInputs: [infrastructure/local-production/charts/context-bootstrap/**]
+    imageInputs:
+      - infrastructure/bootstrap/**
+      - services/identity/migrations/**
+      - services/room-gameplay/migrations/**
+      - services/tournament-orchestration/migrations/**
+      - services/ranking/migrations/**
+      - services/analytics/migrations/**
+      - .dockerignore
+    chartPath: infrastructure/local-production/charts/context-bootstrap
+    chartName: context-bootstrap
+    dockerfile: infrastructure/bootstrap/Dockerfile
+    imageName: bootstrap
+
+  debezium-connect:
+    environments: [local-production]
+    dependsOn: [context-bootstrap, kafka, platform-secrets, postgres-contexts]
+    owns: [infrastructure/local-production/charts/debezium-connect/**]
+    chartInputs: [infrastructure/local-production/charts/debezium-connect/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/debezium-connect
+    chartName: debezium-connect
+
+  debezium-server:
+    environments: [local-production]
+    dependsOn: [context-bootstrap, platform-secrets, postgres-contexts, redis]
+    owns: [infrastructure/local-production/charts/debezium-server/**]
+    chartInputs: [infrastructure/local-production/charts/debezium-server/**]
+    imageInputs: []
+    chartPath: infrastructure/local-production/charts/debezium-server
+    chartName: debezium-server
+
+platformNodes:
+  runtime-platform:
+    owns:
+      - environments/production/platform/**
+    dependsOn:
+      - clickhouse
+      - context-bootstrap
+      - debezium-connect
+      - debezium-server
+      - kafka
+      - keycloak
+      - kurrentdb
+      - local-retain-storage
+      - minio
+      - observability
+      - platform-secrets
+      - postgres-contexts
+      - redis
+
+sharedInputs:
+  shared-go:
+    owns:
+      - shared/**
+    testConsumers: [gateway, room-gameplay, tournament-orchestration]
+    imageConsumers: [gateway, room-gameplay, tournament-orchestration]
+
+  telemetry:
+    owns:
+      - platform/telemetry/**
+    testConsumers: [gateway, identity, room-gameplay, game-integrity, tournament-orchestration, ranking, spectator-view, analytics]
+    imageConsumers: [gateway, identity, room-gameplay, game-integrity, tournament-orchestration, ranking, spectator-view, analytics]
+
+contracts:
+  public-bff-openapi:
+    owns:
+      - contracts/openapi/bff-v1.yaml
+    producers: [gateway]
+    consumers: [gateway]
+
+  kafka-asyncapi:
+    owns:
+      - contracts/asyncapi/kafka-v1.yaml
+    producers: [identity, room-gameplay, tournament-orchestration, ranking]
+    consumers: [gateway, room-gameplay, tournament-orchestration, ranking, spectator-view, analytics]
+
+  room-spectator-safe:
+    owns:
+      - services/room-gameplay/contracts/**
+    producers: [room-gameplay]
+    consumers: [spectator-view]
+
+repositoryInputs:
+  ci-control:
+    owns: [.gitlab-ci.yml, ci/**]
+    effect: validate
+  root-metadata:
+    owns: [.gitignore, README.md, Makefile, CHANGELOG-design.md]
+    effect: validate
+  root-go-workspace:
+    owns: [go.work, go.work.sum]
+    effect: test-all
+  docker-context:
+    owns: [.dockerignore]
+    effect: image-all
+  client-checkpoint:
+    owns: [client-checkpoint/**]
+    effect: validate
+  devops-checkpoint:
+    owns: [devops-checkpoint/**]
+    effect: validate
+  documentation:
+    owns: [docs/**]
+    effect: validate
+  infrastructure:
+    owns:
+      - infrastructure/istio/**
+      - infrastructure/kind/**
+      - infrastructure/local-production/*.md
+      - infrastructure/local-production/bin/**
+      - infrastructure/local-production/kind/**
+      - infrastructure/local-production/manifests/**
+      - infrastructure/local-production/tests/**
+      - infrastructure/local-production/vendor/**
+      - infrastructure/local-production/gitops/**
+      - infrastructure/production/**
+    effect: validate
+  environment-schema:
+    owns: [environments/schema/**]
+    effect: inventory-all
+  production-argocd:
+    owns:
+      - environments/production/argocd/**
+      - environments/production/foundation-contract.yaml
+      - environments/production/platform-releases/release.schema.json
+    effect: inventory-all
+  local-production-argocd:
+    owns: [environments/local-production/argocd/**]
+    effect: inventory-all
+  active-release-inventories:
+    owns:
+      - environments/production/services/enabled/**
+      - environments/local-production/services/enabled/**
+    effect: inventory-all
+
+inventoryPatterns:
+  - environments/production/services/%{component}.yaml
+  - environments/local-production/services/%{component}.yaml
+platformInventoryPatterns:
+  - environments/production/platform-releases/%{component}.yaml
+  - environments/production/platform-releases/enabled/%{component}.yaml
+  - environments/local-production/platform/%{component}.yaml
+  - environments/local-production/platform/enabled/%{component}.yaml

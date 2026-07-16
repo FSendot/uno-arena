@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: keycloak
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-keycloak
+stage: "10-stateful"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: keycloak
+  version: 0.1.0
+values:
+  image:
+    repository: quay.io/keycloak/keycloak:26.7.0
+    digest: sha256:2eb3cd316835c990e69e26ade292ffa78f6fb0db7d5fc6377463c162e1979ac0
+

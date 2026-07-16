@@ -1,0 +1,97 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://uno-arena.local/schemas/component-release.schema.yaml
+title: UnoArena immutable component release
+type: object
+additionalProperties: false
+required:
+  - schemaVersion
+  - component
+  - environment
+  - enabled
+  - status
+  - application
+  - project
+  - destination
+  - chart
+  - image
+  - values
+  - rollback
+properties:
+  schemaVersion:
+    const: 1
+  component:
+    type: string
+    pattern: ^[a-z0-9]+(?:-[a-z0-9]+)*$
+  environment:
+    enum: [production, local-production]
+  enabled:
+    type: boolean
+  status:
+    enum: [bootstrap-placeholder, released]
+  application:
+    type: string
+    minLength: 1
+  project:
+    const: uno-arena-workloads
+  destination:
+    type: object
+    additionalProperties: false
+    required: [server, namespace]
+    properties:
+      server:
+        const: https://kubernetes.default.svc
+      namespace:
+        const: uno-arena
+  chart:
+    type: object
+    additionalProperties: false
+    required: [repository, name, version]
+    properties:
+      repository:
+        type: string
+        format: uri
+      name:
+        type: string
+        minLength: 1
+      version:
+        type: string
+        pattern: ^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$
+      packageSha256:
+        type: string
+        pattern: ^[a-f0-9]{64}$
+  image:
+    type: object
+    additionalProperties: false
+    required: [repository, digest]
+    properties:
+      repository:
+        type: string
+        minLength: 1
+      digest:
+        type: string
+        pattern: ^sha256:[a-f0-9]{64}$
+  values:
+    type: object
+    additionalProperties: false
+    required: [repository, revision, files]
+    properties:
+      repository:
+        type: string
+        format: uri
+      revision:
+        type: string
+        minLength: 1
+      files:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items:
+          type: string
+          pattern: ^services/[a-z0-9-]+/helm/[a-z0-9-]+/values\.(production|local-production)\.yaml$
+  rollback:
+    type: object
+    additionalProperties: false
+    required: [automatic]
+    properties:
+      automatic:
+        type: boolean

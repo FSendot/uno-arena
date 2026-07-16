@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: debezium-server
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-debezium-server
+stage: "30-cdc"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: debezium-server
+  version: 0.1.0
+values:
+  image:
+    repository: quay.io/debezium/server:3.6.0.Final
+    digest: sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9
+

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+LOCAL="${ROOT}/infrastructure/local-production"
+
+for script in "${LOCAL}"/bin/*.sh; do
+  bash -n "${script}"
+done
+
+ruby -ryaml -e '
+  doc = YAML.load_file(ARGV.fetch(0))
+  abort "wrong cluster name" unless doc["name"] == "uno-arena-production"
+  nodes = doc.fetch("nodes")
+  roles = Hash.new(0)
+  nodes.each { |node| roles[node["role"]] += 1 }
+  abort "expected one control-plane and two workers" unless roles == {"control-plane"=>1, "worker"=>2}
+  workers = nodes.select { |node| node["role"] == "worker" }
+  abort "reserved worker-role labels must be assigned by kind, not kubelet flags" if workers.any? { |node| node.fetch("labels", {}).key?("node-role.kubernetes.io/worker") }
+  abort "control-plane must not carry configured labels" unless nodes.first.fetch("labels", {}).empty?
+  mappings = nodes.first.fetch("extraPortMappings")
+  expected = [[8080,30080],[8443,30443],[8444,30444],[9443,30445]]
+  actual = mappings.map { |m| [m["hostPort"], m["containerPort"]] }
+  abort "host mappings mismatch: #{actual.inspect}" unless actual == expected
+  abort "host mappings must be loopback-only" unless mappings.all? { |m| m["listenAddress"] == "127.0.0.1" }
+' "${LOCAL}/kind/cluster.yaml"
+
+grep -Fq 'node-role.kubernetes.io/worker= --overwrite' "${LOCAL}/bin/create-cluster.sh" || {
+  echo "create-cluster must assign worker roles through the Kubernetes API" >&2
+  exit 1
+}
+
+grep -q 'LOCAL_PRODUCTION_CONTEXT="kind-' "${LOCAL}/bin/lib.sh"
+grep -q 'kind get kubeconfig --name' "${LOCAL}/bin/lib.sh"
+grep -q 'certificate-authority-data' "${LOCAL}/bin/lib.sh"
+grep -q 'assert_exact_context' "${LOCAL}/bin/bootstrap-argocd.sh"
+grep -q 'missing pre-vendored Argo CD manifest' "${LOCAL}/bin/install-argocd-core.sh"
+grep -q 'vendor/verify.sh' "${LOCAL}/bin/install-argocd-core.sh"
+grep -q 'kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5' "${LOCAL}/bin/create-cluster.sh"
+grep -q 'docker image inspect' "${LOCAL}/bin/create-cluster.sh"
+grep -q -- '--image "${KIND_NODE_IMAGE}"' "${LOCAL}/bin/create-cluster.sh"
+grep -q 'environments/local-production/argocd' "${LOCAL}/bin/bootstrap-argocd.sh"
+grep -q 'templates/bootstrap-project.yaml' "${LOCAL}/bin/bootstrap-argocd.sh"
+grep -q 'templates/root-application.yaml' "${LOCAL}/bin/bootstrap-argocd.sh"
+test -f "${ROOT}/environments/local-production/argocd/app-project.yaml"
+test -f "${ROOT}/environments/local-production/argocd/services-applicationset.yaml"
+test -f "${ROOT}/environments/local-production/argocd/platform-applicationset.yaml"
+test -f "${ROOT}/environments/local-production/argocd/foundation-application.yaml"
+grep -q 'ARGOCD_GIT_REPO_URL' "${LOCAL}/bin/bootstrap-argocd.sh"
+grep -q 'ARGOCD_HELM_REPO_URL' "${LOCAL}/bin/bootstrap-argocd.sh"
+grep -q 'configure-argocd-repositories.sh' "${LOCAL}/bin/bootstrap-argocd.sh"
+grep -q 'configure-argocd-ci-account.sh' "${LOCAL}/bin/install-argocd-core.sh"
+grep -q 'generate-argocd-ci-token.sh' "${LOCAL}/README.md"
+if grep -q 'ARGOCD_ROOT_MANIFEST' "${LOCAL}/bin/bootstrap-argocd.sh"; then
+  echo "Argo bootstrap must not accept a caller-selected root manifest" >&2
+  exit 1
+fi
+if grep -Eq 'app-project\.yaml|services-applicationset\.yaml|platform-applicationset\.yaml' \
+  "${LOCAL}/bin/bootstrap-argocd.sh"; then
+  echo "Argo bootstrap must seed only the root; child projects/ApplicationSets are root-owned" >&2
+  exit 1
+fi
+grep -q 'namespace.*secret-seed' "${LOCAL}/bin/seed-secrets.sh"
+ruby -c "${LOCAL}/bin/render-secret-seed-template" >/dev/null
+grep -Fq 'seed.schema.json' "${LOCAL}/bin/seed-secrets.sh"
+
+if rg -n 'infrastructure/kind/scripts/(reset|clean-deploy|apply)\.sh|kubectl config use-context|curl |wget |helm repo (add|update)|KUBECONFIG=' "${LOCAL}/bin"; then
+  echo "local-production scripts contain a forbidden destructive/context/network path" >&2
+  exit 1
+fi
+
+echo "ok local-production-structure"

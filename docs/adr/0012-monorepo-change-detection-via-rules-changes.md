@@ -1,7 +1,7 @@
 # Monorepo Change Detection via rules:changes per Service Fragment
 
 ## Status
-Accepted
+Superseded for production promotion by ADR-0048; retained for checkpoint validation and build selection
 
 ## Context
 All services live in a single GitLab repository. A push or merge request touching one service must not trigger rebuilds or deploys of unrelated services. GitLab provides two mechanisms: per-job `rules: changes:` path filters, and dynamic child pipelines that compute affected services at runtime. The system has 8 services, all placeholders, operated by two developers.

@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: clickhouse
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-clickhouse
+stage: "10-stateful"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: clickhouse
+  version: 0.1.0
+values:
+  image:
+    repository: clickhouse/clickhouse-server:26.6.1.1193
+    digest: sha256:1d1f6508eba2dccce2cee9913907c5f7766327debc57a6b1991f2c9e3176c163
+

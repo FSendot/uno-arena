@@ -1,0 +1,6 @@
+apiVersion: v2
+name: platform-secrets
+description: ESO mappings from an environment store to stable platform and workload Secrets
+type: application
+version: 0.1.0
+appVersion: "1"

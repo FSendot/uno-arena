@@ -1,0 +1,18 @@
+schemaVersion: 1
+component: kurrentdb
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-kurrentdb
+stage: "10-stateful"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: kurrentdb
+  version: 0.1.0
+values:
+  image:
+    repository: kurrentplatform/kurrentdb:26.0.3-experimental-arm64-10.0-noble
+    digest: sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e
+    architecture: arm64
+

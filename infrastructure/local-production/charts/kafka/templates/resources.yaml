@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kafka, namespace: uno-arena}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kafka-bootstrap, namespace: uno-arena}
+automountServiceAccountToken: false
+---
+{{ tpl (.Files.Get "files/base.yaml") . }}
+---
+{{ tpl (.Files.Get "files/topics.yaml") . }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-cluster-id
+  namespace: uno-arena
+data:
+  cluster-id: {{ .Values.clusterId | quote }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka-data
+  namespace: uno-arena
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.storageClassName }}
+  resources:
+    requests: {storage: {{ .Values.storage }}}

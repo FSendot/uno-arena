@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: kafka
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-kafka
+stage: "10-stateful"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: kafka
+  version: 0.1.0
+values:
+  image:
+    repository: apache/kafka:4.3.1
+    digest: sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+

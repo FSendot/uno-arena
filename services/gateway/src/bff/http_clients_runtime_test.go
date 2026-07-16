@@ -5,11 +5,34 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
 )
+
+func TestHTTPStatusErrorNeverExposesUpstreamBody(t *testing.T) {
+	err := (&httpStatusError{status: http.StatusInternalServerError, body: `{"code":"safe_code","message":"SUPER_SECRET"}`}).Error()
+	if strings.Contains(err, "SUPER_SECRET") || err != "upstream status 500 (safe_code)" {
+		t.Fatalf("sanitized error=%q", err)
+	}
+}
+
+func TestGatewayTournamentConflictIsNotMisclassifiedAsRoomStarting(t *testing.T) {
+	identity := NewFakeIdentity()
+	identity.SeedSession("tok", Principal{PlayerID: "p1", SessionID: "s1"})
+	tournament := NewFakeTournament()
+	tournament.Err = &httpStatusError{status: http.StatusConflict, body: `{"code":"registration_closed","message":"secret detail"}`}
+	server := NewServer(Dependencies{Ready: true, Identity: identity, Tournament: tournament})
+	req := httptest.NewRequest(http.MethodPost, "/v1/commands", strings.NewReader(`{"commandId":"c1","type":"CreateTournament","schemaVersion":1,"payload":{}}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"registration_closed"`) || strings.Contains(recorder.Body.String(), "secret") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
 
 func TestHTTPRoomClientPreservesRuntimeRetryStatus(t *testing.T) {
 	mux := http.NewServeMux()

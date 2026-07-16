@@ -20,6 +20,121 @@
         { "properties": { "digest": { "type": "string", "minLength": 1 } }, "required": ["digest"] },
         { "properties": { "tag": { "type": "string", "minLength": 1 } }, "required": ["tag"] }
       ]
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": { "name": { "type": "string", "minLength": 1 } },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    },
+    "env": {
+      "type": "object",
+      "properties": {
+        "GATEWAY_BACKEND_HTTP_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_BACKEND_CONNECT_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_BACKEND_IDLE_CONN_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD": { "$ref": "#/definitions/positiveIntegerString" },
+        "GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_SERVER_READ_HEADER_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_SERVER_READ_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_SERVER_IDLE_TIMEOUT": { "$ref": "#/definitions/positiveDuration" },
+        "GATEWAY_SERVER_MAX_HEADER_BYTES": { "$ref": "#/definitions/positiveIntegerString" }
+      },
+      "required": [
+        "GATEWAY_BACKEND_HTTP_TIMEOUT",
+        "GATEWAY_BACKEND_CONNECT_TIMEOUT",
+        "GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT",
+        "GATEWAY_BACKEND_IDLE_CONN_TIMEOUT",
+        "GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+        "GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT",
+        "GATEWAY_SERVER_READ_HEADER_TIMEOUT",
+        "GATEWAY_SERVER_READ_TIMEOUT",
+        "GATEWAY_SERVER_IDLE_TIMEOUT",
+        "GATEWAY_SERVER_MAX_HEADER_BYTES"
+      ],
+      "additionalProperties": true
+    },
+    "trustedProxyCIDRs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 3,
+        "pattern": "^[^,\\s]+/[0-9]{1,3}$"
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "properties": {
+        "maxUnavailable": { "type": "integer", "minimum": 0 },
+        "maxSurge": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["maxUnavailable", "maxSurge"]
+    },
+    "startupProbe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string", "pattern": "^/" },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["enabled", "path", "periodSeconds", "timeoutSeconds", "failureThreshold"]
+    },
+    "preStop": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "sleepSeconds": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["enabled", "sleepSeconds"]
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30 },
+    "topologySpread": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxSkew": { "type": "integer", "minimum": 1 },
+        "whenUnsatisfiable": { "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+      },
+      "required": ["enabled", "maxSkew", "whenUnsatisfiable"]
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["enabled", "minAvailable"]
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 2 },
+        "maxReplicas": { "type": "integer", "minimum": 2 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "required": ["enabled", "minReplicas", "maxReplicas", "targetCPUUtilizationPercentage"]
+    }
+  },
+  "definitions": {
+    "positiveDuration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(ms|s|m|h)$"
+    },
+    "positiveIntegerString": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
     }
   }
 }

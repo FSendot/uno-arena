@@ -81,6 +81,7 @@ func TestIntegrityReconcilerClaimsBoundedBatchAndReleasesFailures(t *testing.T) 
 		failCommand: "repair-2",
 	}
 	worker := NewReconciliationWorker(queue, app.NewFakeGameIntegrity(), app.NewFakeDealSource())
+	worker.jitter = func(delay time.Duration) time.Duration { return delay }
 	worker.Configure("reconciler-a", 2, time.Minute, time.Second)
 	worker.tick(context.Background())
 	if queue.claimOwner != "reconciler-a" || queue.claimLimit != 2 {
@@ -94,6 +95,16 @@ func TestIntegrityReconcilerClaimsBoundedBatchAndReleasesFailures(t *testing.T) 
 	}
 	if queue.retryDelay != 4*time.Second {
 		t.Fatalf("retry delay=%s want=4s", queue.retryDelay)
+	}
+}
+
+func TestIntegrityReconcilerInjectsRetryJitter(t *testing.T) {
+	queue := &fakeReconciliationQueue{markers: []app.ReconciliationMarker{{CommandID: "repair", Attempts: 3}}, failCommand: "repair"}
+	worker := NewReconciliationWorker(queue, app.NewFakeGameIntegrity(), app.NewFakeDealSource())
+	worker.jitter = func(delay time.Duration) time.Duration { return delay + 500*time.Millisecond }
+	worker.tick(context.Background())
+	if queue.retryDelay != 4500*time.Millisecond {
+		t.Fatalf("retry delay=%s want=4.5s", queue.retryDelay)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"unoarena/services/identity/domain"
+	"unoarena/shared/internalprincipal"
 )
 
 type testIDs struct{ n int }
@@ -65,7 +66,12 @@ func newTestServer(t *testing.T) (*Server, *fixedClock) {
 		SessionTTL: time.Hour,
 		Transport:  domain.NewFakeInvalidationTransport(),
 	})
-	return NewServer(svc, "test-internal-credential", true), clock
+	srv := NewServer(svc, "test-internal-credential", true)
+	srv.principalSigner, _ = internalprincipal.NewSigner(internalprincipal.SignerConfig{
+		ActiveKey: internalprincipal.Key{ID: "capability-v1", Material: []byte(capabilityPrincipalKey)}, Issuer: internalprincipal.DefaultIssuer,
+		Audience: internalprincipal.DefaultRoomAudience, TTL: 15 * time.Second, Now: clock.Now,
+	})
+	return srv, clock
 }
 
 func TestHealthHandler(t *testing.T) {
@@ -200,6 +206,159 @@ func TestValidateSessionInternal(t *testing.T) {
 	if valResp["playerId"] != loginResp["playerId"] || valResp["sessionId"] != loginResp["sessionId"] {
 		t.Fatalf("validate response: %+v", valResp)
 	}
+	if _, ok := valResp["internalPrincipalProof"]; ok {
+		t.Fatalf("read/session validation minted reusable mutation proof: %+v", valResp)
+	}
+}
+
+func TestAuthorizeRoomCommandInternalIssuesExactBinding(t *testing.T) {
+	srv, clock := newTestServer(t)
+	mux := srv.routes()
+
+	regBody, _ := json.Marshal(map[string]string{"username": "command-carol", "password": "pass"})
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/auth/register", bytes.NewReader(regBody)))
+	loginBody, _ := json.Marshal(map[string]string{"username": "command-carol", "password": "pass"})
+	loginW := httptest.NewRecorder()
+	mux.ServeHTTP(loginW, httptest.NewRequest(http.MethodPost, "/v1/auth/login", bytes.NewReader(loginBody)))
+	var loginResp map[string]string
+	_ = json.NewDecoder(loginW.Body).Decode(&loginResp)
+
+	seq := int64(7)
+	body, _ := json.Marshal(map[string]any{
+		"boundedContext": internalprincipal.DefaultRoomAudience,
+		"commandId":      "cmd-1", "type": "PlayCard", "roomId": "room-1",
+		"expectedSequenceNumber": seq,
+		"payload":                map[string]any{"roomId": "room-1", "cardId": "c1"},
+	})
+	unauthenticated := httptest.NewRequest(http.MethodPost, "/internal/v1/sessions/authorize-command", bytes.NewReader(body))
+	unauthenticated.Header.Set("Authorization", "Bearer "+loginResp["token"])
+	unauthenticatedW := httptest.NewRecorder()
+	mux.ServeHTTP(unauthenticatedW, unauthenticated)
+	if unauthenticatedW.Code != http.StatusUnauthorized {
+		t.Fatalf("command authorization without Gateway credential=%d", unauthenticatedW.Code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sessions/authorize-command", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+loginResp["token"])
+	req.Header.Set(internalCredentialHeader, "test-internal-credential")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorize: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var response map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&response)
+	proof, ok := response["internalPrincipalProof"].(string)
+	if !ok || proof == "" {
+		t.Fatalf("authorize response omitted proof: %+v", response)
+	}
+	binding, err := internalprincipal.NewRoomCommandBinding("cmd-1", "PlayCard", "room-1", &seq, json.RawMessage(`{"cardId":"c1","roomId":"room-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := internalprincipal.NewVerifier(internalprincipal.VerifierConfig{
+		CurrentKey: internalprincipal.Key{ID: "capability-v1", Material: []byte(capabilityPrincipalKey)}, Issuer: internalprincipal.DefaultIssuer,
+		Audience: internalprincipal.DefaultRoomAudience, MaxTTL: 15 * time.Second, Now: clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := verifier.Verify(proof, loginResp["playerId"], loginResp["sessionId"], binding)
+	if err != nil || !claims.Eligible || claims.ValidationMarker == "" {
+		t.Fatalf("verify proof: claims=%+v err=%v", claims, err)
+	}
+
+	tournamentBody, _ := json.Marshal(map[string]any{
+		"boundedContext": internalprincipal.TournamentContext,
+		"commandId":      "tour-1",
+		"type":           "CreateTournament",
+		"payload":        map[string]any{"tournamentId": "t1"},
+	})
+	tournamentReq := httptest.NewRequest(http.MethodPost, "/internal/v1/sessions/authorize-command", bytes.NewReader(tournamentBody))
+	tournamentReq.Header.Set("Authorization", "Bearer "+loginResp["token"])
+	tournamentReq.Header.Set(internalCredentialHeader, "test-internal-credential")
+	tournamentW := httptest.NewRecorder()
+	mux.ServeHTTP(tournamentW, tournamentReq)
+	if tournamentW.Code != http.StatusOK {
+		t.Fatalf("tournament authorize: %d body=%s", tournamentW.Code, tournamentW.Body.String())
+	}
+	var tournamentResponse map[string]any
+	_ = json.NewDecoder(tournamentW.Body).Decode(&tournamentResponse)
+	if _, exists := tournamentResponse["internalPrincipalProof"]; exists {
+		t.Fatalf("Room proof leaked to Tournament authorization: %+v", tournamentResponse)
+	}
+}
+
+func TestAuthorizeRoomCommandInternalInvalidSessionsCannotMintProof(t *testing.T) {
+	srv, clock := newTestServer(t)
+	mux := srv.routes()
+
+	credentials, _ := json.Marshal(map[string]string{"username": "ineligible-carol", "password": "pass"})
+	registerW := httptest.NewRecorder()
+	mux.ServeHTTP(registerW, httptest.NewRequest(http.MethodPost, "/v1/auth/register", bytes.NewReader(credentials)))
+	if registerW.Code != http.StatusOK {
+		t.Fatalf("register: expected 200, got %d body=%s", registerW.Code, registerW.Body.String())
+	}
+
+	login := func(t *testing.T) string {
+		t.Helper()
+		loginW := httptest.NewRecorder()
+		mux.ServeHTTP(loginW, httptest.NewRequest(http.MethodPost, "/v1/auth/login", bytes.NewReader(credentials)))
+		if loginW.Code != http.StatusOK {
+			t.Fatalf("login: expected 200, got %d body=%s", loginW.Code, loginW.Body.String())
+		}
+		var response map[string]string
+		if err := json.NewDecoder(loginW.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		return response["token"]
+	}
+	authorize := func(token, commandID string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{
+			"boundedContext": internalprincipal.DefaultRoomAudience,
+			"commandId":      commandID,
+			"type":           "CreateRoom",
+			"roomId":         "room-denied",
+			"payload":        map[string]any{"roomId": "room-denied"},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/sessions/authorize-command", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set(internalCredentialHeader, "test-internal-credential")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	assertDeniedWithoutProof := func(t *testing.T, w *httptest.ResponseRecorder) {
+		t.Helper()
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d body=%s", w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "internalPrincipalProof") {
+			t.Fatalf("denied session minted a proof: %s", w.Body.String())
+		}
+	}
+
+	t.Run("invalid", func(t *testing.T) {
+		assertDeniedWithoutProof(t, authorize("not-a-session-token", "cmd-invalid"))
+	})
+
+	revokedToken := login(t)
+	logoutReq := httptest.NewRequest(http.MethodPost, "/internal/v1/sessions/logout", nil)
+	logoutReq.Header.Set("Authorization", "Bearer "+revokedToken)
+	logoutReq.Header.Set(internalCredentialHeader, "test-internal-credential")
+	logoutW := httptest.NewRecorder()
+	mux.ServeHTTP(logoutW, logoutReq)
+	if logoutW.Code != http.StatusOK {
+		t.Fatalf("logout: expected 200, got %d body=%s", logoutW.Code, logoutW.Body.String())
+	}
+	t.Run("revoked", func(t *testing.T) {
+		assertDeniedWithoutProof(t, authorize(revokedToken, "cmd-revoked"))
+	})
+
+	expiredToken := login(t)
+	clock.now = clock.now.Add(2 * time.Hour)
+	t.Run("expired", func(t *testing.T) {
+		assertDeniedWithoutProof(t, authorize(expiredToken, "cmd-expired"))
+	})
 }
 
 func TestInternalLogoutRevokesBearerWithoutExposingSession(t *testing.T) {

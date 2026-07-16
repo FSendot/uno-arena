@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: debezium-connect
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-debezium-connect
+stage: "30-cdc"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: debezium-connect
+  version: 0.1.0
+values:
+  image:
+    repository: quay.io/debezium/connect:3.6.0.Final
+    digest: sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
+

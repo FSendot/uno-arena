@@ -116,3 +116,53 @@ func TestHTTPRoomProvisioner_4xxClassifiedWithoutBody(t *testing.T) {
 		t.Fatalf("got %q", err.Error())
 	}
 }
+
+func TestHTTPRoomProvisioner_ReturnsTypedSanitizedStatus(t *testing.T) {
+	const secret = "do-not-leak"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"code":"room_capacity_limited","message":"`+secret+`"}`)
+	}))
+	defer srv.Close()
+
+	_, err := NewHTTPRoomProvisioner(srv.URL, "", srv.Client()).Provision(context.Background(), RoomProvisionRequest{
+		TournamentID: "t1", RoundNumber: 1, SlotID: "slot_0", RoomID: "room-1",
+		PlayerIDs: []domain.PlayerID{"p1"}, BatchID: "batch_0",
+	})
+	var provisionErr *RoomProvisionError
+	if !errors.As(err, &provisionErr) {
+		t.Fatalf("want RoomProvisionError, got %T %v", err, err)
+	}
+	if provisionErr.StatusCode != http.StatusTooManyRequests || provisionErr.Code != "room_capacity_limited" || provisionErr.RetryAfter != "3" {
+		t.Fatalf("typed error = %+v", provisionErr)
+	}
+	if !provisionErr.Retryable() || strings.Contains(err.Error(), secret) {
+		t.Fatalf("retryable=%v error=%q", provisionErr.Retryable(), err.Error())
+	}
+}
+
+func TestRoomProvisionFailurePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		quarantine bool
+	}{
+		{name: "validation", err: &RoomProvisionError{StatusCode: http.StatusUnprocessableEntity}, quarantine: true},
+		{name: "conflict", err: &RoomProvisionError{StatusCode: http.StatusConflict}, quarantine: true},
+		{name: "unauthorized", err: &RoomProvisionError{StatusCode: http.StatusUnauthorized}, quarantine: true},
+		{name: "forbidden", err: &RoomProvisionError{StatusCode: http.StatusForbidden}, quarantine: true},
+		{name: "configuration", err: &RoomProvisionError{Kind: RoomProvisionFailureConfiguration}, quarantine: true},
+		{name: "request timeout", err: &RoomProvisionError{StatusCode: http.StatusRequestTimeout}},
+		{name: "rate limited", err: &RoomProvisionError{StatusCode: http.StatusTooManyRequests}},
+		{name: "server failure", err: &RoomProvisionError{StatusCode: http.StatusBadGateway}},
+		{name: "network failure", err: errors.New("dial failed")},
+		{name: "room id mismatch", err: ErrRoomIDMismatch, quarantine: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := roomProvisionFailureForcesQuarantine(tc.err); got != tc.quarantine {
+				t.Fatalf("force quarantine=%v want %v", got, tc.quarantine)
+			}
+		})
+	}
+}

@@ -1,0 +1,52 @@
+{{- if .Values.productionPreflight.redis.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: observability-redis-production-preflight
+  namespace: {{ include "uno-observability.namespace" . }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "-30"
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: observability-redis-production-preflight
+        app.kubernetes.io/part-of: uno-arena
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: redis-preflight
+          image: {{ .Values.productionPreflight.redis.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.productionPreflight.redis.existingSecret }}
+                  key: {{ .Values.productionPreflight.redis.urlKey }}
+            - name: REDIS_TIMEOUT
+              value: {{ .Values.productionPreflight.redis.timeoutSeconds | quote }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              case "$REDIS_URL" in
+                rediss://*:*@*) ;;
+                *) echo "redis-url must use rediss:// with explicit authentication" >&2; exit 1 ;;
+              esac
+              response="$(timeout "$REDIS_TIMEOUT" redis-cli --no-auth-warning -u "$REDIS_URL" PING)"
+              test "$response" = PONG || { echo "authenticated TLS Redis PING failed" >&2; exit 1; }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+{{- end }}

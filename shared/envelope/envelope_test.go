@@ -365,12 +365,27 @@ func TestDecodeAcceptsValidPayloadBounds(t *testing.T) {
 		`{"commandId":"c","type":"ChooseColor","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"color":"blue"}}`,
 		`{"commandId":"c","type":"ReconnectToRoom","expectedSequenceNumber":1,"schemaVersion":1,"payload":{"disconnectVersion":0}}`,
 		`{"commandId":"c","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1","capacity":8,"retryBudget":0,"batchSize":1}}`,
+		`{"commandId":"c","type":"CreateTournament","schemaVersion":1,"payload":{"visibility":"public"}}`,
+		`{"commandId":"c","type":"CreateTournament","schemaVersion":1,"payload":{"visibility":"private"}}`,
 		`{"commandId":"c","type":"CreateRoom","schemaVersion":1,"payload":{}}`,
 	}
 	for _, raw := range cases {
 		if _, err := Decode([]byte(raw)); err != nil {
 			t.Fatalf("Decode(%s): %v", raw, err)
 		}
+	}
+}
+
+func TestDecodeRejectsInvalidCreateTournamentVisibility(t *testing.T) {
+	for name, raw := range map[string]string{
+		"unknown":    `{"commandId":"c","type":"CreateTournament","schemaVersion":1,"payload":{"visibility":"friends"}}`,
+		"non-string": `{"commandId":"c","type":"CreateTournament","schemaVersion":1,"payload":{"visibility":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Decode([]byte(raw)); err == nil {
+				t.Fatal("invalid tournament visibility should be rejected")
+			}
+		})
 	}
 }
 

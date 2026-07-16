@@ -11,6 +11,12 @@ data:
       scrape_interval: {{ .Values.prometheus.scrapeInterval }}
       evaluation_interval: {{ .Values.prometheus.evaluationInterval }}
       scrape_timeout: {{ .Values.prometheus.scrapeTimeout }}
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager.{{ include "uno-observability.namespace" . }}.svc.cluster.local:9093"]
     scrape_configs:
       - job_name: uno-arena-services
         kubernetes_sd_configs:
@@ -55,6 +61,41 @@ data:
       - job_name: kube-state-metrics
         static_configs:
           - targets: ["kube-state-metrics.{{ include "uno-observability.namespace" . }}.svc.cluster.local:8080"]
+      - job_name: prometheus
+        static_configs:
+          - targets: ["127.0.0.1:9090"]
+      - job_name: alertmanager
+        static_configs:
+          - targets: ["alertmanager.{{ include "uno-observability.namespace" . }}.svc.cluster.local:9093"]
+      - job_name: redis-exporter
+        static_configs:
+          - targets: ["redis-exporter.{{ include "uno-observability.namespace" . }}.svc.cluster.local:9121"]
+      - job_name: alloy-otlp
+        static_configs:
+          - targets: ["alloy-otlp.{{ include "uno-observability.namespace" . }}.svc.cluster.local:12345"]
+      - job_name: loki
+        static_configs:
+          - targets: ["loki.{{ include "uno-observability.namespace" . }}.svc.cluster.local:3100"]
+      - job_name: tempo
+        static_configs:
+          - targets: ["tempo.{{ include "uno-observability.namespace" . }}.svc.cluster.local:3200"]
+      - job_name: grafana
+        static_configs:
+          - targets: ["grafana.{{ include "uno-observability.namespace" . }}.svc.cluster.local:3000"]
+      - job_name: alloy-logs
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ include "uno-observability.namespace" . | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            regex: alloy-logs
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: http
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
       - job_name: kubelet-cadvisor
         scheme: https
         authorization:
@@ -73,4 +114,3 @@ data:
             regex: (.+)
             target_label: __metrics_path__
             replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
-

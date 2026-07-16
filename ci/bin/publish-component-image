@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "$0")/platform-metadata.sh"
+configure_release_component
+
+: "${CI_REGISTRY:?CI_REGISTRY is required}"
+: "${CI_REGISTRY_USER:?CI_REGISTRY_USER is required}"
+: "${CI_REGISTRY_PASSWORD:?CI_REGISTRY_PASSWORD is required}"
+: "${CI_REGISTRY_IMAGE:?CI_REGISTRY_IMAGE is required}"
+: "${CI_COMMIT_REF_SLUG:?CI_COMMIT_REF_SLUG is required}"
+: "${CI_COMMIT_SHORT_SHA:?CI_COMMIT_SHORT_SHA is required}"
+: "${CI_COMMIT_SHA:?CI_COMMIT_SHA is required}"
+
+image_ref="$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+docker build --pull=false -f "$DOCKERFILE" -t "$image_ref" .
+printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+docker push "$image_ref"
+repo_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$image_ref")"
+repository="${repo_digest%@*}"
+digest="${repo_digest##*@}"
+if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+  echo "registry did not return an immutable sha256 digest for $image_ref" >&2
+  exit 1
+fi
+
+mkdir -p artifacts
+COMPONENT="$COMPONENT" REPOSITORY="$repository" DIGEST="$digest" SOURCE_SHA="$CI_COMMIT_SHA" \
+  ruby -rjson -e 'puts JSON.pretty_generate({schemaVersion: 1, component: ENV.fetch("COMPONENT"), sourceSha: ENV.fetch("SOURCE_SHA"), image: {repository: ENV.fetch("REPOSITORY"), digest: ENV.fetch("DIGEST")}})' \
+  > "artifacts/$COMPONENT-image.json"

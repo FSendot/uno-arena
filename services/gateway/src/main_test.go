@@ -317,7 +317,7 @@ func TestBuildServer_CapabilityMode_DispatchHitsHTTPIdentityNotFakes(t *testing.
 	}
 }
 
-func TestBuildServer_CapabilityMode_UpstreamNotReadyBlocks(t *testing.T) {
+func TestBuildServer_CapabilityMode_ReadinessDoesNotProbeRemoteBackends(t *testing.T) {
 	var probed []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		probed = append(probed, r.URL.Path)
@@ -356,26 +356,15 @@ func TestBuildServer_CapabilityMode_UpstreamNotReadyBlocks(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "upstream_unhealthy") {
-		t.Fatalf("body=%s", w.Body.String())
-	}
-	for _, path := range probed {
-		if path == "/health" {
-			t.Fatalf("capability upstream probes must use /ready, never /health; probed=%v", probed)
-		}
-		if path != "/ready" {
-			t.Fatalf("unexpected probe path %q; probed=%v", path, probed)
-		}
-	}
-	if len(probed) == 0 {
-		t.Fatal("expected at least one /ready upstream probe")
+	if len(probed) != 0 {
+		t.Fatalf("gateway readiness must not probe remote backends: %v", probed)
 	}
 }
 
-func TestBuildServer_CapabilityMode_UnhealthyUpstreamNotReady(t *testing.T) {
+func TestBuildServer_CapabilityMode_UnhealthyUpstreamDoesNotCoupleReadiness(t *testing.T) {
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "down", http.StatusServiceUnavailable)
 	}))
@@ -404,11 +393,16 @@ func TestBuildServer_CapabilityMode_UnhealthyUpstreamNotReady(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "upstream_unhealthy") {
-		t.Fatalf("body=%s", w.Body.String())
+}
+
+func TestLoadGatewayConfig_TrustedProxyCIDRs(t *testing.T) {
+	t.Setenv("GATEWAY_TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 2001:db8::/32")
+	cfg := loadGatewayConfig()
+	if len(cfg.TrustedProxyCIDRs) != 2 || cfg.TrustedProxyCIDRs[0] != "10.0.0.0/8" || cfg.TrustedProxyCIDRs[1] != "2001:db8::/32" {
+		t.Fatalf("trusted proxies=%v", cfg.TrustedProxyCIDRs)
 	}
 }
 
@@ -583,6 +577,81 @@ func TestLoadGatewayConfig_InvalidBackendHTTPTimeoutFallsBackToFiveSeconds(t *te
 				t.Fatalf("BackendHTTPTimeout=%s want 5s", cfg.BackendHTTPTimeout)
 			}
 		})
+	}
+}
+
+func TestLoadGatewayConfig_ResilienceBounds(t *testing.T) {
+	for key, value := range map[string]string{
+		"GATEWAY_BACKEND_CONNECT_TIMEOUT":           "2s",
+		"GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT":   "7s",
+		"GATEWAY_BACKEND_IDLE_CONN_TIMEOUT":         "2m",
+		"GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD": "8",
+		"GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT":      "45s",
+		"GATEWAY_SERVER_READ_HEADER_TIMEOUT":        "6s",
+		"GATEWAY_SERVER_READ_TIMEOUT":               "20s",
+		"GATEWAY_SERVER_IDLE_TIMEOUT":               "3m",
+		"GATEWAY_SERVER_MAX_HEADER_BYTES":           "1048576",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg := loadGatewayConfig()
+	if cfg.BackendConnectTimeout != 2*time.Second || cfg.BackendResponseHeaderTimeout != 7*time.Second || cfg.BackendIdleConnTimeout != 2*time.Minute {
+		t.Fatalf("backend transport config=%+v", cfg)
+	}
+	if cfg.CircuitFailureThreshold != 8 || cfg.CircuitOpenTimeout != 45*time.Second {
+		t.Fatalf("circuit config=%+v", cfg)
+	}
+	if cfg.ServerReadHeaderTimeout != 6*time.Second || cfg.ServerReadTimeout != 20*time.Second || cfg.ServerIdleTimeout != 3*time.Minute || cfg.ServerMaxHeaderBytes != 1048576 {
+		t.Fatalf("server config=%+v", cfg)
+	}
+
+	t.Setenv("GATEWAY_BACKEND_CONNECT_TIMEOUT", "11s")
+	t.Setenv("GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "101")
+	t.Setenv("GATEWAY_SERVER_MAX_HEADER_BYTES", "2097153")
+	cfg = loadGatewayConfig()
+	if cfg.BackendConnectTimeout != defaultGatewayBackendConnectTimeout || cfg.CircuitFailureThreshold != defaultGatewayCircuitFailureThreshold || cfg.ServerMaxHeaderBytes != defaultGatewayServerMaxHeaderBytes {
+		t.Fatalf("out-of-range values did not fall back: %+v", cfg)
+	}
+}
+
+func TestGatewayHTTPServerHardensSlowPeersWithoutBoundingSSEWrites(t *testing.T) {
+	cfg := gatewayConfig{
+		ServerReadHeaderTimeout: 5 * time.Second,
+		ServerReadTimeout:       15 * time.Second,
+		ServerIdleTimeout:       2 * time.Minute,
+		ServerMaxHeaderBytes:    1 << 20,
+	}
+	server := newGatewayHTTPServer(":0", http.NotFoundHandler(), cfg)
+	if server.ReadHeaderTimeout != cfg.ServerReadHeaderTimeout || server.ReadTimeout != cfg.ServerReadTimeout || server.IdleTimeout != cfg.ServerIdleTimeout || server.MaxHeaderBytes != cfg.ServerMaxHeaderBytes {
+		t.Fatalf("server timeout config=%+v", server)
+	}
+	if server.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout=%s would terminate long-lived SSE", server.WriteTimeout)
+	}
+}
+
+func TestGatewayReadinessDoesNotAggregateUpstreamHealth(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(upstream.Close)
+	runtime, err := buildGatewayRuntimeWithTelemetry(gatewayConfig{
+		CapabilityMode: true,
+		IdentityURL:    upstream.URL,
+	}, &http.Client{Timeout: time.Second}, gatewayClientInstrumentation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.close)
+	recorder := httptest.NewRecorder()
+	runtime.server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("readiness status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("readiness probed upstream %d times", upstreamCalls)
 	}
 }
 

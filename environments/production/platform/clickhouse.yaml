@@ -1,0 +1,13 @@
+schemaVersion: 1
+component: clickhouse
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  endpoint: {kind: Secret, name: platform-endpoints, key: clickhouse-url}
+  credentials: {kind: Secret, name: analytics-secrets, key: clickhouse-password}
+preflight:
+  - {type: dns, expect: configured ClickHouse hostname resolves}
+  - {type: tls, expect: HTTPS server identity verifies}
+  - {type: sql, expect: analytics schema equals the released migration version}
+semantics: [replicated production topology, backups and retention configured, runtime role cannot perform DDL]

@@ -1,0 +1,23 @@
+schemaVersion: 1
+component: game-integrity
+environment: local-production
+enabled: false
+status: bootstrap-placeholder
+application: uno-arena-local-production-game-integrity
+project: uno-arena-workloads
+destination:
+  server: https://kubernetes.default.svc
+  namespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: game-integrity
+  version: 0.1.0
+image:
+  repository: registry.gitlab.example.invalid/GROUP/PROJECT/game-integrity
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+values:
+  repository: https://gitlab.example.invalid/GROUP/PROJECT.git
+  revision: main
+  files: [services/game-integrity/helm/game-integrity/values.production.yaml, services/game-integrity/helm/game-integrity/values.local-production.yaml]
+rollback:
+  automatic: true

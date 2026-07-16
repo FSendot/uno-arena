@@ -1,0 +1,12 @@
+schemaVersion: 1
+component: redis
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  endpoint: {kind: Secret, name: platform-endpoints, key: redis-url}
+preflight:
+  - {type: dns, expect: configured Redis hostname resolves}
+  - {type: tcp, expect: TLS Redis endpoint accepts connections}
+  - {type: tls, expect: server identity verifies against the environment CA}
+semantics: [managed HA and persistence, authentication required, keyspace isolated by context, eviction and recovery policy reviewed]

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if ! find artifacts/rollback -name '*.yaml' -print -quit 2>/dev/null | grep -q .; then
+  echo "no completed promotion snapshot; rollback is not required"
+  exit 0
+fi
+: "${GITOPS_PUSH_TOKEN:?GITOPS_PUSH_TOKEN is required}"
+: "${CI_SERVER_HOST:?CI_SERVER_HOST is required}"
+: "${CI_PROJECT_PATH:?CI_PROJECT_PATH is required}"
+: "${PROMOTE_COMPONENTS:?PROMOTE_COMPONENTS is required}"
+: "${DEPLOY_ENVIRONMENTS:?DEPLOY_ENVIRONMENTS is required}"
+case "$DEPLOY_ENVIRONMENTS" in
+  production|local-production|production,local-production|local-production,production) ;;
+  *) echo "DEPLOY_ENVIRONMENTS must be a unique non-empty subset of production,local-production" >&2; exit 1 ;;
+esac
+: "${GITLAB_USER_EMAIL:?GITLAB_USER_EMAIL is required}"
+: "${GITLAB_USER_NAME:?GITLAB_USER_NAME is required}"
+remote="https://oauth2:${GITOPS_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+git fetch "$remote" main
+git checkout -B ci-rollback FETCH_HEAD
+IFS=',' read -r -a components <<<"$PROMOTE_COMPONENTS"
+IFS=',' read -r -a environments <<<"$DEPLOY_ENVIRONMENTS"
+for environment in "${environments[@]}"; do
+  for component in "${components[@]}"; do
+    backup="artifacts/rollback/$environment/$component.yaml"
+    [[ -f "$backup" ]] || { echo "missing rollback snapshot $backup" >&2; exit 1; }
+    cp "$backup" "environments/$environment/services/$component.yaml"
+    if ruby -ryaml -e 'exit(YAML.safe_load(File.read(ARGV[0]))["enabled"] ? 0 : 1)' "$backup"; then
+      mkdir -p "environments/$environment/services/enabled"
+      cp "$backup" "environments/$environment/services/enabled/$component.yaml"
+    else
+      rm -f "environments/$environment/services/enabled/$component.yaml"
+    fi
+  done
+done
+ruby ci/bin/validate-inventories.rb --all
+ruby ci/bin/write-reconciliation-expectations.rb --output artifacts/rollback-reconciliation-expectations.json
+git config user.email "$GITLAB_USER_EMAIL"
+git config user.name "$GITLAB_USER_NAME"
+git add environments/production/services environments/local-production/services
+if git diff --cached --quiet; then
+  echo "desired state already matches the rollback snapshot"
+else
+  git commit -m "revert(release): restore ${PROMOTE_COMPONENTS} [skip ci]"
+  git push "$remote" "HEAD:main"
+fi
+ARGOCD_EXPECTATIONS_FILE=artifacts/rollback-reconciliation-expectations.json ci/bin/wait-for-argocd
+ruby ci/bin/post-deploy-evidence

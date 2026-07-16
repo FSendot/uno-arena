@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Uno Arena service Helm values",
+  "type": "object",
+  "properties": {
+    "env": {
+      "type": "object",
+      "properties": {
+        "ROOM_INTERNAL_PRINCIPAL_ISSUER": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ROOM_INTERNAL_PRINCIPAL_AUDIENCE": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ROOM_INTERNAL_PRINCIPAL_MAX_TTL_SECONDS": { "type": "string", "pattern": "^([1-9]|[1-5][0-9]|60)$" },
+		"ROOM_INTERNAL_PRINCIPAL_FUTURE_SKEW_SECONDS": { "type": "string", "pattern": "^([0-9]|[12][0-9]|30)$" },
+		"ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+		"ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID": { "type": "string", "pattern": "^$|^[A-Za-z0-9_-]{1,64}$" }
+      },
+	  "required": ["ROOM_INTERNAL_PRINCIPAL_ISSUER", "ROOM_INTERNAL_PRINCIPAL_AUDIENCE", "ROOM_INTERNAL_PRINCIPAL_MAX_TTL_SECONDS", "ROOM_INTERNAL_PRINCIPAL_FUTURE_SKEW_SECONDS", "ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID", "ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID"],
+      "additionalProperties": true
+    },
+    "secretEnv": {
+      "type": "object",
+      "properties": {
+		"ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT": { "const": "internal-principal-hmac-key-current" },
+		"ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS": { "enum": ["", "internal-principal-hmac-key-previous"] }
+      },
+	  "required": ["ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT", "ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS"],
+      "additionalProperties": { "type": "string" }
+    },
+    "runtimeSecretEnv": {
+      "type": "object",
+      "properties": {
+		"ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT": { "const": "internal-principal-hmac-key-current" },
+		"ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS": { "enum": ["", "internal-principal-hmac-key-previous"] }
+      },
+	  "required": ["ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT", "ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS"],
+      "additionalProperties": { "type": "string" }
+    },
+	"principalKeyVersion": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+    "kind": {
+      "type": "boolean",
+      "description": "When true, allows image.tag fallback if digest is empty. Absent/false requires digest outside kind."
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string" }
+      },
+      "required": ["repository"],
+      "anyOf": [
+        { "properties": { "digest": { "type": "string", "minLength": 1 } }, "required": ["digest"] },
+        { "properties": { "tag": { "type": "string", "minLength": 1 } }, "required": ["tag"] }
+      ]
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": { "name": { "type": "string", "minLength": 1 } },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "properties": {
+        "maxUnavailable": { "type": "integer", "minimum": 0 },
+        "maxSurge": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["maxUnavailable", "maxSurge"]
+    },
+    "startupProbe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string", "pattern": "^/" },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["enabled", "path", "periodSeconds", "timeoutSeconds", "failureThreshold"]
+    },
+    "preStop": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "sleepSeconds": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["enabled", "sleepSeconds"]
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30 },
+    "topologySpread": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxSkew": { "type": "integer", "minimum": 1 },
+        "whenUnsatisfiable": { "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+      },
+      "required": ["enabled", "maxSkew", "whenUnsatisfiable"]
+    },
+    "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["enabled", "minAvailable"]
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 2 },
+        "maxReplicas": { "type": "integer", "minimum": 2 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "required": ["enabled", "minReplicas", "maxReplicas", "targetCPUUtilizationPercentage"]
+    },
+    "playerStreamCompactor": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxLen": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "pageSize": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "trimLimit": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "intervalMillis": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+        "operationTimeoutMillis": { "type": "integer", "minimum": 250, "maximum": 30000 }
+      },
+      "required": ["enabled", "maxLen", "pageSize", "trimLimit", "intervalMillis", "operationTimeoutMillis"]
+    }
+  }
+}

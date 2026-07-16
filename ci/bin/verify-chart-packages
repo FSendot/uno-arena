@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Re-fetch every reconciled Helm package and verify its promoted byte digest.
+set -euo pipefail
+
+expectations="${ARGOCD_EXPECTATIONS_FILE:-artifacts/reconciliation-expectations.json}"
+[[ -r "${expectations}" ]] || { echo "reconciliation expectations are required for chart verification" >&2; exit 1; }
+: "${CI_JOB_TOKEN:?CI_JOB_TOKEN is required to verify private Helm packages}"
+[[ "${CI_JOB_TOKEN}" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "CI_JOB_TOKEN contains unsupported characters" >&2; exit 1; }
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
+config="${tmp}/curl.conf"
+umask 077
+printf 'header = "JOB-TOKEN: %s"\n' "${CI_JOB_TOKEN}" >"${config}"
+
+ruby -rjson -ruri -e '
+  document = JSON.parse(File.read(ARGV.fetch(0)))
+  rows = document.fetch("applications").values.flat_map(&:values).each_with_object([]) do |entry, out|
+    chart = entry["chart"]
+    next unless chart
+    repository = chart.fetch("repository")
+    uri = URI.parse(repository)
+    abort "chart repository must use HTTPS" unless uri.scheme == "https" && uri.host
+    name = chart.fetch("name")
+    version = chart.fetch("version")
+    sha = chart.fetch("packageSha256")
+    abort "unsafe chart package coordinate" unless name.match?(/\A[a-z0-9-]+\z/) && version.match?(/\A[0-9A-Za-z.+-]+\z/)
+    abort "invalid chart package SHA-256" unless sha.match?(/\A[a-f0-9]{64}\z/)
+    out << [repository.sub(%r{/+\z}, ""), name, version, sha]
+  end
+  rows.uniq.each { |row| puts row.join("\t") }
+' "${expectations}" >"${tmp}/packages.tsv"
+
+while IFS=$'\t' read -r repository name version expected; do
+  [[ -n "${repository}" ]] || continue
+  package="${tmp}/${name}-${version}.tgz"
+  curl --fail-with-body --silent --show-error --location --config "${config}" \
+    --output "${package}" "${repository}/charts/${name}-${version}.tgz"
+  actual="$(ruby -rdigest -e 'puts Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "${package}")"
+  [[ "${actual}" == "${expected}" ]] || {
+    echo "fetched Helm package checksum mismatch for ${name} ${version}" >&2
+    exit 1
+  }
+done <"${tmp}/packages.tsv"
+
+echo "verified reconciled Helm package bytes"

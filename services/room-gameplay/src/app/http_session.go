@@ -14,8 +14,8 @@ import (
 
 const defaultSessionValidateTimeout = 5 * time.Second
 
-// HTTPSessionValidator validates forwarded SessionID/PlayerID bindings against
-// Identity via POST /internal/v1/sessions/validate (stdlib net/http only).
+// HTTPSessionValidator is retained for capability-mode/direct-adapter tests.
+// Durable mutations use the signed ADR-0021 principal at the HTTP boundary.
 type HTTPSessionValidator struct {
 	baseURL    string
 	credential string

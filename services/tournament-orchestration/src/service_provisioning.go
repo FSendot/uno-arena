@@ -274,7 +274,7 @@ func (s *Service) processProvisioningBatchDifferential(ctx context.Context, work
 			// Lease lost during heartbeat — cancel calls already done; do NOT failure-finalize.
 			return envelope.Result{}, err
 		}
-		forceQuarantine := errors.Is(err, ErrRoomIDMismatch)
+		forceQuarantine := roomProvisionFailureForcesQuarantine(err)
 		budget, _ := s.provisioning.LoadRetryBudget(ctx, work.TournamentID)
 		nextAttempt := work.RetryAttempt + 1
 		nextWork := ProvisioningBatchWork{

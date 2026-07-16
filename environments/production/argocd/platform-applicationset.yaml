@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: uno-arena-production-platform
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: [missingkey=error]
+  generators:
+    - git:
+        repoURL: https://gitlab.example.invalid/GROUP/PROJECT.git
+        revision: main
+        files:
+          - path: environments/production/platform-releases/enabled/*.yaml
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["00-secrets"]}
+        - matchExpressions:
+            - {key: unoarena.io/platform-stage, operator: In, values: ["40-observability"]}
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  template:
+    metadata:
+      name: '{{.application}}'
+      namespace: argocd
+      labels:
+        unoarena.io/platform-stage: '{{.stage}}'
+    spec:
+      project: uno-arena-production-platform
+      source:
+        repoURL: '{{.chart.repository}}'
+        chart: '{{.chart.name}}'
+        targetRevision: '{{.chart.version}}'
+        helm:
+          releaseName: '{{.component}}'
+          values: '{{ toJson .values }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{.destinationNamespace}}'
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
+        syncOptions:
+          - ApplyOutOfSyncOnly=true
+          - CreateNamespace=false
+          - FailOnSharedResource=true
+          - PruneLast=true

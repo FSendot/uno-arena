@@ -32,7 +32,6 @@ env:
   SERVICE_NAME: room-gameplay
   DEPLOYMENT_ENV: local
   GATEWAY_URL: http://gateway.uno-arena.svc.cluster.local:8080
-  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
@@ -48,6 +47,9 @@ timerWorker:
 integrityReconciler:
   enabled: true
   replicaCount: 2
+
+playerStreamCompactor:
+  enabled: true
 
 topology:
   controller:
@@ -89,8 +91,8 @@ secretEnv:
   ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET: room-analytics-backfill-cursor-secret
   ROOM_PUBLIC_LIST_CURSOR_SECRET: room-public-list-cursor-secret
   GATEWAY_SERVICE_CREDENTIAL: room-to-gateway-credential
-  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
-  ROOM_IDENTITY_CREDENTIAL: room-identity-credential
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT: internal-principal-hmac-key-current
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS: internal-principal-hmac-key-previous
   SPECTATOR_VIEW_SERVICE_CREDENTIAL: spectator-view-internal-credential
   RANKING_SERVICE_CREDENTIAL: ranking-internal-credential
   ANALYTICS_SERVICE_CREDENTIAL: analytics-room-credential
@@ -105,7 +107,8 @@ controllerSecretEnv:
   DATABASE_URL: room-database-url
 runtimeSecretEnv:
   ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
-  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT: internal-principal-hmac-key-current
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS: internal-principal-hmac-key-previous
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
   GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
   ROOM_PGBOUNCER_URL: room-pgbouncer-database-url

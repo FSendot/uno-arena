@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"unoarena/services/room-gameplay/app"
 	"unoarena/services/room-gameplay/store"
+	"unoarena/shared/internalprincipal"
 )
 
 type fakeAssignmentStore struct {
@@ -151,6 +153,17 @@ func TestKubernetesPodStatusDecodesReadyEndpoint(t *testing.T) {
 	}
 }
 
+func TestKubernetesPodStatusDecodesUnschedulableAdmission(t *testing.T) {
+	var raw kubePod
+	if err := json.Unmarshal([]byte(`{"metadata":{"name":"room-x","labels":{"unoarena.io/room-generation":"2"}},"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"no matching nodes"}]}}`), &raw); err != nil {
+		t.Fatal(err)
+	}
+	pod := podFromKube(raw)
+	if !pod.Unschedulable || pod.AdmissionReason != "Unschedulable" || pod.Ready {
+		t.Fatalf("decoded admission = %#v", pod)
+	}
+}
+
 func TestDedicatedRuntimeRejectsStaleInternalGenerationBeforeDispatch(t *testing.T) {
 	svc := app.NewService(app.ServiceDeps{
 		Sessions: app.NewMemorySessionRepository(), Integrity: app.NewFakeGameIntegrity(),
@@ -197,12 +210,17 @@ func TestRoomRouterExtractsRoomFromInternalCommand(t *testing.T) {
 	})
 	body := []byte(`{"type":"PlayCard","roomId":"r-internal"}`)
 	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/internal/v1/commands", bytes.NewReader(body)))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/commands", bytes.NewReader(body))
+	req.Header.Set("X-UnoArena-Internal-Principal", "opaque-proof")
+	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || got == nil {
 		t.Fatalf("status=%d request=%v", w.Code, got)
 	}
 	if got.Header.Get(runtimeRoomIDHeader) != "r-internal" || got.Header.Get(runtimeGenerationHeader) != "3" {
 		t.Fatalf("runtime fencing headers = %#v", got.Header)
+	}
+	if got.Header.Get("X-UnoArena-Internal-Principal") != "opaque-proof" {
+		t.Fatalf("signed principal was not preserved: %#v", got.Header)
 	}
 }
 
@@ -255,6 +273,20 @@ func TestRuntimeControllerAdvancesMissingReadyGeneration(t *testing.T) {
 	}
 	if len(kube.created) != 0 || len(assignments.advanced) != 1 || assignments.advanced[0] != "r-replace:4" {
 		t.Fatalf("replacement = created=%v advanced=%v", kube.created, assignments.advanced)
+	}
+}
+
+func TestRuntimeControllerReplacesEveryRuntimeWhenPrincipalKeyVersionChanges(t *testing.T) {
+	name := store.RuntimePodName("r-key-rotation", 4)
+	assignments := &fakeAssignmentStore{assignments: []store.RuntimeAssignment{{RoomID: "r-key-rotation", Generation: 4, Desired: store.RuntimeDesiredRunning, Observed: store.RuntimeObservedReady, PodName: name}}}
+	kube := &fakeKubePods{pods: map[string]runtimePod{name: {Name: name, Phase: "Running", Ready: true, PrincipalKeyVersion: "keyring-v1"}}}
+	controller := NewRuntimeController(assignments, kube, "test", "room:local", "router-secret")
+	controller.ConfigureRuntimePod("room-secrets", nil, nil, "keyring-v2")
+	if err := controller.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(kube.deleted) != 1 || kube.deleted[0] != name || len(assignments.advanced) != 1 || assignments.advanced[0] != "r-key-rotation:4" {
+		t.Fatalf("key rollout did not replace runtime: deleted=%v advanced=%v", kube.deleted, assignments.advanced)
 	}
 }
 
@@ -330,6 +362,36 @@ func TestRuntimeControllerKeepsNonReadyPodBeforeDeadline(t *testing.T) {
 	}
 }
 
+func TestRuntimeControllerHandlesUnknownAndUnschedulableDistinctly(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		pod  runtimePod
+		want int
+	}{
+		{name: "unknown immediately", pod: runtimePod{Phase: "Unknown"}, want: 1},
+		{name: "unschedulable before deadline", pod: runtimePod{Phase: "Pending", Unschedulable: true, CreatedAt: now.Add(-59 * time.Second)}, want: 0},
+		{name: "unschedulable past deadline", pod: runtimePod{Phase: "Pending", Unschedulable: true, CreatedAt: now.Add(-61 * time.Second)}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			roomID := "r-" + strings.ReplaceAll(tc.name, " ", "-")
+			name := store.RuntimePodName(roomID, 1)
+			tc.pod.Name = name
+			assignments := &fakeAssignmentStore{assignments: []store.RuntimeAssignment{{RoomID: roomID, Generation: 1, Desired: store.RuntimeDesiredRunning, PodName: name}}}
+			kube := &fakeKubePods{pods: map[string]runtimePod{name: tc.pod}}
+			controller := NewRuntimeController(assignments, kube, "test", "room:local", "router-secret")
+			controller.ConfigureLimits(1, 1, time.Minute)
+			controller.now = func() time.Time { return now }
+			if err := controller.ReconcileOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(kube.deleted) != tc.want || len(assignments.advanced) != tc.want {
+				t.Fatalf("deleted=%v advanced=%v", kube.deleted, assignments.advanced)
+			}
+		})
+	}
+}
+
 func TestRuntimeControllerStaleGenerationAfterDeleteIsConverged(t *testing.T) {
 	now := time.Now().UTC()
 	name := store.RuntimePodName("r-raced", 2)
@@ -381,14 +443,15 @@ func TestKubeCreateAddsRuntimeTelemetryContract(t *testing.T) {
 	client := newKubeHTTPClient(srv.URL, "test", "", nil)
 	err := client.Create(context.Background(), runtimePodSpec{
 		RoomID: "r1", Generation: 1, Name: "room-r1-g1", Image: "room:test",
-		Env: map[string]string{"TELEMETRY_MODE": "required", "UNOARENA_COMPONENT": "room-runtime", "METRICS_ADDR": ":9090"},
+		Env:                 map[string]string{"TELEMETRY_MODE": "required", "UNOARENA_COMPONENT": "room-runtime", "METRICS_ADDR": ":9090", "ROOM_INTERNAL_PRINCIPAL_KEY_VERSION": "keyring-v2"},
+		PrincipalKeyVersion: "keyring-v2",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	metadata := body["metadata"].(map[string]any)
 	labels := metadata["labels"].(map[string]any)
-	if labels["unoarena.io/metrics-scrape"] != "pod" || labels["unoarena.io/metrics-exposed"] != "true" {
+	if labels["unoarena.io/metrics-scrape"] != "pod" || labels["unoarena.io/metrics-exposed"] != "true" || labels["unoarena.io/principal-key-version"] != "keyring-v2" {
 		t.Fatalf("telemetry labels = %#v", labels)
 	}
 	spec := body["spec"].(map[string]any)
@@ -441,7 +504,7 @@ func TestKubeCreateUsesConfiguredRuntimePodProfile(t *testing.T) {
 	client := newKubeHTTPClient(srv.URL, "test", "", nil)
 	err := client.Create(context.Background(), runtimePodSpec{
 		RoomID: "r1", Generation: 1, Name: "room-r1-g1", Image: "room:test",
-		Profile: runtimePodProfile{CPURequest: "20m", MemoryRequest: "48Mi", CPULimit: "500m", MemoryLimit: "384Mi", ProbeTimeoutSeconds: 3, ProbeFailureThreshold: 6},
+		Profile: runtimePodProfile{CPURequest: "20m", MemoryRequest: "48Mi", CPULimit: "500m", MemoryLimit: "384Mi", ProbeTimeoutSeconds: 3, ProbeFailureThreshold: 6, NodeSelector: map[string]string{"unoarena.io/node-role": "worker"}, TopologySpreadEnabled: true, TopologyKey: "kubernetes.io/hostname", TopologyMaxSkew: 2, TopologyWhenUnsatisfiable: "ScheduleAnyway"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -458,6 +521,29 @@ func TestKubeCreateUsesConfiguredRuntimePodProfile(t *testing.T) {
 		if probe["timeoutSeconds"] != float64(3) || probe["failureThreshold"] != float64(6) {
 			t.Fatalf("%s = %#v", probeName, probe)
 		}
+	}
+	podSpec := body["spec"].(map[string]any)
+	if podSpec["automountServiceAccountToken"] != false || podSpec["serviceAccountName"] != "room-gameplay-runtime" {
+		t.Fatalf("runtime identity=%#v", podSpec)
+	}
+	podSecurity := podSpec["securityContext"].(map[string]any)
+	if podSecurity["runAsNonRoot"] != true || podSecurity["runAsUser"] != float64(65532) || podSecurity["seccompProfile"].(map[string]any)["type"] != "RuntimeDefault" {
+		t.Fatalf("pod security=%#v", podSecurity)
+	}
+	containerSecurity := container["securityContext"].(map[string]any)
+	if containerSecurity["allowPrivilegeEscalation"] != false || containerSecurity["readOnlyRootFilesystem"] != true || containerSecurity["runAsNonRoot"] != true || containerSecurity["runAsUser"] != float64(65532) {
+		t.Fatalf("container security=%#v", containerSecurity)
+	}
+	dropped := containerSecurity["capabilities"].(map[string]any)["drop"].([]any)
+	if len(dropped) != 1 || dropped[0] != "ALL" {
+		t.Fatalf("dropped capabilities=%#v", dropped)
+	}
+	if got := podSpec["nodeSelector"].(map[string]any)["unoarena.io/node-role"]; got != "worker" {
+		t.Fatalf("node selector=%#v", podSpec["nodeSelector"])
+	}
+	spread := podSpec["topologySpreadConstraints"].([]any)[0].(map[string]any)
+	if spread["maxSkew"] != float64(2) || spread["whenUnsatisfiable"] != "ScheduleAnyway" {
+		t.Fatalf("topology spread=%#v", spread)
 	}
 }
 
@@ -476,6 +562,14 @@ func TestRuntimeControllerCadenceDefaultsAndClamps(t *testing.T) {
 	}
 }
 
+func TestRuntimeControllerCadenceSupportsDeterministicJitter(t *testing.T) {
+	controller := NewRuntimeController(&fakeAssignmentStore{}, &fakeKubePods{}, "test", "room:test", "credential")
+	controller.jitter = func(delay time.Duration) time.Duration { return delay + 125*time.Millisecond }
+	if got := controller.nextCadence(time.Second); got != 1125*time.Millisecond {
+		t.Fatalf("jittered cadence=%s", got)
+	}
+}
+
 func TestRuntimeControllerConfigurationLoadsAdmissionControls(t *testing.T) {
 	t.Setenv("ROOM_RUNTIME_CONTROLLER_CLAIM_BATCH", "23")
 	t.Setenv("ROOM_RUNTIME_CONTROLLER_CONCURRENCY", "7")
@@ -487,41 +581,69 @@ func TestRuntimeControllerConfigurationLoadsAdmissionControls(t *testing.T) {
 	t.Setenv("ROOM_RUNTIME_MEMORY_LIMIT", "384Mi")
 	t.Setenv("ROOM_RUNTIME_PROBE_TIMEOUT_SECONDS", "3")
 	t.Setenv("ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD", "6")
+	t.Setenv("ROOM_RUNTIME_NODE_SELECTOR_JSON", `{"unoarena.io/node-role":"worker"}`)
+	t.Setenv("ROOM_RUNTIME_TOPOLOGY_SPREAD_ENABLED", "true")
+	t.Setenv("ROOM_RUNTIME_TOPOLOGY_MAX_SKEW", "2")
+	t.Setenv("ROOM_RUNTIME_TOPOLOGY_WHEN_UNSATISFIABLE", "ScheduleAnyway")
 	cfg := loadRoomRuntimeConfig()
 	if cfg.RuntimeControllerClaimBatch != 23 || cfg.RuntimeControllerConcurrency != 7 ||
 		cfg.RuntimeControllerCadence != 750*time.Millisecond || cfg.RuntimeReadinessTimeout != 45*time.Second ||
 		cfg.RuntimeCPURequest != "20m" || cfg.RuntimeMemoryRequest != "48Mi" || cfg.RuntimeCPULimit != "500m" || cfg.RuntimeMemoryLimit != "384Mi" ||
-		cfg.RuntimeProbeTimeoutSeconds != 3 || cfg.RuntimeProbeFailureThreshold != 6 {
+		cfg.RuntimeProbeTimeoutSeconds != 3 || cfg.RuntimeProbeFailureThreshold != 6 || cfg.RuntimeNodeSelector["unoarena.io/node-role"] != "worker" ||
+		!cfg.RuntimeTopologySpreadEnabled || cfg.RuntimeTopologyMaxSkew != 2 || cfg.RuntimeTopologyUnsatisfiable != "ScheduleAnyway" {
 		t.Fatalf("controller config=%+v", cfg)
 	}
 }
 
 func TestDedicatedRuntimeDurableValidationSkipsUnservedScopedSecrets(t *testing.T) {
 	cfg := roomRuntimeConfig{
-		WorkerRole:                  "room-runtime",
-		DatabaseURL:                 "postgres://room",
-		RedisURL:                    "redis://room",
-		IdentityURL:                 "http://identity",
-		IdentityCred:                "identity-cred",
-		GameIntegrityURL:            "http://gi",
-		GameIntegrityCred:           "gi-cred",
-		SpectatorRecoveryCredential: "spectator-recovery-cred",
-		ServiceCredential:           "gateway-room-cred",
+		WorkerRole:                      "room-runtime",
+		DatabaseURL:                     "postgres://room",
+		RedisURL:                        "redis://room",
+		IdentityURL:                     "http://identity",
+		IdentityCred:                    "identity-cred",
+		GameIntegrityURL:                "http://gi",
+		GameIntegrityCred:               "gi-cred",
+		SpectatorRecoveryCredential:     "spectator-recovery-cred",
+		ServiceCredential:               "gateway-room-cred",
+		InternalPrincipalCurrentKeyID:   "current",
+		InternalPrincipalCurrentHMACKey: "room-principal-test-key-at-least-32-bytes",
+		InternalPrincipalKeyVersion:     "v1",
 	}
 	if missing := roomDurableMissing(cfg); len(missing) != 0 {
 		t.Fatalf("dedicated runtime required unserved scoped secrets: %v", missing)
 	}
 }
 
+func TestRuntimePodEnvironmentCarriesPrincipalKeyringContract(t *testing.T) {
+	env := runtimePodEnvironment(roomRuntimeConfig{
+		InternalPrincipalCurrentKeyID:      "key-current",
+		InternalPrincipalPreviousKeyID:     "key-previous",
+		InternalPrincipalKeyVersion:        "keyring-v2",
+		InternalPrincipalIssuer:            internalprincipal.DefaultIssuer,
+		InternalPrincipalAudience:          internalprincipal.DefaultRoomAudience,
+		InternalPrincipalMaxTTLSeconds:     20,
+		InternalPrincipalFutureSkewSeconds: 5,
+	})
+	if env["ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID"] != "key-current" ||
+		env["ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID"] != "key-previous" ||
+		env["ROOM_INTERNAL_PRINCIPAL_KEY_VERSION"] != "keyring-v2" {
+		t.Fatalf("runtime principal env=%v", env)
+	}
+}
+
 func TestDedicatedRuntimeDurableValidationDoesNotRequireGatewayCredential(t *testing.T) {
 	cfg := roomRuntimeConfig{
-		WorkerRole:        "room-runtime",
-		DatabaseURL:       "postgres://room",
-		RedisURL:          "redis://room",
-		IdentityURL:       "http://identity",
-		IdentityCred:      "identity-cred",
-		GameIntegrityURL:  "http://gi",
-		GameIntegrityCred: "gi-cred",
+		WorkerRole:                      "room-runtime",
+		DatabaseURL:                     "postgres://room",
+		RedisURL:                        "redis://room",
+		IdentityURL:                     "http://identity",
+		IdentityCred:                    "identity-cred",
+		GameIntegrityURL:                "http://gi",
+		GameIntegrityCred:               "gi-cred",
+		InternalPrincipalCurrentKeyID:   "current",
+		InternalPrincipalCurrentHMACKey: "room-principal-test-key-at-least-32-bytes",
+		InternalPrincipalKeyVersion:     "v1",
 	}
 	missing := roomDurableMissing(cfg)
 	if len(missing) != 0 {

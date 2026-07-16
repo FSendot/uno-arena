@@ -1,0 +1,386 @@
+# Declarative registration of the four Kafka-bound PostgreSQL Outbox Event Router
+# connectors. Idempotent PUT /connectors/{name}/config; fail-closed on config/status
+# errors. Uses the same exact quay.io Connect digest as the Deployment (curl/bash/python3;
+# sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455;
+# imagePullPolicy Never — staged by load-debezium-connect.sh node-native crictl pull).
+# Debezium owns unique replication slots; publications come from postgres bootstrap Jobs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: debezium-register-connectors
+  namespace: uno-arena
+  labels:
+    app.kubernetes.io/name: register-debezium-connectors
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/debezium-role: kafka-connect
+data:
+  register-connectors.sh: |
+    #!/usr/bin/env bash
+    # Idempotent connector registration against Kafka Connect REST.
+    # Fail closed on HTTP errors and FAILED connector/task status.
+    set -euo pipefail
+
+    CONNECT_URL="${CONNECT_URL:-http://debezium-connect.uno-arena.svc.cluster.local:8083}"
+    TEMPLATES_DIR="${TEMPLATES_DIR:-/kafka/uno-arena-templates}"
+    SCRIPTS_DIR="${SCRIPTS_DIR:-/scripts}"
+    WAIT_SECONDS="${CONNECT_WAIT_SECONDS:-180}"
+
+    die() {
+      echo "error: $*" >&2
+      exit 1
+    }
+
+    require_env() {
+      local name="$1"
+      [[ -n "${!name:-}" ]] || die "required env ${name} is empty"
+    }
+
+    echo "waiting for Connect REST at ${CONNECT_URL} (timeout=${WAIT_SECONDS}s)"
+    deadline=$((SECONDS + WAIT_SECONDS))
+    until curl -sf "${CONNECT_URL}/" | grep -q version; do
+      if (( SECONDS >= deadline )); then
+        die "Connect REST not ready within ${WAIT_SECONDS}s"
+      fi
+      sleep 3
+    done
+    echo "Connect REST ready"
+
+    # name|template|user_env|password_env
+    connectors=(
+      "identity-outbox|connector-identity-outbox.json|IDENTITY_CDC_USER|IDENTITY_CDC_PASSWORD"
+      "room-integration-outbox|connector-room-integration-outbox.json|ROOM_CDC_KAFKA_USER|ROOM_CDC_KAFKA_PASSWORD"
+      "tournament-outbox|connector-tournament-outbox.json|TOURNAMENT_CDC_USER|TOURNAMENT_CDC_PASSWORD"
+      "ranking-outbox|connector-ranking-outbox.json|RANKING_CDC_USER|RANKING_CDC_PASSWORD"
+    )
+
+    [[ "${#connectors[@]}" -eq 4 ]] || die "expected exactly 4 connectors, got ${#connectors[@]}"
+
+    for entry in "${connectors[@]}"; do
+      IFS='|' read -r name template user_env password_env <<<"${entry}"
+      require_env "${user_env}"
+      require_env "${password_env}"
+
+      template_path="${TEMPLATES_DIR}/${template}"
+      [[ -f "${template_path}" ]] || die "missing template ${template_path}"
+
+      echo "registering connector ${name} from ${template}"
+      config_json="$(
+        CDC_USER="${!user_env}" \
+        CDC_PASSWORD="${!password_env}" \
+        python3 "${SCRIPTS_DIR}/render_connector_config.py" "${template_path}"
+      )"
+
+      http_code="$(
+        curl -sS -o /tmp/connect-put-body.json -w "%{http_code}" \
+          -X PUT \
+          -H "Content-Type: application/json" \
+          --data-binary "${config_json}" \
+          "${CONNECT_URL}/connectors/${name}/config"
+      )"
+      case "${http_code}" in
+        200|201) ;;
+        *)
+          echo "PUT /connectors/${name}/config failed http=${http_code} body:" >&2
+          cat /tmp/connect-put-body.json >&2 || true
+          die "connector ${name} config PUT failed"
+          ;;
+      esac
+
+      status_deadline=$((SECONDS + 60))
+      while true; do
+        if ! curl -sf "${CONNECT_URL}/connectors/${name}/status" -o /tmp/connect-status.json; then
+          if (( SECONDS >= status_deadline )); then
+            die "connector ${name} status unavailable"
+          fi
+          sleep 2
+          continue
+        fi
+        # Preserve checker exit code in else: with set -e, rc after `if cmd` is always 0.
+        if python3 "${SCRIPTS_DIR}/check_connector_status.py" "${name}" /tmp/connect-status.json; then
+          echo "ok connector ${name} RUNNING"
+          break
+        else
+          rc=$?
+          if [[ "${rc}" -eq 1 ]]; then
+            cat /tmp/connect-status.json >&2 || true
+            die "connector ${name} status check failed closed"
+          fi
+          # rc 2 = still settling
+          if (( SECONDS >= status_deadline )); then
+            echo "last status for ${name}:" >&2
+            cat /tmp/connect-status.json >&2 || true
+            die "connector ${name} did not become RUNNING within 60s"
+          fi
+          sleep 2
+        fi
+      done
+    done
+
+    curl -sf "${CONNECT_URL}/connectors" -o /tmp/connectors.json
+    python3 "${SCRIPTS_DIR}/assert_exact_connectors.py" /tmp/connectors.json
+    echo "ok register-debezium-connectors"
+
+  render_connector_config.py: |
+    #!/usr/bin/env python3
+    """Render a connector template: substitute CDC credentials only."""
+    import json
+    import os
+    import sys
+
+
+    def main() -> None:
+        if len(sys.argv) != 2:
+            raise SystemExit("usage: render_connector_config.py <template.json>")
+        path = sys.argv[1]
+        user = os.environ.get("CDC_USER")
+        password = os.environ.get("CDC_PASSWORD")
+        if not user or not password:
+            raise SystemExit("CDC_USER and CDC_PASSWORD are required")
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+        # Substitute credentials only — preserve Debezium ${routedByValue}.
+        raw = raw.replace("${CDC_USER}", user)
+        raw = raw.replace("${CDC_PASSWORD}", password)
+        cfg = json.loads(raw)
+        if not isinstance(cfg, dict) or not cfg:
+            raise SystemExit(f"invalid connector config object in {path}")
+        for key, value in cfg.items():
+            key_l = str(key).lower()
+            val_s = str(value)
+            if "heartbeat" in key_l and "transform" in key_l:
+                raise SystemExit(f"forbidden Heartbeat transform config: {key}={value}")
+            if "Heartbeat" in val_s and "transform" in key_l:
+                raise SystemExit(f"forbidden Heartbeat transform value: {key}={value}")
+            if key_l == "transforms" and "Heartbeat" in val_s:
+                raise SystemExit(f"forbidden Heartbeat in transforms: {value}")
+        if cfg.get("snapshot.mode") != "no_data":
+            raise SystemExit("snapshot.mode must be no_data")
+        if cfg.get("publication.autocreate.mode") != "disabled":
+            raise SystemExit("publication.autocreate.mode must be disabled")
+        table = str(cfg.get("table.include.list", ""))
+        if "realtime_outbox" in table:
+            raise SystemExit("Kafka connectors must not capture realtime_outbox_events")
+        if "," in table:
+            raise SystemExit(f"table.include.list must be exactly one table, got {table!r}")
+        if cfg.get("plugin.name") != "pgoutput":
+            raise SystemExit("plugin.name must be pgoutput")
+        if "EventRouter" not in str(cfg.get("transforms.outbox.type", "")):
+            raise SystemExit("Outbox EventRouter SMT required")
+        required = (
+            "transforms.outbox.table.field.event.id",
+            "transforms.outbox.table.field.event.key",
+            "transforms.outbox.table.field.event.payload",
+            "transforms.outbox.route.by.field",
+        )
+        for key in required:
+            if key not in cfg:
+                raise SystemExit(f"missing required outbox router field {key}")
+        if cfg.get("transforms.outbox.table.field.event.id") != "event_id":
+            raise SystemExit("event id field must be event_id")
+        if cfg.get("transforms.outbox.table.field.event.key") != "partition_key":
+            raise SystemExit("event key field must be partition_key")
+        if cfg.get("transforms.outbox.table.field.event.payload") != "payload":
+            raise SystemExit("event payload field must be payload")
+        if cfg.get("transforms.outbox.route.by.field") != "topic":
+            raise SystemExit("route.by.field must be topic")
+        placements = {
+            item.strip()
+            for item in str(cfg.get("transforms.outbox.table.fields.additional.placement", "")).split(",")
+            if item.strip()
+        }
+        required_placements = {
+            "event_type:header:type",
+            "traceparent:header:traceparent",
+            "tracestate:header:tracestate",
+        }
+        missing_placements = required_placements - placements
+        if missing_placements:
+            raise SystemExit(
+                "missing required outbox header placements: "
+                + ",".join(sorted(missing_placements))
+            )
+        if any("baggage" in item.lower() for item in placements):
+            raise SystemExit("baggage must not be routed through CDC outboxes")
+        if str(cfg.get("value.converter.schemas.enable", "")).lower() != "false":
+            raise SystemExit("value.converter.schemas.enable must be false")
+        print(json.dumps(cfg, separators=(",", ":")))
+
+
+    if __name__ == "__main__":
+        main()
+
+  check_connector_status.py: |
+    #!/usr/bin/env python3
+    """Exit 0 if RUNNING, 1 if FAILED, 2 if still settling."""
+    import json
+    import sys
+
+
+    def main() -> None:
+        if len(sys.argv) != 3:
+            raise SystemExit("usage: check_connector_status.py <name> <status.json>")
+        name = sys.argv[1]
+        with open(sys.argv[2], encoding="utf-8") as f:
+            status = json.load(f)
+        connector = status.get("connector") or {}
+        cstate = connector.get("state")
+        tasks = status.get("tasks") or []
+        if cstate == "FAILED":
+            print(f"connector {name} state FAILED: {connector}", file=sys.stderr)
+            raise SystemExit(1)
+        for task in tasks:
+            if task.get("state") == "FAILED":
+                print(f"connector {name} task FAILED: {task}", file=sys.stderr)
+                raise SystemExit(1)
+        if not cstate:
+            print(f"connector {name} missing state", file=sys.stderr)
+            raise SystemExit(1)
+        if cstate == "RUNNING" and tasks and all(t.get("state") == "RUNNING" for t in tasks):
+            raise SystemExit(0)
+        if cstate == "RUNNING" and not tasks:
+            # Brief window before tasks appear.
+            raise SystemExit(2)
+        raise SystemExit(2)
+
+
+    if __name__ == "__main__":
+        main()
+
+  assert_exact_connectors.py: |
+    #!/usr/bin/env python3
+    """Fail closed unless Connect lists exactly the four expected connectors."""
+    import json
+    import sys
+
+    EXPECTED = {
+        "identity-outbox",
+        "room-integration-outbox",
+        "tournament-outbox",
+        "ranking-outbox",
+    }
+
+
+    def main() -> None:
+        if len(sys.argv) != 2:
+            raise SystemExit("usage: assert_exact_connectors.py <connectors.json>")
+        with open(sys.argv[1], encoding="utf-8") as f:
+            names = set(json.load(f))
+        missing = EXPECTED - names
+        if missing:
+            raise SystemExit(f"missing connectors: {sorted(missing)}")
+        extras = names - EXPECTED
+        if extras:
+            raise SystemExit(f"unexpected connectors present: {sorted(extras)} (want exactly 4)")
+        if len(names) != 4:
+            raise SystemExit(f"expected exactly 4 connectors, got {len(names)}: {sorted(names)}")
+        print("ok exactly 4 connectors registered")
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: register-debezium-connectors
+  namespace: uno-arena
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  labels:
+    app.kubernetes.io/name: register-debezium-connectors
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/non-production: "true"
+    uno-arena.local/debezium-role: kafka-connect
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: register-debezium-connectors
+        app.kubernetes.io/part-of: uno-arena
+        uno-arena.local/non-production: "true"
+        uno-arena.local/debezium-role: kafka-connect
+    spec:
+      restartPolicy: Never
+      serviceAccountName: debezium-connect-registrar
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: register
+          # Same exact Connect digest as debezium-connect Deployment (Never = no runtime pull).
+          image: {{ .Values.image.repository }}@{{ required "image.digest is required" .Values.image.digest }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/scripts/register-connectors.sh"]
+          env:
+            - name: CONNECT_URL
+              value: http://debezium-connect.uno-arena.svc.cluster.local:8083
+            - name: TEMPLATES_DIR
+              value: /kafka/uno-arena-templates
+            - name: SCRIPTS_DIR
+              value: /scripts
+            - name: CONNECT_WAIT_SECONDS
+              value: "180"
+            - name: IDENTITY_CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: identity-cdc-user
+            - name: IDENTITY_CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: identity-cdc-password
+            - name: ROOM_CDC_KAFKA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: room-cdc-kafka-user
+            - name: ROOM_CDC_KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: room-cdc-kafka-password
+            - name: TOURNAMENT_CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: tournament-cdc-user
+            - name: TOURNAMENT_CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: tournament-cdc-password
+            - name: RANKING_CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-cdc-user
+            - name: RANKING_CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-cdc-password
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: templates
+              mountPath: /kafka/uno-arena-templates
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: debezium-register-connectors
+            defaultMode: 0755
+        - name: templates
+          configMap:
+            name: debezium-connect-templates

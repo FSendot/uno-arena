@@ -11,59 +11,80 @@ import (
 
 	"unoarena/services/room-gameplay/app"
 	"unoarena/services/room-gameplay/store"
+	"unoarena/shared/internalprincipal"
 )
 
 type roomRuntimeConfig struct {
-	ServiceName                  string
-	ServiceCredential            string
-	TimerCredential              string
-	SpectatorRecoveryCredential  string
-	AnalyticsBackfillCredential  string
-	GatewayURL                   string
-	GatewayCred                  string
-	IdentityURL                  string
-	IdentityCred                 string
-	GameIntegrityURL             string
-	GameIntegrityCred            string
-	DatabaseURL                  string
-	RedisURL                     string
-	AuditLogPath                 string
-	AllowFakes                   bool
-	CapabilityMode               bool
-	DeploymentEnv                string
-	WorkerRole                   string
-	RoomGameplayURL              string
-	SpectatorURL                 string
-	SpectatorCred                string
-	RankingURL                   string
-	RankingCred                  string
-	AnalyticsURL                 string
-	AnalyticsCred                string
-	TournamentURL                string
-	TournamentCred               string
-	RuntimeRoomID                string
-	RuntimeGeneration            int64
-	RuntimeRouterCredential      string
-	RuntimeQueueCapacity         int
-	RuntimeImage                 string
-	RuntimeControllerOwner       string
-	RuntimeControllerClaimBatch  int
-	RuntimeControllerConcurrency int
-	RuntimeControllerCadence     time.Duration
-	RuntimeReadinessTimeout      time.Duration
-	RuntimeCPURequest            string
-	RuntimeMemoryRequest         string
-	RuntimeCPULimit              string
-	RuntimeMemoryLimit           string
-	RuntimeProbeTimeoutSeconds   int
-	RuntimeProbeFailureThreshold int
-	IntegrityReconcilerBatch     int
-	IntegrityReconcilerLease     time.Duration
-	IntegrityReconcilerInterval  time.Duration
-	KubernetesAPIURL             string
-	KubernetesNamespace          string
-	RuntimeSecretName            string
-	RuntimeSecretEnv             map[string]string
+	ServiceName                        string
+	ServiceCredential                  string
+	TimerCredential                    string
+	SpectatorRecoveryCredential        string
+	AnalyticsBackfillCredential        string
+	GatewayURL                         string
+	GatewayCred                        string
+	IdentityURL                        string
+	IdentityCred                       string
+	InternalPrincipalCurrentKeyID      string
+	InternalPrincipalCurrentHMACKey    string
+	InternalPrincipalPreviousKeyID     string
+	InternalPrincipalPreviousHMACKey   string
+	InternalPrincipalKeyVersion        string
+	InternalPrincipalIssuer            string
+	InternalPrincipalAudience          string
+	InternalPrincipalMaxTTLSeconds     int
+	InternalPrincipalFutureSkewSeconds int
+	GameIntegrityURL                   string
+	GameIntegrityCred                  string
+	GameIntegrityHTTPTimeout           time.Duration
+	DatabaseURL                        string
+	RedisURL                           string
+	AuditLogPath                       string
+	AllowFakes                         bool
+	CapabilityMode                     bool
+	DeploymentEnv                      string
+	WorkerRole                         string
+	RoomGameplayURL                    string
+	SpectatorURL                       string
+	SpectatorCred                      string
+	RankingURL                         string
+	RankingCred                        string
+	AnalyticsURL                       string
+	AnalyticsCred                      string
+	TournamentURL                      string
+	TournamentCred                     string
+	RuntimeRoomID                      string
+	RuntimeGeneration                  int64
+	RuntimeRouterCredential            string
+	RuntimeQueueCapacity               int
+	RuntimeImage                       string
+	RuntimeControllerOwner             string
+	RuntimeControllerClaimBatch        int
+	RuntimeControllerConcurrency       int
+	RuntimeControllerCadence           time.Duration
+	RuntimeReadinessTimeout            time.Duration
+	RuntimeCPURequest                  string
+	RuntimeMemoryRequest               string
+	RuntimeCPULimit                    string
+	RuntimeMemoryLimit                 string
+	RuntimeProbeTimeoutSeconds         int
+	RuntimeProbeFailureThreshold       int
+	RuntimeNodeSelector                map[string]string
+	RuntimeTopologySpreadEnabled       bool
+	RuntimeTopologyKey                 string
+	RuntimeTopologyMaxSkew             int
+	RuntimeTopologyUnsatisfiable       string
+	PlayerStreamCompactorPage          int
+	PlayerStreamMaxLen                 int64
+	PlayerStreamTrimLimit              int64
+	PlayerStreamCompactorCadence       time.Duration
+	PlayerStreamOperationTimeout       time.Duration
+	IntegrityReconcilerBatch           int
+	IntegrityReconcilerLease           time.Duration
+	IntegrityReconcilerInterval        time.Duration
+	KubernetesAPIURL                   string
+	KubernetesNamespace                string
+	RuntimeSecretName                  string
+	RuntimeSecretEnv                   map[string]string
 }
 
 type roomRuntime struct {
@@ -127,19 +148,29 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 			os.Getenv("ROOM_IDENTITY_CREDENTIAL"),
 			cred,
 		),
-		GameIntegrityURL: strings.TrimSpace(os.Getenv("GAME_INTEGRITY_URL")),
+		InternalPrincipalCurrentKeyID:      strings.TrimSpace(os.Getenv("ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID")),
+		InternalPrincipalCurrentHMACKey:    strings.TrimSpace(os.Getenv("ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT")),
+		InternalPrincipalPreviousKeyID:     strings.TrimSpace(os.Getenv("ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID")),
+		InternalPrincipalPreviousHMACKey:   strings.TrimSpace(os.Getenv("ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS")),
+		InternalPrincipalKeyVersion:        strings.TrimSpace(os.Getenv("ROOM_INTERNAL_PRINCIPAL_KEY_VERSION")),
+		InternalPrincipalIssuer:            firstNonEmptyEnv(os.Getenv("ROOM_INTERNAL_PRINCIPAL_ISSUER"), internalprincipal.DefaultIssuer),
+		InternalPrincipalAudience:          firstNonEmptyEnv(os.Getenv("ROOM_INTERNAL_PRINCIPAL_AUDIENCE"), internalprincipal.DefaultRoomAudience),
+		InternalPrincipalMaxTTLSeconds:     envInt("ROOM_INTERNAL_PRINCIPAL_MAX_TTL_SECONDS", 20),
+		InternalPrincipalFutureSkewSeconds: envInt("ROOM_INTERNAL_PRINCIPAL_FUTURE_SKEW_SECONDS", int(internalprincipal.DefaultFutureSkew/time.Second)),
+		GameIntegrityURL:                   strings.TrimSpace(os.Getenv("GAME_INTEGRITY_URL")),
 		GameIntegrityCred: firstNonEmptyEnv(
 			os.Getenv("GAME_INTEGRITY_INTERNAL_CREDENTIAL"),
 			os.Getenv("ROOM_GAME_INTEGRITY_CREDENTIAL"),
 			cred,
 		),
-		DatabaseURL:    firstNonEmptyEnv(os.Getenv("ROOM_PGBOUNCER_URL"), os.Getenv("DATABASE_URL")),
-		RedisURL:       strings.TrimSpace(os.Getenv("REDIS_URL")),
-		AuditLogPath:   strings.TrimSpace(os.Getenv("ROOM_AUDIT_LOG_PATH")),
-		AllowFakes:     envTruthy("ROOM_ALLOW_FAKES") || envTruthy("ALLOW_FAKES"),
-		CapabilityMode: envTruthy("ROOM_CAPABILITY_MODE"),
-		DeploymentEnv:  depEnv,
-		WorkerRole:     strings.TrimSpace(os.Getenv("WORKER_ROLE")),
+		GameIntegrityHTTPTimeout: boundedIntegrityHTTPTimeout(time.Duration(envInt("GAME_INTEGRITY_HTTP_TIMEOUT_MILLIS", 3000)) * time.Millisecond),
+		DatabaseURL:              firstNonEmptyEnv(os.Getenv("ROOM_PGBOUNCER_URL"), os.Getenv("DATABASE_URL")),
+		RedisURL:                 strings.TrimSpace(os.Getenv("REDIS_URL")),
+		AuditLogPath:             strings.TrimSpace(os.Getenv("ROOM_AUDIT_LOG_PATH")),
+		AllowFakes:               envTruthy("ROOM_ALLOW_FAKES") || envTruthy("ALLOW_FAKES"),
+		CapabilityMode:           envTruthy("ROOM_CAPABILITY_MODE"),
+		DeploymentEnv:            depEnv,
+		WorkerRole:               strings.TrimSpace(os.Getenv("WORKER_ROLE")),
 		RoomGameplayURL: firstNonEmptyEnv(
 			os.Getenv("ROOM_GAMEPLAY_URL"),
 			"http://127.0.0.1:8080",
@@ -168,6 +199,16 @@ func loadRoomRuntimeConfig() roomRuntimeConfig {
 		RuntimeMemoryLimit:           firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_MEMORY_LIMIT"), "256Mi"),
 		RuntimeProbeTimeoutSeconds:   envInt("ROOM_RUNTIME_PROBE_TIMEOUT_SECONDS", 1),
 		RuntimeProbeFailureThreshold: envInt("ROOM_RUNTIME_PROBE_FAILURE_THRESHOLD", 3),
+		RuntimeNodeSelector:          envStringMap("ROOM_RUNTIME_NODE_SELECTOR_JSON"),
+		RuntimeTopologySpreadEnabled: envTruthy("ROOM_RUNTIME_TOPOLOGY_SPREAD_ENABLED"),
+		RuntimeTopologyKey:           firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_TOPOLOGY_KEY"), "kubernetes.io/hostname"),
+		RuntimeTopologyMaxSkew:       envInt("ROOM_RUNTIME_TOPOLOGY_MAX_SKEW", 1),
+		RuntimeTopologyUnsatisfiable: firstNonEmptyEnv(os.Getenv("ROOM_RUNTIME_TOPOLOGY_WHEN_UNSATISFIABLE"), "DoNotSchedule"),
+		PlayerStreamCompactorPage:    boundedPlayerStreamPageSize(envInt("ROOM_PLAYER_STREAM_COMPACTOR_PAGE_SIZE", defaultPlayerStreamCompactorPage)),
+		PlayerStreamMaxLen:           boundedPlayerStreamMaxLen(envInt64("ROOM_PLAYER_STREAM_MAXLEN", defaultPlayerStreamMaxLen)),
+		PlayerStreamTrimLimit:        boundedPlayerStreamTrimLimit(envInt64("ROOM_PLAYER_STREAM_TRIM_LIMIT", defaultPlayerStreamTrimLimit)),
+		PlayerStreamCompactorCadence: boundedPlayerStreamCadence(time.Duration(envInt("ROOM_PLAYER_STREAM_COMPACTOR_INTERVAL_MILLIS", int(defaultPlayerStreamCompactorCadence.Milliseconds()))) * time.Millisecond),
+		PlayerStreamOperationTimeout: boundedPlayerStreamOperationTimeout(time.Duration(envInt("ROOM_PLAYER_STREAM_OPERATION_TIMEOUT_MILLIS", int(defaultPlayerStreamOperationTimeout.Milliseconds()))) * time.Millisecond),
 		IntegrityReconcilerBatch:     envInt("ROOM_INTEGRITY_RECONCILER_CLAIM_BATCH", 32),
 		IntegrityReconcilerLease:     time.Duration(envInt("ROOM_INTEGRITY_RECONCILER_LEASE_SECONDS", 60)) * time.Second,
 		IntegrityReconcilerInterval:  time.Duration(envInt("ROOM_INTEGRITY_RECONCILER_INTERVAL_MILLIS", 2000)) * time.Millisecond,
@@ -351,7 +392,8 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 		auditSink = sink
 	}
 
-	integrity := app.NewHTTPGameIntegrity(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
+	integrityClient := app.NewIntegrityHTTPClient(cfg.GameIntegrityHTTPTimeout)
+	integrity := app.NewHTTPGameIntegrity(cfg.GameIntegrityURL, cfg.GameIntegrityCred, integrityClient)
 	if auditCred := strings.TrimSpace(os.Getenv("GAME_INTEGRITY_AUDIT_CREDENTIAL")); auditCred != "" {
 		integrity.AuditCredential = auditCred
 	}
@@ -362,9 +404,11 @@ func wireRoomDurableRuntime(cfg roomRuntimeConfig, clock app.Clock) (roomRuntime
 		Integrity: integrity,
 		Publisher: app.NewFakeEventPublisher(), // durable: CDC owns delivery; no MultiDestinationPublisher
 		Audit:     auditSink,
-		Deals:     app.NewHTTPDealSource(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil),
+		Deals:     app.NewHTTPDealSource(cfg.GameIntegrityURL, cfg.GameIntegrityCred, integrityClient),
 		Clock:     clock,
-		SessionsV: app.NewHTTPSessionValidator(cfg.IdentityURL, cfg.IdentityCred, nil),
+		// ADR-0021: signed principal verification at the HTTP boundary replaces
+		// a second Identity call inside the Room mutation transaction.
+		SessionsV: app.ClosedSessionValidator{},
 	}
 	exp := store.DefaultSchemaExpectation()
 	svc := app.NewService(deps)
@@ -412,9 +456,13 @@ func roomDurableMissing(cfg roomRuntimeConfig) []string {
 	}
 	require("DATABASE_URL", cfg.DatabaseURL)
 	require("REDIS_URL", cfg.RedisURL)
-	if cfg.WorkerRole != "room-timer" && cfg.WorkerRole != "room-integrity-reconciler" {
-		require("IDENTITY_URL", cfg.IdentityURL)
-		require("IDENTITY_CREDENTIAL", cfg.IdentityCred)
+	if roomServesPlayerCommands(cfg.WorkerRole) {
+		require("ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID", cfg.InternalPrincipalCurrentKeyID)
+		require("ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT", cfg.InternalPrincipalCurrentHMACKey)
+		require("ROOM_INTERNAL_PRINCIPAL_KEY_VERSION", cfg.InternalPrincipalKeyVersion)
+		if (cfg.InternalPrincipalPreviousKeyID == "") != (cfg.InternalPrincipalPreviousHMACKey == "") {
+			missing = append(missing, "ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID+ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS")
+		}
 	}
 	if cfg.WorkerRole != "room-timer" {
 		require("GAME_INTEGRITY_URL", cfg.GameIntegrityURL)
@@ -443,12 +491,22 @@ func roomDurableMissing(cfg roomRuntimeConfig) []string {
 	return missing
 }
 
+func roomServesPlayerCommands(workerRole string) bool {
+	switch strings.TrimSpace(workerRole) {
+	case "room-timer", "room-integrity-reconciler", "room-player-stream-compactor", "room-runtime-controller":
+		return false
+	default:
+		return true
+	}
+}
+
 func wireRoomCapabilityRuntime(cfg roomRuntimeConfig, clock app.Clock, publisher *app.MultiDestinationPublisher) (roomRuntime, error) {
 	var integrity app.GameIntegrity = app.ClosedGameIntegrity{}
 	var deals app.DealSource = app.ClosedDealSource{}
 	if cfg.GameIntegrityURL != "" {
-		integrity = app.NewHTTPGameIntegrity(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
-		deals = app.NewHTTPDealSource(cfg.GameIntegrityURL, cfg.GameIntegrityCred, nil)
+		integrityClient := app.NewIntegrityHTTPClient(cfg.GameIntegrityHTTPTimeout)
+		integrity = app.NewHTTPGameIntegrity(cfg.GameIntegrityURL, cfg.GameIntegrityCred, integrityClient)
+		deals = app.NewHTTPDealSource(cfg.GameIntegrityURL, cfg.GameIntegrityCred, integrityClient)
 	}
 
 	var sessionsV app.SessionValidator = app.ClosedSessionValidator{}
@@ -528,6 +586,21 @@ func firstEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func boundedIntegrityHTTPTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return app.DefaultIntegrityHTTPTimeout
+	}
+	if timeout < 250*time.Millisecond {
+		return 250 * time.Millisecond
+	}
+	// ADR-0019 intentionally holds one Room row lock across this call. Keep the
+	// adapter below the five-second external backend deadline even if misconfigured.
+	if timeout > 4*time.Second {
+		return 4 * time.Second
+	}
+	return timeout
 }
 
 func firstNonEmptyEnv(vals ...string) string {

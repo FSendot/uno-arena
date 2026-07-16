@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: redis, namespace: uno-arena}
+automountServiceAccountToken: false
+---
+{{ tpl (.Files.Get "files/base.yaml") . }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: uno-arena
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.storageClassName }}
+  resources:
+    requests: {storage: {{ .Values.storage }}}

@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: redis
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-redis
+stage: "10-stateful"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: redis
+  version: 0.1.0
+values:
+  image:
+    repository: redis:8.8.0-alpine
+    digest: sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+

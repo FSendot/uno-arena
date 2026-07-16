@@ -1,0 +1,50 @@
+# Simulator overlay: render after values.production.yaml.
+env:
+  DEPLOYMENT_ENV: local-production
+  GATEWAY_BACKEND_HTTP_TIMEOUT: "12s"
+  GATEWAY_BACKEND_CONNECT_TIMEOUT: "2s"
+  GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT: "10s"
+  GATEWAY_BACKEND_IDLE_CONN_TIMEOUT: "90s"
+  GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
+  GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT: "30s"
+  GATEWAY_SERVER_READ_HEADER_TIMEOUT: "5s"
+  GATEWAY_SERVER_READ_TIMEOUT: "15s"
+  GATEWAY_SERVER_IDLE_TIMEOUT: "2m"
+  GATEWAY_SERVER_MAX_HEADER_BYTES: "1048576"
+  GATEWAY_PLAYER_FEED_REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/2
+  GATEWAY_SPECTATOR_REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/5
+  GATEWAY_SPECTATOR_REDIS_KEY_PREFIX: "spectator:"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+imagePullSecrets:
+  - name: gitlab-registry

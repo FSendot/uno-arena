@@ -1,0 +1,3 @@
+image:
+  repository: quay.io/debezium/connect:3.6.0.Final
+  digest: sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455

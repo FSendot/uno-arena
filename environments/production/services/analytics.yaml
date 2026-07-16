@@ -1,0 +1,23 @@
+schemaVersion: 1
+component: analytics
+environment: production
+enabled: false
+status: bootstrap-placeholder
+application: uno-arena-production-analytics
+project: uno-arena-workloads
+destination:
+  server: https://kubernetes.default.svc
+  namespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: analytics
+  version: 0.1.0
+image:
+  repository: registry.gitlab.example.invalid/GROUP/PROJECT/analytics
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+values:
+  repository: https://gitlab.example.invalid/GROUP/PROJECT.git
+  revision: main
+  files: [services/analytics/helm/analytics/values.production.yaml]
+rollback:
+  automatic: true

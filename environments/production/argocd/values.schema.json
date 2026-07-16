@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["gitRepoURL", "helmRepoURL", "revision"],
+  "properties": {
+    "gitRepoURL": {"type": "string", "pattern": "^https://.+\\.git$"},
+    "helmRepoURL": {"type": "string", "pattern": "^https://"},
+    "revision": {"type": "string", "minLength": 1}
+  }
+}

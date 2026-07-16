@@ -79,6 +79,8 @@ paths:
                 $ref: "#/components/schemas/RegisterResponse"
         "400":
           $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
         "502":
@@ -87,6 +89,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/auth/login:
     post:
@@ -108,7 +112,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/Error"
         "401":
+          $ref: "#/components/responses/Error"
+        "413":
           $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
@@ -118,6 +126,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/auth/whoami:
     get:
@@ -150,6 +160,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/auth/logout:
     post:
@@ -188,6 +200,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/commands:
     post:
@@ -226,12 +240,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "404":
+          $ref: "#/components/responses/Error"
         "409":
-          description: Stale room sequence; body preserves the structured rejected command result
+          description: Stale room sequence result or a Gateway-mapped upstream conflict
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CommandResult"
+                oneOf:
+                  - $ref: "#/components/schemas/CommandResult"
+                  - $ref: "#/components/schemas/ErrorBody"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
         "502":
@@ -240,6 +262,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/rooms:
     get:
@@ -298,6 +322,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "404":
+          $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
         "502":
@@ -306,6 +332,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/rooms/{roomId}/commands:
     post:
@@ -347,12 +375,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "404":
+          $ref: "#/components/responses/Error"
         "409":
-          description: Stale room sequence; body preserves the structured rejected command result
+          description: Stale room sequence result or a Gateway-mapped upstream conflict
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CommandResult"
+                oneOf:
+                  - $ref: "#/components/schemas/CommandResult"
+                  - $ref: "#/components/schemas/ErrorBody"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
         "429":
           $ref: "#/components/responses/Error"
         "502":
@@ -361,6 +397,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/rooms/{roomId}/snapshot:
     get:
@@ -467,6 +505,8 @@ paths:
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/streams/player:
     get:
@@ -520,6 +560,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/streams/spectator:
     get:
@@ -586,6 +628,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/streams/control:
     get:
@@ -628,6 +672,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/rankings/leaderboards:
     get:
@@ -671,6 +717,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/tournaments/{tournamentId}/bracket:
     get:
@@ -754,6 +802,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/tournaments/{tournamentId}/standings:
     get:
@@ -810,6 +860,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/tournaments/{tournamentId}/players/{playerId}/assignment:
     get:
@@ -873,6 +925,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/analytics/public:
     get:
@@ -897,6 +951,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
 components:
   securitySchemes:
@@ -939,6 +995,12 @@ components:
   responses:
     Error:
       description: Structured error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    ServiceUnavailable:
+      description: Gateway readiness or an owned rate-limit/live-feed dependency is unavailable
       content:
         application/json:
           schema:

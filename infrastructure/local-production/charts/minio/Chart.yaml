@@ -1,0 +1,6 @@
+apiVersion: v2
+name: minio
+description: Retained local S3-compatible storage and bucket bootstrap
+type: application
+version: 0.1.0
+appVersion: "local"

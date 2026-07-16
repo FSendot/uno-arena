@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: postgres-contexts
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-postgres-contexts
+stage: "10-stateful"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: postgres-contexts
+  version: 0.1.0
+values:
+  image:
+    repository: postgres:18.4-alpine3.24
+    digest: sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+

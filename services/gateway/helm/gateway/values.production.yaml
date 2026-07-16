@@ -7,6 +7,16 @@ env:
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080
+  GATEWAY_BACKEND_HTTP_TIMEOUT: "5s"
+  GATEWAY_BACKEND_CONNECT_TIMEOUT: "1s"
+  GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT: "4s"
+  GATEWAY_BACKEND_IDLE_CONN_TIMEOUT: "90s"
+  GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
+  GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT: "30s"
+  GATEWAY_SERVER_READ_HEADER_TIMEOUT: "5s"
+  GATEWAY_SERVER_READ_TIMEOUT: "15s"
+  GATEWAY_SERVER_IDLE_TIMEOUT: "2m"
+  GATEWAY_SERVER_MAX_HEADER_BYTES: "1048576"
   REDIS_URL: redis://redis.uno-arena.svc.cluster.local:6379/0
   # Production: set GATEWAY_PLAYER_FEED_REDIS_URL + GATEWAY_SPECTATOR_REDIS_URL for durable Redis;
   # set KAFKA_BROKERS + KAFKA_SESSION_INVALIDATED_* for SessionInvalidated consumer.
@@ -28,3 +38,24 @@ resources:
   limits:
     cpu: 200m
     memory: 256Mi
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+imagePullSecrets:
+  - name: gitlab-registry

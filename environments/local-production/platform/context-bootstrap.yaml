@@ -1,0 +1,17 @@
+schemaVersion: 1
+component: context-bootstrap
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-context-bootstrap
+stage: "20-bootstrap"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: context-bootstrap
+  version: 0.1.0
+values:
+  image:
+    repository: registry.gitlab.example.invalid/GROUP/PROJECT/bootstrap
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+

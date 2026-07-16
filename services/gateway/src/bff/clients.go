@@ -18,6 +18,9 @@ type Principal struct {
 	Roles         []string
 	Scopes        []string
 	OperatorScope bool
+	// InternalProof is an opaque Identity-issued authorization proof. It must
+	// only be forwarded to Room and must never be logged or sent to clients.
+	InternalProof string
 }
 
 // RegisterResult is the Identity register outcome proxied by the BFF.
@@ -40,6 +43,16 @@ type IdentityClient interface {
 	Logout(ctx context.Context, token string, corr correlation.Headers) error
 	Whoami(ctx context.Context, token string, corr correlation.Headers) (Principal, error)
 	ValidateSession(ctx context.Context, token string, corr correlation.Headers) (Principal, error)
+	AuthorizeCommand(ctx context.Context, token string, authorization CommandAuthorization, corr correlation.Headers) (Principal, error)
+}
+
+// CommandAuthorization is the decoded, route-resolved mutation context sent to
+// Identity. Room authorizations return a proof bound to every field; other
+// bounded contexts still validate authoritatively but never receive that proof.
+type CommandAuthorization struct {
+	BoundedContext string
+	Command        envelope.Command
+	RoomID         string
 }
 
 // CommandDispatch is a command forwarded to a bounded-context backend.
@@ -77,13 +90,12 @@ type ReadModelClient interface {
 	PublicAnalytics(ctx context.Context, corr correlation.Headers) (json.RawMessage, error)
 }
 
-// SpectatorAdmitRequest carries validated principal/token context for admission.
+// SpectatorAdmitRequest carries validated principal context for admission.
 // InviteCapability is the opaque X-Room-Invite value forwarded to Spectator View
 // for validation; Gateway never treats a client boolean as invite proof.
 // Operator scope reaches the gate only via Principal.OperatorScope from Identity.
 type SpectatorAdmitRequest struct {
 	RoomID           string
-	Token            string     // raw bearer when supplied; empty when anonymous
 	Principal        *Principal // non-nil when token validated
 	InviteCapability string     // opaque room invite; empty when absent
 	Correlation      correlation.Headers

@@ -1,0 +1,96 @@
+# Ranking Postgres bootstrap Job (ADR-0027).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-postgres-ranking
+  namespace: uno-arena
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  labels:
+    app.kubernetes.io/name: bootstrap-postgres-ranking
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/context: ranking
+    uno-arena.local/bootstrap: postgres
+    uno-arena.local/non-production: "true"
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootstrap-postgres-ranking
+        uno-arena.local/context: ranking
+        uno-arena.local/bootstrap: postgres
+    spec:
+      restartPolicy: Never
+      serviceAccountName: context-bootstrap
+      automountServiceAccountToken: false
+      containers:
+        - name: bootstrap
+          image: {{ .Values.image.repository }}@{{ .Values.image.digest }}
+          imagePullPolicy: IfNotPresent
+          args: ["migrate-postgres"]
+          env:
+            - name: CONTEXT_NAME
+              value: ranking
+            - name: PGHOST
+              value: postgres-ranking.uno-arena.svc.cluster.local
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: ranking
+            - name: ADVISORY_LOCK_KEY
+              value: "27004"
+            - name: EXPECTED_VERSION
+              value: "001_init"
+            - name: MIGRATION_FILE
+              value: /bootstrap/migrations/ranking/001_init.sql
+            - name: MIGRATION_DIR
+              value: /bootstrap/migrations/ranking
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-admin-user
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-admin-password
+            - name: BOOTSTRAP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-bootstrap-user
+            - name: BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-bootstrap-password
+            - name: RUNTIME_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-runtime-user
+            - name: RUNTIME_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-runtime-password
+            - name: CDC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-cdc-user
+            - name: CDC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: ranking-cdc-password
+            - name: CDC_PUBLICATION
+              value: ranking_cdc_outbox
+            - name: CDC_TABLE
+              value: outbox_events
+            - name: CDC_PEER_TABLE
+              value: ""

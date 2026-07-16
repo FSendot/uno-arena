@@ -10,11 +10,11 @@ WORKDIR /bootstrap
 
 # Service migrations (copied at build time from repo root context).
 # Root .dockerignore must NOT exclude these paths (see !services/*/migrations exceptions).
-COPY services/identity/migrations/001_init.sql /bootstrap/migrations/identity/001_init.sql
-COPY services/room-gameplay/migrations/001_init.sql /bootstrap/migrations/room-gameplay/001_init.sql
-COPY services/tournament-orchestration/migrations/001_init.sql /bootstrap/migrations/tournament-orchestration/001_init.sql
-COPY services/ranking/migrations/001_init.sql /bootstrap/migrations/ranking/001_init.sql
-COPY services/analytics/migrations/001_init.sql /bootstrap/migrations/analytics/001_init.sql
+COPY services/identity/migrations/ /bootstrap/migrations/identity/
+COPY services/room-gameplay/migrations/ /bootstrap/migrations/room-gameplay/
+COPY services/tournament-orchestration/migrations/ /bootstrap/migrations/tournament-orchestration/
+COPY services/ranking/migrations/ /bootstrap/migrations/ranking/
+COPY services/analytics/migrations/ /bootstrap/migrations/analytics/
 
 # Infrastructure-owned wrappers / fingerprint generator (do not rewrite service migrations).
 COPY infrastructure/bootstrap/sql/ /bootstrap/sql/

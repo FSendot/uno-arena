@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: uno-arena-production-root
+  namespace: argocd
+  finalizers: []
+spec:
+  project: uno-arena-production-bootstrap
+  source:
+    repoURL: {{ required "gitRepoURL is required" .Values.gitRepoURL | quote }}
+    targetRevision: {{ .Values.revision | quote }}
+    path: environments/production/argocd
+    helm:
+      releaseName: uno-arena-production-root
+      values: |
+        gitRepoURL: {{ .Values.gitRepoURL | quote }}
+        helmRepoURL: {{ .Values.helmRepoURL | quote }}
+        revision: {{ .Values.revision | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: {prune: false, selfHeal: true}
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
+      - CreateNamespace=false
+      - ServerSideApply=true

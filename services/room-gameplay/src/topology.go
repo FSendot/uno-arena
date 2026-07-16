@@ -70,14 +70,17 @@ func (q *RoomMutationQueue) Do(fn func()) error {
 }
 
 type runtimePod struct {
-	RoomHash   string
-	Generation int64
-	Name       string
-	IP         string
-	Phase      string
-	Ready      bool
-	CreatedAt  time.Time
-	ReadyAt    time.Time
+	RoomHash            string
+	Generation          int64
+	Name                string
+	IP                  string
+	Phase               string
+	Ready               bool
+	Unschedulable       bool
+	AdmissionReason     string
+	CreatedAt           time.Time
+	ReadyAt             time.Time
+	PrincipalKeyVersion string
 }
 
 // Kubelet can report a pod Ready just before the ambient data plane has
@@ -320,13 +323,14 @@ type KubePodClient interface {
 	Delete(context.Context, string) error
 }
 type runtimePodSpec struct {
-	RoomID      string
-	Generation  int64
-	Name, Image string
-	SecretName  string
-	SecretEnv   map[string]string
-	Env         map[string]string
-	Profile     runtimePodProfile
+	RoomID              string
+	Generation          int64
+	Name, Image         string
+	SecretName          string
+	SecretEnv           map[string]string
+	Env                 map[string]string
+	Profile             runtimePodProfile
+	PrincipalKeyVersion string
 }
 
 type runtimePodProfile struct {
@@ -334,6 +338,11 @@ type runtimePodProfile struct {
 	CPULimit, MemoryLimit     string
 	ProbeTimeoutSeconds       int
 	ProbeFailureThreshold     int
+	NodeSelector              map[string]string
+	TopologySpreadEnabled     bool
+	TopologyKey               string
+	TopologyMaxSkew           int
+	TopologyWhenUnsatisfiable string
 }
 
 func normalizeRuntimePodProfile(profile runtimePodProfile) runtimePodProfile {
@@ -355,7 +364,28 @@ func normalizeRuntimePodProfile(profile runtimePodProfile) runtimePodProfile {
 	if profile.ProbeFailureThreshold < 1 {
 		profile.ProbeFailureThreshold = 3
 	}
+	profile.NodeSelector = cloneStringMap(profile.NodeSelector)
+	if strings.TrimSpace(profile.TopologyKey) == "" {
+		profile.TopologyKey = "kubernetes.io/hostname"
+	}
+	if profile.TopologyMaxSkew < 1 {
+		profile.TopologyMaxSkew = 1
+	}
+	if profile.TopologyWhenUnsatisfiable != "ScheduleAnyway" {
+		profile.TopologyWhenUnsatisfiable = "DoNotSchedule"
+	}
 	return profile
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 type kubeHTTPClient struct {
@@ -445,6 +475,8 @@ type kubePod struct {
 		Conditions []struct {
 			Type               string    `json:"type"`
 			Status             string    `json:"status"`
+			Reason             string    `json:"reason"`
+			Message            string    `json:"message"`
 			LastTransitionTime time.Time `json:"lastTransitionTime"`
 		} `json:"conditions"`
 	} `json:"status"`
@@ -453,14 +485,20 @@ type kubePod struct {
 func podFromKube(p kubePod) runtimePod {
 	gen, _ := strconv.ParseInt(p.Metadata.Labels["unoarena.io/room-generation"], 10, 64)
 	ready := p.Status.Phase == "Running"
+	unschedulable := false
+	admissionReason := ""
 	var readyAt time.Time
 	for _, c := range p.Status.Conditions {
 		if c.Type == "Ready" {
 			ready = ready && c.Status == "True"
 			readyAt = c.LastTransitionTime.UTC()
 		}
+		if c.Type == "PodScheduled" && c.Status == "False" {
+			unschedulable = c.Reason == "Unschedulable"
+			admissionReason = strings.TrimSpace(c.Reason)
+		}
 	}
-	return runtimePod{RoomHash: p.Metadata.Labels["unoarena.io/room-hash"], Generation: gen, Name: p.Metadata.Name, IP: p.Status.PodIP, Phase: p.Status.Phase, Ready: ready, CreatedAt: p.Metadata.CreationTimestamp.UTC(), ReadyAt: readyAt}
+	return runtimePod{RoomHash: p.Metadata.Labels["unoarena.io/room-hash"], Generation: gen, Name: p.Metadata.Name, IP: p.Status.PodIP, Phase: p.Status.Phase, Ready: ready, Unschedulable: unschedulable, AdmissionReason: admissionReason, CreatedAt: p.Metadata.CreationTimestamp.UTC(), ReadyAt: readyAt, PrincipalKeyVersion: p.Metadata.Labels["unoarena.io/principal-key-version"]}
 }
 func (k *kubeHTTPClient) List(ctx context.Context) ([]runtimePod, error) {
 	var list kubePodList
@@ -510,13 +548,22 @@ func (k *kubeHTTPClient) Create(ctx context.Context, spec runtimePodSpec) error 
 		env = append(env, map[string]any{"name": name, "valueFrom": map[string]any{"secretKeyRef": map[string]string{"name": spec.SecretName, "key": key}}})
 	}
 	container := map[string]any{"name": "room-runtime", "image": spec.Image, "ports": []any{map[string]any{"name": "http", "containerPort": 8080}, map[string]any{"name": "metrics", "containerPort": 9090}}, "env": env}
+	container["securityContext"] = map[string]any{"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532, "capabilities": map[string]any{"drop": []string{"ALL"}}}
 	container["resources"] = map[string]any{
 		"requests": map[string]string{"cpu": profile.CPURequest, "memory": profile.MemoryRequest},
 		"limits":   map[string]string{"cpu": profile.CPULimit, "memory": profile.MemoryLimit},
 	}
 	container["readinessProbe"] = map[string]any{"httpGet": map[string]any{"path": "/ready", "port": 8080}, "periodSeconds": 2, "timeoutSeconds": profile.ProbeTimeoutSeconds, "failureThreshold": profile.ProbeFailureThreshold}
 	container["livenessProbe"] = map[string]any{"httpGet": map[string]any{"path": "/health", "port": 8080}, "periodSeconds": 10, "timeoutSeconds": profile.ProbeTimeoutSeconds, "failureThreshold": profile.ProbeFailureThreshold}
-	body := map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": spec.Name, "labels": map[string]string{"app.kubernetes.io/name": "room-gameplay", "unoarena.io/managed-by": "room-runtime-controller", "unoarena.io/room-hash": runtimeRoomHash(spec.RoomID), "unoarena.io/room-generation": strconv.FormatInt(spec.Generation, 10), "unoarena.io/component": "room-runtime", "unoarena.io/metrics-scrape": "pod", "unoarena.io/metrics-exposed": "true"}}, "spec": map[string]any{"restartPolicy": "Always", "serviceAccountName": "room-gameplay-runtime", "automountServiceAccountToken": false, "containers": []any{container}}}
+	labels := map[string]string{"app.kubernetes.io/name": "room-gameplay", "unoarena.io/managed-by": "room-runtime-controller", "unoarena.io/room-hash": runtimeRoomHash(spec.RoomID), "unoarena.io/room-generation": strconv.FormatInt(spec.Generation, 10), "unoarena.io/component": "room-runtime", "unoarena.io/metrics-scrape": "pod", "unoarena.io/metrics-exposed": "true", "unoarena.io/principal-key-version": spec.PrincipalKeyVersion}
+	podSpec := map[string]any{"restartPolicy": "Always", "serviceAccountName": "room-gameplay-runtime", "automountServiceAccountToken": false, "securityContext": map[string]any{"runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532, "seccompProfile": map[string]string{"type": "RuntimeDefault"}}, "containers": []any{container}}
+	if len(profile.NodeSelector) > 0 {
+		podSpec["nodeSelector"] = profile.NodeSelector
+	}
+	if profile.TopologySpreadEnabled {
+		podSpec["topologySpreadConstraints"] = []any{map[string]any{"maxSkew": profile.TopologyMaxSkew, "topologyKey": profile.TopologyKey, "whenUnsatisfiable": profile.TopologyWhenUnsatisfiable, "labelSelector": map[string]any{"matchLabels": map[string]string{"unoarena.io/component": "room-runtime"}}}}
+	}
+	body := map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": spec.Name, "labels": labels}, "spec": podSpec}
 	err := k.do(ctx, http.MethodPost, k.podsURL(""), body, nil)
 	if errors.Is(err, errKubeAlreadyExists) {
 		return nil
@@ -546,6 +593,8 @@ type RuntimeController struct {
 	secretEnv                map[string]string
 	env                      map[string]string
 	runtimeProfile           runtimePodProfile
+	principalKeyVersion      string
+	jitter                   func(time.Duration) time.Duration
 }
 
 type RuntimeAssignmentStore interface {
@@ -557,7 +606,7 @@ type RuntimeAssignmentStore interface {
 }
 
 func NewRuntimeController(s RuntimeAssignmentStore, kube KubePodClient, owner, image, credential string) *RuntimeController {
-	return &RuntimeController{store: s, kube: kube, owner: owner, image: image, credential: credential, batch: 16, concurrency: 4, readinessTimeout: time.Minute, now: time.Now, runtimeProfile: normalizeRuntimePodProfile(runtimePodProfile{})}
+	return &RuntimeController{store: s, kube: kube, owner: owner, image: image, credential: credential, batch: 16, concurrency: 4, readinessTimeout: time.Minute, now: time.Now, runtimeProfile: normalizeRuntimePodProfile(runtimePodProfile{}), jitter: randomJitterDuration}
 }
 
 const (
@@ -578,6 +627,13 @@ func boundedRuntimeControllerCadence(cadence time.Duration) time.Duration {
 		return maxRuntimeControllerCadence
 	}
 	return cadence
+}
+
+func (c *RuntimeController) nextCadence(cadence time.Duration) time.Duration {
+	if c.jitter == nil {
+		return cadence
+	}
+	return c.jitter(cadence)
 }
 
 // ConfigureLimits provides bounded per-replica admission controls. Values are
@@ -608,8 +664,8 @@ func (c *RuntimeController) ConfigureRuntimePodProfile(profile runtimePodProfile
 	c.runtimeProfile = normalizeRuntimePodProfile(profile)
 }
 
-func (c *RuntimeController) ConfigureRuntimePod(secretName string, secretEnv, env map[string]string) {
-	c.secretName, c.secretEnv, c.env = secretName, secretEnv, env
+func (c *RuntimeController) ConfigureRuntimePod(secretName string, secretEnv, env map[string]string, principalKeyVersion string) {
+	c.secretName, c.secretEnv, c.env, c.principalKeyVersion = secretName, secretEnv, env, strings.TrimSpace(principalKeyVersion)
 }
 func (c *RuntimeController) ReconcileOnce(ctx context.Context) error {
 	assignments, err := c.store.ClaimRuntimeAssignments(ctx, c.owner, c.batch, 20*time.Second)
@@ -668,7 +724,7 @@ func (c *RuntimeController) reconcileAssignment(ctx context.Context, a store.Run
 		if a.Observed == store.RuntimeObservedReady {
 			return c.advanceGeneration(ctx, a)
 		}
-		if err := c.kube.Create(ctx, runtimePodSpec{RoomID: a.RoomID, Generation: a.Generation, Name: a.PodName, Image: c.image, SecretName: c.secretName, SecretEnv: c.secretEnv, Env: c.env, Profile: c.runtimeProfile}); err != nil {
+		if err := c.kube.Create(ctx, runtimePodSpec{RoomID: a.RoomID, Generation: a.Generation, Name: a.PodName, Image: c.image, SecretName: c.secretName, SecretEnv: c.secretEnv, Env: c.env, Profile: c.runtimeProfile, PrincipalKeyVersion: c.principalKeyVersion}); err != nil {
 			return err
 		}
 		return c.store.MarkRuntimePodCreating(ctx, a.RoomID, a.Generation)
@@ -676,8 +732,32 @@ func (c *RuntimeController) reconcileAssignment(ctx context.Context, a store.Run
 	if err != nil {
 		return err
 	}
+	if pod.PrincipalKeyVersion != c.principalKeyVersion {
+		if err := c.kube.Delete(ctx, a.PodName); err != nil {
+			return err
+		}
+		return c.advanceGeneration(ctx, a)
+	}
 	if pod.Ready {
 		return c.store.MarkRuntimePodReady(ctx, a.RoomID, a.Generation, pod.IP)
+	}
+	if pod.Phase == "Unknown" {
+		if err := c.kube.Delete(ctx, a.PodName); err != nil {
+			return err
+		}
+		return c.advanceGeneration(ctx, a)
+	}
+	// Scheduler admission failure is distinct from a pod that was admitted but
+	// is still starting. Both remain bounded, but the condition is preserved for
+	// diagnosis and never promoted to Ready.
+	if pod.Phase == "Pending" && pod.Unschedulable {
+		if !c.readinessExpired(pod) {
+			return nil
+		}
+		if err := c.kube.Delete(ctx, a.PodName); err != nil {
+			return err
+		}
+		return c.advanceGeneration(ctx, a)
 	}
 	if (pod.Phase == "Pending" || pod.Phase == "Running") && c.readinessExpired(pod) {
 		if err := c.kube.Delete(ctx, a.PodName); err != nil {

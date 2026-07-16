@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "component", "environment", "enabled", "status", "application", "stage", "destinationNamespace", "chart", "values"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "component": {"enum": ["observability", "platform-secrets"]},
+    "environment": {"const": "production"},
+    "enabled": {"type": "boolean"},
+    "status": {"enum": ["awaiting-immutable-package-publication", "released"]},
+    "application": {"pattern": "^uno-arena-production-[a-z0-9-]+$"},
+    "stage": {"enum": ["00-secrets", "40-observability"]},
+    "destinationNamespace": {"enum": ["uno-arena", "observability"]},
+    "chart": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "name", "version"],
+      "properties": {
+        "repository": {"type": "string", "format": "uri"},
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+        "packageSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "values": {"type": "object"}
+  }
+}

@@ -40,8 +40,21 @@ func TestGatewayHTTPClientForConfigUsesBackendTimeout(t *testing.T) {
 		}
 	})
 
-	client := gatewayHTTPClientForConfig(runtime, gatewayConfig{BackendHTTPTimeout: 10 * time.Second})
+	client := gatewayHTTPClientForConfig(runtime, gatewayConfig{
+		BackendHTTPTimeout:           10 * time.Second,
+		BackendConnectTimeout:        2 * time.Second,
+		BackendResponseHeaderTimeout: 4 * time.Second,
+		BackendIdleConnTimeout:       90 * time.Second,
+	})
 	if client.Timeout != 10*time.Second {
 		t.Fatalf("client timeout=%s want 10s", client.Timeout)
+	}
+	transport := newGatewayBackendTransport(gatewayConfig{
+		BackendConnectTimeout:        2 * time.Second,
+		BackendResponseHeaderTimeout: 4 * time.Second,
+		BackendIdleConnTimeout:       90 * time.Second,
+	})
+	if transport.ResponseHeaderTimeout != 4*time.Second || transport.IdleConnTimeout != 90*time.Second || transport.MaxIdleConnsPerHost != 16 {
+		t.Fatalf("transport bounds=%+v", transport)
 	}
 }

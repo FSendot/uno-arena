@@ -1,0 +1,65 @@
+# Simulator overlay: render after values.production.yaml.
+env:
+  DEPLOYMENT_ENV: local-production
+
+timerWorker:
+  enabled: true
+
+integrityReconciler:
+  enabled: true
+  replicaCount: 2
+
+topology:
+  controller:
+    replicaCount: 2
+    dbPoolMaxConns: 4
+    claimBatch: 4
+    concurrency: 2
+    readinessTimeoutSeconds: 60
+  pgbouncer:
+    replicaCount: 1
+    maxClientConn: 100
+    defaultPoolSize: 4
+    reservePoolSize: 0
+    authType: plain
+    tls:
+      enabled: false
+    mesh:
+      enforceStrictMTLS: false
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+playerStreamCompactor:
+  enabled: true
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+imagePullSecrets:
+  - name: gitlab-registry

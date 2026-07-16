@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +15,10 @@ import (
 	"unoarena/services/identity/domain"
 	"unoarena/services/identity/oidc"
 	"unoarena/services/identity/store"
+	"unoarena/shared/internalprincipal"
 )
+
+const capabilityPrincipalKey = "unoarena-capability-only-principal-key"
 
 type identityRuntime struct {
 	svc                *domain.Service
@@ -28,6 +32,7 @@ type identityRuntime struct {
 	allowRegister      bool
 	deploymentEnv      string
 	schemaExp          store.SchemaExpectation
+	principalSigner    *internalprincipal.Signer
 }
 
 func envTruthy(name string) bool {
@@ -59,6 +64,14 @@ func wireIdentityRuntimeWithTelemetry(playerCreated domain.PlayerCreationRecorde
 	allowPassword := envTruthy("IDENTITY_ALLOW_PASSWORD_LOGIN") || envTruthy("IDENTITY_OIDC_DIRECT_GRANT")
 	allowRegister := envTruthy("IDENTITY_ALLOW_TEST_PROVISIONING") || capability
 	allowHTTP := envTruthy("OIDC_ALLOW_HTTP")
+	var principalSigner *internalprincipal.Signer
+	if (dbURL != "" && !capability) || (capability && isNonProd(deploymentEnv)) {
+		var err error
+		principalSigner, err = identityPrincipalSigner(deploymentEnv, capability)
+		if err != nil {
+			return identityRuntime{}, err
+		}
+	}
 
 	issuer := strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL"))
 	tokenEP := strings.TrimSpace(os.Getenv("OIDC_TOKEN_ENDPOINT"))
@@ -123,6 +136,7 @@ func wireIdentityRuntimeWithTelemetry(playerCreated domain.PlayerCreationRecorde
 			allowRegister:      allowRegister && isNonProd(deploymentEnv),
 			deploymentEnv:      deploymentEnv,
 			schemaExp:          store.DefaultSchemaExpectation(),
+			principalSigner:    principalSigner,
 		}, nil
 	}
 
@@ -155,7 +169,47 @@ func wireIdentityRuntimeWithTelemetry(playerCreated domain.PlayerCreationRecorde
 		allowPasswordLogin: true,
 		allowRegister:      true,
 		deploymentEnv:      deploymentEnv,
+		principalSigner:    principalSigner,
 	}, nil
+}
+
+func identityPrincipalSigner(deploymentEnv string, capability bool) (*internalprincipal.Signer, error) {
+	key := strings.TrimSpace(os.Getenv("IDENTITY_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT"))
+	keyID := strings.TrimSpace(os.Getenv("IDENTITY_INTERNAL_PRINCIPAL_ACTIVE_KEY_ID"))
+	if key == "" && capability && isNonProd(deploymentEnv) {
+		key = capabilityPrincipalKey
+	}
+	if keyID == "" && capability && isNonProd(deploymentEnv) {
+		keyID = "capability-v1"
+	}
+	ttlSeconds := envPositiveInt("IDENTITY_INTERNAL_PRINCIPAL_TTL_SECONDS", 15)
+	return internalprincipal.NewSigner(internalprincipal.SignerConfig{
+		ActiveKey: internalprincipal.Key{ID: keyID, Material: []byte(key)},
+		Issuer:    firstNonEmpty(os.Getenv("IDENTITY_INTERNAL_PRINCIPAL_ISSUER"), internalprincipal.DefaultIssuer),
+		Audience:  firstNonEmpty(os.Getenv("IDENTITY_INTERNAL_PRINCIPAL_AUDIENCE"), internalprincipal.DefaultRoomAudience),
+		TTL:       time.Duration(ttlSeconds) * time.Second,
+	})
+}
+
+func envPositiveInt(name string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func capabilityReadyReason(ready bool) string {

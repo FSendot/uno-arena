@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${GITOPS_PUSH_TOKEN:?GITOPS_PUSH_TOKEN is required}"
+: "${CI_SERVER_HOST:?CI_SERVER_HOST is required}"
+: "${CI_PROJECT_PATH:?CI_PROJECT_PATH is required}"
+: "${CI_COMMIT_SHA:?CI_COMMIT_SHA is required}"
+: "${GITLAB_USER_EMAIL:?GITLAB_USER_EMAIL is required}"
+: "${GITLAB_USER_NAME:?GITLAB_USER_NAME is required}"
+ruby ci/bin/promote-releases.rb
+ruby ci/bin/validate-inventories.rb --all
+git config user.email "$GITLAB_USER_EMAIL"
+git config user.name "$GITLAB_USER_NAME"
+git add environments/production/services environments/production/platform-releases \
+  environments/local-production/services environments/local-production/platform
+promotion_names="${PROMOTE_COMPONENTS:-}${PROMOTE_PLATFORM_COMPONENTS:+${PROMOTE_COMPONENTS:+,}${PROMOTE_PLATFORM_COMPONENTS}}"
+git commit -m "chore(release): promote ${promotion_names} [skip ci]"
+promotion_revision="$(git rev-parse HEAD)"
+DESIRED_STATE_REVISION="$promotion_revision" ruby ci/bin/write-reconciliation-expectations.rb
+REVISION="$promotion_revision" CI_COMMIT_SHA="$CI_COMMIT_SHA" \
+  ruby -rjson -e 'puts JSON.pretty_generate({schemaVersion: 1, desiredStateRevision: ENV.fetch("REVISION"), sourceSha: ENV.fetch("CI_COMMIT_SHA")})' \
+  > artifacts/promotion.json
+git push "https://oauth2:${GITOPS_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "HEAD:main"

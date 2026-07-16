@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "$0")/platform-metadata.sh"
+configure_release_component
+
+args=(lint "$CHART_PATH")
+if [[ "${COMPONENT_KIND:-service}" == "service" ]]; then
+  digest="sha256:$(printf '0%.0s' {1..64})"
+  args+=(--set "image.digest=$digest")
+  if [[ -f "$CHART_PATH/values.production.yaml" ]]; then
+    args+=(--values "$CHART_PATH/values.production.yaml")
+  fi
+elif [[ "$COMPONENT" == "context-bootstrap" ]]; then
+  args+=(--set "image.digest=sha256:$(printf '0%.0s' {1..64})")
+fi
+if [[ -n "${CHART_VALUES:-}" ]]; then
+  args+=(--values "$CHART_PATH/$CHART_VALUES")
+fi
+helm "${args[@]}"
+if [[ "${COMPONENT_KIND:-service}" == "platform" ]]; then
+  ruby ci/bin/render-platform-inventory-values.rb
+fi

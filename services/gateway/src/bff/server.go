@@ -20,13 +20,6 @@ import (
 
 type corrCtxKey struct{}
 
-// UpstreamProbe actively checks a configured backend health endpoint.
-type UpstreamProbe struct {
-	Name string
-	URL  string // full /health URL
-	Do   func(ctx context.Context, method, url string) (int, error)
-}
-
 // Dependencies are injectable backends for the offline BFF.
 type Dependencies struct {
 	Identity                    IdentityClient
@@ -49,7 +42,7 @@ type Dependencies struct {
 	RedisReady                  func(context.Context) error // pings every configured Redis client
 	WorkerReady                 func(context.Context) error // kafka/pubsub lifecycle readiness
 	SessionInvalidation         SessionInvalidationApplier  // durable Redis SI; nil in capability/fakes
-	UpstreamProbes              []UpstreamProbe
+	ClientIPResolver            ClientIPResolver
 	Clock                       func() time.Time
 	NewID                       func(prefix string) string
 }
@@ -81,7 +74,7 @@ type Server struct {
 	redisReady                  func(context.Context) error
 	workerReady                 func(context.Context) error
 	sessionInvalidation         SessionInvalidationApplier
-	upstreamProbes              []UpstreamProbe
+	clientIPResolver            ClientIPResolver
 	clock                       func() time.Time
 	newID                       func(prefix string) string
 }
@@ -106,6 +99,9 @@ func NewServer(deps Dependencies) *Server {
 	}
 	if deps.PrincipalLimiter == nil {
 		deps.PrincipalLimiter = AllowAll{}
+	}
+	if deps.ClientIPResolver == nil {
+		deps.ClientIPResolver = directClientIP
 	}
 	if deps.Identity == nil {
 		deps.Identity = ClosedIdentity{}
@@ -149,7 +145,7 @@ func NewServer(deps Dependencies) *Server {
 		redisReady:                  deps.RedisReady,
 		workerReady:                 deps.WorkerReady,
 		sessionInvalidation:         deps.SessionInvalidation,
-		upstreamProbes:              append([]UpstreamProbe(nil), deps.UpstreamProbes...),
+		clientIPResolver:            deps.ClientIPResolver,
 		clock:                       deps.Clock,
 		newID:                       deps.NewID,
 	}
@@ -195,11 +191,18 @@ func (s *Server) Handler() http.Handler {
 		r = r.WithContext(ctx)
 		// Static Ready=false (or redis adapter blocked) gates all public /v1 traffic,
 		// not only the /ready probe.
-		if strings.HasPrefix(r.URL.Path, "/v1/") && !s.requireReady(w, r) {
+		if isPublicAPIPath(r.URL.Path) && !s.requireReady(w, r) {
+			return
+		}
+		if isPublicAPIPath(r.URL.Path) && !s.allowEdge(w, r) {
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func isPublicAPIPath(path string) bool {
+	return path == "/v1" || strings.HasPrefix(path, "/v1/")
 }
 
 // requireReady rejects public traffic when the server is not ready.
@@ -274,23 +277,6 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	for _, probe := range s.upstreamProbes {
-		do := probe.Do
-		if do == nil {
-			s.writeErr(w, r, http.StatusServiceUnavailable, "not_ready",
-				"upstream probe "+probe.Name+" missing transport", "")
-			return
-		}
-		status, err := do(r.Context(), http.MethodGet, probe.URL)
-		if err != nil || status < 200 || status >= 300 {
-			msg := "upstream " + probe.Name + " /ready probe failed"
-			if err != nil {
-				msg = msg + ": " + err.Error()
-			}
-			s.writeErr(w, r, http.StatusServiceUnavailable, "upstream_unhealthy", msg, "")
-			return
-		}
-	}
 	_ = httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready", "service": "gateway"})
 }
 
@@ -344,7 +330,7 @@ func (s *Server) authorizeProducer(r *http.Request, expected string) bool {
 }
 
 func (s *Server) allowEdge(w http.ResponseWriter, r *http.Request) bool {
-	ok, retry, err := s.edgeLimiter.Allow(r.Context(), "edge:"+clientIP(r))
+	ok, retry, err := s.edgeLimiter.Allow(r.Context(), "edge:"+s.clientIPResolver(r))
 	if err != nil {
 		s.writeErr(w, r, http.StatusServiceUnavailable, "rate_limiter_unavailable",
 			"distributed rate limiter unavailable", "")

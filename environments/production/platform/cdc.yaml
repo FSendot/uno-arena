@@ -1,0 +1,12 @@
+schemaVersion: 1
+component: cdc
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  connectEndpoint: {kind: Secret, name: platform-endpoints, key: debezium-connect-url}
+preflight:
+  - {type: tls, expect: Kafka Connect API server identity verifies}
+  - {type: http, expect: exact released connector set is RUNNING without FAILED tasks}
+  - {type: sql, expect: publications and unique replication slots match the released CDC plan}
+semantics: [connectors use dedicated replication roles, publication auto-create disabled, offsets stored durably in production Kafka]

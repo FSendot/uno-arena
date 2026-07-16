@@ -1,0 +1,20 @@
+schemaVersion: 1
+component: minio
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-minio
+stage: "10-stateful"
+destinationNamespace: observability
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: minio
+  version: 0.1.0
+values:
+  image:
+    repository: quay.io/minio/minio
+    digest: sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+  clientImage:
+    repository: quay.io/minio/mc
+    digest: sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+

@@ -1,0 +1,29 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: local-selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: uno-arena-local-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: uno-arena-local-ca
+  secretName: uno-arena-local-ca
+  duration: 8760h
+  renewBefore: 720h
+  issuerRef:
+    name: local-selfsigned-bootstrap
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: uno-arena-local-ca
+spec:
+  ca:
+    secretName: uno-arena-local-ca

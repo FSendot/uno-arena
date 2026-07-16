@@ -1,0 +1,1 @@
+{{ include "unoArena.renderFile" (list . "app-project.yaml") }}

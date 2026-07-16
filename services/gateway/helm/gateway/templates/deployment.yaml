@@ -5,7 +5,14 @@ metadata:
   labels:
     app: {{ .Release.Name }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.rollout.maxUnavailable }}
+      maxSurge: {{ .Values.rollout.maxSurge }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -18,6 +25,20 @@ spec:
         unoarena.io/metrics-exposed: "true"
         unoarena.io/component: api
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app: {{ $.Release.Name }}
+      {{- end }}
       serviceAccountName: gateway
       automountServiceAccountToken: false
       containers:
@@ -36,6 +57,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+            {{- if .Values.trustedProxyCIDRs }}
+            - name: GATEWAY_TRUSTED_PROXY_CIDRS
+              value: {{ join "," .Values.trustedProxyCIDRs | quote }}
+            {{- end }}
             {{- range $name, $val := .Values.env }}
             - name: {{ $name }}
               value: {{ $val | quote }}
@@ -51,6 +76,15 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.startupProbe.path }}
+              port: 8080
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /ready
@@ -67,5 +101,11 @@ spec:
             periodSeconds: {{ .Values.healthProbes.periodSeconds }}
             timeoutSeconds: {{ .Values.healthProbes.timeoutSeconds }}
             failureThreshold: {{ .Values.healthProbes.failureThreshold }}
+          {{- if .Values.preStop.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep {{ .Values.preStop.sleepSeconds }}"]
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

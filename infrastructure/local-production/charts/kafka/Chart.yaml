@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kafka
+description: Single-node KRaft Kafka plus exact topic bootstrap for local production
+type: application
+version: 0.1.0
+appVersion: "4.3.1"

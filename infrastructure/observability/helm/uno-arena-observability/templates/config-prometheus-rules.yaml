@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+data:
+  uno-arena-rules.yml: |
+    groups:
+      - name: uno-arena-red-recording
+        interval: {{ .Values.prometheus.evaluationInterval }}
+        rules:
+          - record: unoarena:http_requests:rate5m
+            expr: sum by (service, http_request_method, http_route) (rate(http_server_request_duration_seconds_count{job="uno-arena-services"}[5m]))
+          - record: unoarena:http_errors:rate5m
+            expr: sum by (service, http_request_method, http_route) (rate(http_server_request_duration_seconds_count{job="uno-arena-services",http_response_status_code=~"5.."}[5m]))
+          - record: unoarena:http_error_ratio:rate5m
+            expr: unoarena:http_errors:rate5m / clamp_min(unoarena:http_requests:rate5m, 0.001)
+          - record: unoarena:http_request_duration_seconds:p95_5m
+            expr: histogram_quantile(0.95, sum by (le, service, http_request_method, http_route) (rate(http_server_request_duration_seconds_bucket{job="uno-arena-services"}[5m])))
+      - name: uno-arena-service-alerts
+        rules:
+          - alert: UnoArenaServiceTargetDown
+            expr: up{job=~"uno-arena-services|uno-arena-workers"} == 0
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: Uno Arena service metrics target is unavailable
+              description: '{{ "{{" }} $labels.service {{ "}}" }} target {{ "{{" }} $labels.instance {{ "}}" }} has been down for two minutes.'
+          - alert: UnoArenaHighHTTPErrorRatio
+            expr: unoarena:http_error_ratio:rate5m > 0.05 and unoarena:http_requests:rate5m > 0.1
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: Uno Arena HTTP 5xx ratio is elevated
+              description: '{{ "{{" }} $labels.service {{ "}}" }} {{ "{{" }} $labels.http_route {{ "}}" }} exceeds a 5 percent 5xx ratio.'
+          - alert: UnoArenaHighHTTPP95Latency
+            expr: unoarena:http_request_duration_seconds:p95_5m > 1
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: Uno Arena HTTP p95 latency is elevated
+              description: '{{ "{{" }} $labels.service {{ "}}" }} {{ "{{" }} $labels.http_route {{ "}}" }} exceeds one second p95 latency.'
+      - name: uno-arena-observability-alerts
+        rules:
+          - alert: UnoArenaObservabilityTargetDown
+            expr: up{job=~"prometheus|alertmanager|redis-exporter|alloy-logs|alloy-otlp|loki|tempo|grafana|kube-state-metrics"} == 0
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: Core observability target is unavailable
+              description: '{{ "{{" }} $labels.job {{ "}}" }} target {{ "{{" }} $labels.instance {{ "}}" }} has been down for two minutes.'
+          - alert: UnoArenaObservabilityTargetMissing
+            expr: absent(up{job="prometheus"}) or absent(up{job="alertmanager"}) or absent(up{job="redis-exporter"}) or absent(up{job="alloy-logs"}) or absent(up{job="alloy-otlp"}) or absent(up{job="loki"}) or absent(up{job="tempo"}) or absent(up{job="grafana"}) or absent(up{job="kube-state-metrics"})
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: Required observability scrape target is missing
+              description: Prometheus service discovery is missing a required self-monitoring target.
+          - alert: UnoArenaObservabilityDeploymentUnavailable
+            expr: kube_deployment_status_replicas_available{namespace="observability",deployment=~"alloy-otlp|loki|tempo|prometheus|alertmanager|redis-exporter|kube-state-metrics|grafana|minio"} < 1
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: Core observability deployment has no available replica
+              description: '{{ "{{" }} $labels.deployment {{ "}}" }} has had no available replica for two minutes.'
+          - alert: UnoArenaPrometheusRuleEvaluationFailures
+            expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: Prometheus rule evaluation is failing
+              description: Prometheus reported rule evaluation failures during the last five minutes.
+          - alert: UnoArenaAlertmanagerNotificationFailures
+            expr: increase(alertmanager_notifications_failed_total[5m]) > 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: Alertmanager notification delivery is failing
+              description: Alertmanager failed to deliver one or more notifications during the last five minutes.
+          - alert: UnoArenaRedisExporterDown
+            expr: redis_up{job="redis-exporter"} == 0
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: Redis exporter cannot scrape Redis
+              description: The Redis exporter has reported redis_up=0 for two minutes.
+          - alert: UnoArenaRedisMemoryPressure
+            expr: redis_memory_max_bytes > 0 and redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: Redis memory usage exceeds 85 percent
+              description: Redis is approaching its explicit maxmemory boundary.
+          - alert: UnoArenaRedisEvictions
+            expr: increase(redis_evicted_keys_total[10m]) > 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: Redis is evicting keys
+              description: Redis evicted keys during the last ten minutes; validate projection and cache budgets.

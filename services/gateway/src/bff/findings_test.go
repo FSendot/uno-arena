@@ -796,7 +796,6 @@ func TestFinding_HTTPSpectatorGate_ForwardsInviteAndOperator(t *testing.T) {
 	}
 	ok, _, err := gate.Admit(context.Background(), bff.SpectatorAdmitRequest{
 		RoomID:           "room_priv",
-		Token:            "tok",
 		Principal:        principal,
 		InviteCapability: "invite-opaque",
 		Correlation:      correlation.Headers{CorrelationID: "c1"},
@@ -807,8 +806,8 @@ func TestFinding_HTTPSpectatorGate_ForwardsInviteAndOperator(t *testing.T) {
 	if gotInvite != "invite-opaque" {
 		t.Fatalf("X-Room-Invite=%q", gotInvite)
 	}
-	if gotAuth != "Bearer tok" {
-		t.Fatalf("Authorization=%q", gotAuth)
+	if gotAuth != "" {
+		t.Fatalf("validated client bearer must not be forwarded, Authorization=%q", gotAuth)
 	}
 	if gotBody["authorized"] != nil {
 		t.Fatalf("must not send blanket authorized: %+v", gotBody)

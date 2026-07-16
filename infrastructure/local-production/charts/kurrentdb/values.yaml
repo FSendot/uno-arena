@@ -1,0 +1,6 @@
+image:
+  repository: kurrentplatform/kurrentdb:26.0.3-experimental-arm64-10.0-noble
+  digest: sha256:8498556a8ba7a74f8d4ea31a149b1e5216e167d6884b630a68b3e1eb9e6e870e
+  architecture: arm64
+storageClassName: uno-arena-local-retain
+storage: 5Gi

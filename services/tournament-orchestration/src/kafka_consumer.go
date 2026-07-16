@@ -20,6 +20,11 @@ type ConsumerRecord struct {
 	Value     []byte
 }
 
+type topicPartition struct {
+	Topic     string
+	Partition int32
+}
+
 // DLQFailureMeta is sanitized operational metadata published with a DLQ record.
 type DLQFailureMeta struct {
 	Consumer        string
@@ -204,39 +209,46 @@ func (c *MatchCompletedKafkaConsumer) Run(ctx context.Context) error {
 	}
 }
 
-// ProcessBatch applies records with bounded partition concurrency. Offsets within
-// each partition remain strictly serial; unrelated partitions may progress in parallel.
+// ProcessBatch applies records with bounded topic-partition concurrency. Kafka
+// offsets are ordered only within a topic partition; equal partition numbers on
+// different topics are independent.
 func (c *MatchCompletedKafkaConsumer) ProcessBatch(ctx context.Context, recs []ConsumerRecord) error {
 	if len(recs) == 0 {
 		return nil
 	}
-	byPartition := map[int32][]ConsumerRecord{}
-	var partitions []int32
+	byTopicPartition := map[topicPartition][]ConsumerRecord{}
+	var topicPartitions []topicPartition
 	for _, rec := range recs {
-		if _, ok := byPartition[rec.Partition]; !ok {
-			partitions = append(partitions, rec.Partition)
+		key := topicPartition{Topic: rec.Topic, Partition: rec.Partition}
+		if _, ok := byTopicPartition[key]; !ok {
+			topicPartitions = append(topicPartitions, key)
 		}
-		byPartition[rec.Partition] = append(byPartition[rec.Partition], rec)
+		byTopicPartition[key] = append(byTopicPartition[key], rec)
 	}
-	sort.Slice(partitions, func(i, j int) bool { return partitions[i] < partitions[j] })
+	sort.Slice(topicPartitions, func(i, j int) bool {
+		if topicPartitions[i].Topic != topicPartitions[j].Topic {
+			return topicPartitions[i].Topic < topicPartitions[j].Topic
+		}
+		return topicPartitions[i].Partition < topicPartitions[j].Partition
+	})
 
 	maxWorkers := c.cfg.MaxPartitionWorkers
 	if maxWorkers < 1 {
 		maxWorkers = defaultMatchCompletedPartitionWorkers
 	}
-	if maxWorkers > len(partitions) {
-		maxWorkers = len(partitions)
+	if maxWorkers > len(topicPartitions) {
+		maxWorkers = len(topicPartitions)
 	}
 
 	batchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sem := make(chan struct{}, maxWorkers)
-	errCh := make(chan error, len(partitions))
+	errCh := make(chan error, len(topicPartitions))
 	var wg sync.WaitGroup
 
-	for _, p := range partitions {
-		group := byPartition[p]
+	for _, key := range topicPartitions {
+		group := byTopicPartition[key]
 		sort.Slice(group, func(i, j int) bool { return group[i].Offset < group[j].Offset })
 		wg.Add(1)
 		go func(group []ConsumerRecord) {

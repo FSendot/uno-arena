@@ -1,4 +1,5 @@
 replicaCount: 1
+principalKeyVersion: keyring-v1
 
 image:
   repository: registry.gitlab.com/group/uno-arena/room-gameplay
@@ -14,12 +15,18 @@ telemetry:
 env:
   SERVICE_NAME: room-gameplay
   GATEWAY_URL: http://gateway:8080
-  IDENTITY_URL: http://identity:8080
   SPECTATOR_VIEW_URL: http://spectator-view:8080
   RANKING_URL: http://ranking:8080
   ANALYTICS_URL: http://analytics:8080
   TOURNAMENT_URL: http://tournament-orchestration:8080
   GAME_INTEGRITY_URL: http://game-integrity:8080
+  GAME_INTEGRITY_HTTP_TIMEOUT_MILLIS: "3000"
+  ROOM_INTERNAL_PRINCIPAL_ISSUER: unoarena.identity
+  ROOM_INTERNAL_PRINCIPAL_AUDIENCE: unoarena.room-gameplay
+  ROOM_INTERNAL_PRINCIPAL_MAX_TTL_SECONDS: "20"
+  ROOM_INTERNAL_PRINCIPAL_FUTURE_SKEW_SECONDS: "5"
+  ROOM_INTERNAL_PRINCIPAL_CURRENT_KEY_ID: key-current
+  ROOM_INTERNAL_PRINCIPAL_PREVIOUS_KEY_ID: key-previous
   REDIS_URL: redis://redis:6379/2
   KAFKA_BROKERS: kafka:9092
   # Durable mode when DATABASE_URL is set (secret). Capability mode remains
@@ -39,6 +46,16 @@ integrityReconciler:
   claimBatch: 32
   leaseSeconds: 60
   intervalMillis: 2000
+
+# Bounded retention for disposable Room player-feed Redis Streams. Postgres is
+# authoritative; clients whose resume marker was trimmed recover via snapshot.
+playerStreamCompactor:
+  enabled: false
+  maxLen: 1024
+  pageSize: 100
+  trimLimit: 4096
+  intervalMillis: 30000
+  operationTimeoutMillis: 5000
 
 # Durable Kubernetes topology: the stable router and leaderless controller are
 # deployments; active Rooms are controller-created bare Pods only.
@@ -86,7 +103,9 @@ existingSecret: room-gameplay-secrets
 # Cross-chart equality (secret *values* must match; keys stay chart-local — no hardcoded secrets):
 #   room-service-credential          == gateway gateway-room-service-credential (Gateway→Room)
 #   room-to-gateway-credential       == gateway gateway-room-credential (Room→Gateway)
-#   room-identity-credential         == identity identity-internal-credential (Room→Identity)
+#   internal-principal-hmac-key-current == Identity's active signer key
+#   internal-principal-hmac-key-previous == prior signer key during rotation overlap
+# Room never receives a client/provider bearer and no longer calls Identity per mutation.
 #   spectator-view-internal-credential == spectator-view chart (Room→Spectator)
 #   ranking-internal-credential      == ranking chart (Room→Ranking)
 #   analytics-room-credential        == analytics chart (Room↔Analytics pair)
@@ -107,8 +126,8 @@ secretEnv:
   ROOM_ANALYTICS_BACKFILL_CURSOR_SECRET: room-analytics-backfill-cursor-secret
   ROOM_PUBLIC_LIST_CURSOR_SECRET: room-public-list-cursor-secret
   GATEWAY_SERVICE_CREDENTIAL: room-to-gateway-credential
-  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
-  ROOM_IDENTITY_CREDENTIAL: room-identity-credential
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT: internal-principal-hmac-key-current
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS: internal-principal-hmac-key-previous
   SPECTATOR_VIEW_SERVICE_CREDENTIAL: spectator-view-internal-credential
   RANKING_SERVICE_CREDENTIAL: ranking-internal-credential
   ANALYTICS_SERVICE_CREDENTIAL: analytics-room-credential
@@ -126,7 +145,8 @@ controllerSecretEnv:
   DATABASE_URL: database-url
 runtimeSecretEnv:
   ROOM_RUNTIME_ROUTER_CREDENTIAL: room-runtime-router-credential
-  IDENTITY_SERVICE_CREDENTIAL: room-identity-credential
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT: internal-principal-hmac-key-current
+  ROOM_INTERNAL_PRINCIPAL_HMAC_KEY_PREVIOUS: internal-principal-hmac-key-previous
   GAME_INTEGRITY_INTERNAL_CREDENTIAL: game-integrity-internal-credential
   GAME_INTEGRITY_AUDIT_CREDENTIAL: game-integrity-audit-credential
   ROOM_PGBOUNCER_URL: room-pgbouncer-database-url
@@ -143,3 +163,42 @@ healthProbes:
   periodSeconds: 10
   timeoutSeconds: 1
   failureThreshold: 3
+
+# Primary HTTP API rollout contract. Workers/controllers keep their chart-specific
+# fixed scaling and are never targeted by the API HPA.
+rollout:
+  maxUnavailable: 0
+  maxSurge: 1
+
+startupProbe:
+  enabled: true
+  path: /ready
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+preStop:
+  enabled: true
+  sleepSeconds: 5
+
+terminationGracePeriodSeconds: 30
+
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector: {}
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+# Attached to every workload ServiceAccount rendered by this chart.
+imagePullSecrets: []

@@ -4,6 +4,8 @@
   (dict "name" "loki" "selector" "loki" "ports" (list (dict "name" "http" "port" 3100)))
   (dict "name" "tempo" "selector" "tempo" "ports" (list (dict "name" "http" "port" 3200) (dict "name" "otlp-grpc" "port" 4317) (dict "name" "otlp-http" "port" 4318)))
   (dict "name" "prometheus" "selector" "prometheus" "ports" (list (dict "name" "http" "port" 9090)))
+  (dict "name" "alertmanager" "selector" "alertmanager" "ports" (list (dict "name" "http" "port" 9093)))
+  (dict "name" "redis-exporter" "selector" "redis-exporter" "ports" (list (dict "name" "http" "port" 9121)))
   (dict "name" "kube-state-metrics" "selector" "kube-state-metrics" "ports" (list (dict "name" "http" "port" 8080)))
   (dict "name" "grafana" "selector" "grafana" "ports" (list (dict "name" "http" "port" 3000)))
 }}
@@ -24,4 +26,17 @@ spec:
       targetPort: {{ $port.name }}
     {{- end }}
 {{- end }}
-
+{{- if .Values.alertmanager.webhookSink.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-webhook-sink
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: alert-webhook-sink}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: alert-webhook-sink}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+{{- end }}

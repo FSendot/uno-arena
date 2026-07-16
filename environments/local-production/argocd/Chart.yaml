@@ -1,0 +1,6 @@
+apiVersion: v2
+name: uno-arena-local-production-root
+description: Self-managing Argo CD root for the long-lived local production simulator
+type: application
+version: 0.1.0
+appVersion: "1"

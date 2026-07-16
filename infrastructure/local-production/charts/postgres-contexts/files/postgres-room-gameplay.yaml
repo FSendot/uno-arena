@@ -1,0 +1,106 @@
+# Disposable single-instance Postgres for Room Gameplay. No HA/PVC/backup claim.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-room-gameplay
+  namespace: uno-arena
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    app.kubernetes.io/name: postgres-room-gameplay
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/context: room-gameplay
+    uno-arena.local/non-production: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres-room-gameplay
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-room-gameplay
+  namespace: uno-arena
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    app.kubernetes.io/name: postgres-room-gameplay
+    app.kubernetes.io/part-of: uno-arena
+    uno-arena.local/context: room-gameplay
+    uno-arena.local/non-production: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-room-gameplay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-room-gameplay
+        app.kubernetes.io/part-of: uno-arena
+        uno-arena.local/context: room-gameplay
+    spec:
+      serviceAccountName: postgres-room-gameplay
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: {{ .Values.image.repository }}@{{ required "image.digest is required" .Values.image.digest }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-c"
+            - "wal_level=logical"
+            - "-c"
+            - "max_replication_slots=8"
+            - "-c"
+            - "max_wal_senders=8"
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: room-admin-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-credentials
+                  key: room-admin-password
+            - name: POSTGRES_DB
+              value: room_gameplay
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "room_admin", "-d", "room_gameplay"]
+            initialDelaySeconds: 3
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "room_admin", "-d", "room_gameplay"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-room-gameplay-data

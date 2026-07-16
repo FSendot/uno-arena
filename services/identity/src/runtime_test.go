@@ -73,6 +73,20 @@ func TestWireIdentityRuntimeRejectsCapabilityMemoryInProduction(t *testing.T) {
 	}
 }
 
+func TestIdentityPrincipalSignerFailsClosedWithoutDurableKey(t *testing.T) {
+	t.Setenv("IDENTITY_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT", "")
+	t.Setenv("IDENTITY_INTERNAL_PRINCIPAL_ACTIVE_KEY_ID", "")
+	if _, err := identityPrincipalSigner("production", false); err == nil {
+		t.Fatal("durable signer must reject a missing HMAC key")
+	}
+	t.Setenv("IDENTITY_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT", "production-principal-key-at-least-32-bytes")
+	t.Setenv("IDENTITY_INTERNAL_PRINCIPAL_ACTIVE_KEY_ID", "key-2026-07")
+	t.Setenv("IDENTITY_INTERNAL_PRINCIPAL_TTL_SECONDS", "61")
+	if _, err := identityPrincipalSigner("production", false); err == nil {
+		t.Fatal("signer must reject a proof TTL above the shared maximum")
+	}
+}
+
 func TestMisconfiguredServerHealthOKReady503NoPanic(t *testing.T) {
 	srv := serverFromRuntime(identityRuntime{
 		mode:        "misconfigured",

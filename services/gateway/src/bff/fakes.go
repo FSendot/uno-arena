@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"unoarena/shared/audit"
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
+	"unoarena/shared/internalprincipal"
 )
 
 var (
@@ -21,12 +23,14 @@ var (
 
 // FakeIdentity is an injectable in-memory Identity client for offline/tests.
 type FakeIdentity struct {
-	mu       sync.Mutex
-	tokens   map[string]Principal // token -> principal
-	users    map[string]string    // username -> password
-	nextID   int
-	FailNext bool
-	LastCorr correlation.Headers
+	mu                sync.Mutex
+	tokens            map[string]Principal // token -> principal
+	users             map[string]string    // username -> password
+	nextID            int
+	FailNext          bool
+	LastCorr          correlation.Headers
+	AuthorizeCalls    int
+	LastAuthorization CommandAuthorization
 }
 
 // NewFakeIdentity creates an empty fake identity client.
@@ -56,10 +60,10 @@ func (f *FakeIdentity) Register(_ context.Context, username, password string, co
 	defer f.mu.Unlock()
 	f.LastCorr = corr
 	if username == "" || password == "" {
-		return RegisterResult{}, errors.New("username and password required")
+		return RegisterResult{}, &httpStatusError{status: http.StatusBadRequest, body: `{"code":"bad_request"}`}
 	}
 	if _, exists := f.users[username]; exists {
-		return RegisterResult{}, errors.New("username taken")
+		return RegisterResult{}, &httpStatusError{status: http.StatusConflict, body: `{"code":"username_taken"}`}
 	}
 	f.users[username] = password
 	return RegisterResult{Status: "ok", Username: username}, nil
@@ -112,6 +116,24 @@ func (f *FakeIdentity) ValidateSession(_ context.Context, token string, corr cor
 	p, ok := f.tokens[token]
 	if !ok {
 		return Principal{}, ErrUnauthorized
+	}
+	return p, nil
+}
+
+func (f *FakeIdentity) AuthorizeCommand(ctx context.Context, token string, authorization CommandAuthorization, corr correlation.Headers) (Principal, error) {
+	p, err := f.ValidateSession(ctx, token, corr)
+	if err != nil {
+		return Principal{}, err
+	}
+	f.mu.Lock()
+	f.AuthorizeCalls++
+	f.LastAuthorization = authorization
+	f.mu.Unlock()
+	if authorization.BoundedContext == internalprincipal.DefaultRoomAudience && p.InternalProof == "" {
+		p.InternalProof = "fake-room-command-proof"
+	}
+	if authorization.BoundedContext != internalprincipal.DefaultRoomAudience {
+		p.InternalProof = ""
 	}
 	return p, nil
 }

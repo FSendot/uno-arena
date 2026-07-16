@@ -1,0 +1,450 @@
+# Strict transport plus workload-scoped L4 allowlists. Multiple ALLOW policies
+# for one workload are additive; the metrics policy therefore adds Prometheus
+# without broadening application port 8080.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: uno-arena
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: observability
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: application-metrics-from-prometheus
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      unoarena.io/metrics-exposed: "true"
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/observability/sa/prometheus
+      to:
+        - operation:
+            ports: ["9090"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: gateway-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/uno-arena-gateway-istio
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: identity-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: identity
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: room-gameplay-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: room-gameplay
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-provisioning-worker
+              - cluster.local/ns/uno-arena/sa/spectator-view-projection-rebuilder
+              - cluster.local/ns/uno-arena/sa/analytics-projection-rebuilder
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: spectator-view-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: spectator-view
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: ranking-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: ranking
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/analytics-projection-rebuilder
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: analytics-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: analytics
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tournament-orchestration-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: tournament-orchestration
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/analytics-projection-rebuilder
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: game-integrity-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: game-integrity
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/room-gameplay-integrity-reconciler
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: postgres-identity-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-identity
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/identity
+              - cluster.local/ns/uno-arena/sa/context-bootstrap
+              - cluster.local/ns/uno-arena/sa/debezium-connect
+      to:
+        - operation:
+            ports: ["5432"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: postgres-room-gameplay-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-room-gameplay
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime-controller
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/room-gameplay-timer-worker
+              - cluster.local/ns/uno-arena/sa/room-gameplay-integrity-reconciler
+              - cluster.local/ns/uno-arena/sa/room-gameplay-player-stream-compactor
+              - cluster.local/ns/uno-arena/sa/context-bootstrap
+              - cluster.local/ns/uno-arena/sa/debezium-connect
+              - cluster.local/ns/uno-arena/sa/debezium-server
+      to:
+        - operation:
+            ports: ["5432"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: postgres-tournament-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-tournament
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-provisioning-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-seeding-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-completion-worker
+              - cluster.local/ns/uno-arena/sa/context-bootstrap
+              - cluster.local/ns/uno-arena/sa/debezium-connect
+      to:
+        - operation:
+            ports: ["5432"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: postgres-ranking-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-ranking
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/ranking
+              - cluster.local/ns/uno-arena/sa/ranking-leaderboard-snapshotter
+              - cluster.local/ns/uno-arena/sa/context-bootstrap
+              - cluster.local/ns/uno-arena/sa/debezium-connect
+      to:
+        - operation:
+            ports: ["5432"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: redis-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/identity
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/room-gameplay-timer-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-provisioning-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-seeding-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-completion-worker
+              - cluster.local/ns/uno-arena/sa/ranking
+              - cluster.local/ns/uno-arena/sa/ranking-leaderboard-snapshotter
+              - cluster.local/ns/uno-arena/sa/spectator-view
+              - cluster.local/ns/uno-arena/sa/spectator-view-projection-rebuilder
+              - cluster.local/ns/uno-arena/sa/debezium-server
+      to:
+        - operation:
+            ports: ["6379"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: kafka-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/gateway
+              - cluster.local/ns/uno-arena/sa/identity
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/room-gameplay-timer-worker
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime-controller
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-provisioning-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-seeding-worker
+              - cluster.local/ns/uno-arena/sa/tournament-orchestration-completion-worker
+              - cluster.local/ns/uno-arena/sa/ranking
+              - cluster.local/ns/uno-arena/sa/ranking-leaderboard-snapshotter
+              - cluster.local/ns/uno-arena/sa/spectator-view
+              - cluster.local/ns/uno-arena/sa/spectator-view-projection-rebuilder
+              - cluster.local/ns/uno-arena/sa/analytics
+              - cluster.local/ns/uno-arena/sa/analytics-projection-rebuilder
+              - cluster.local/ns/uno-arena/sa/debezium-connect
+              - cluster.local/ns/uno-arena/sa/kafka-bootstrap
+      to:
+        - operation:
+            ports: ["9092"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: kurrentdb-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kurrentdb
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/game-integrity
+      to:
+        - operation:
+            ports: ["2113"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: clickhouse-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/analytics
+              - cluster.local/ns/uno-arena/sa/analytics-projection-rebuilder
+              - cluster.local/ns/uno-arena/sa/context-bootstrap
+      to:
+        - operation:
+            ports: ["8123"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: keycloak-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/identity
+      to:
+        - operation:
+            ports: ["8080"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: debezium-connect-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: debezium-connect
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/debezium-connect-registrar
+      to:
+        - operation:
+            ports: ["8083"]

@@ -3,7 +3,6 @@ replicaCount: 1
 env:
   DEPLOYMENT_ENV: staging
   GATEWAY_URL: http://gateway.uno-arena.svc.cluster.local:8080
-  IDENTITY_URL: http://identity.uno-arena.svc.cluster.local:8080
   SPECTATOR_VIEW_URL: http://spectator-view.uno-arena.svc.cluster.local:8080
   RANKING_URL: http://ranking.uno-arena.svc.cluster.local:8080
   ANALYTICS_URL: http://analytics.uno-arena.svc.cluster.local:8080

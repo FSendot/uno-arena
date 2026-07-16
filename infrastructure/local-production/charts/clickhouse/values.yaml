@@ -1,0 +1,5 @@
+image:
+  repository: clickhouse/clickhouse-server:26.6.1.1193
+  digest: sha256:1d1f6508eba2dccce2cee9913907c5f7766327debc57a6b1991f2c9e3176c163
+storageClassName: uno-arena-local-retain
+storage: 5Gi

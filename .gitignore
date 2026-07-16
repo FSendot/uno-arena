@@ -3,3 +3,4 @@ builds/
 .env
 __pycache__/
 *.py[cod]
+*.crt

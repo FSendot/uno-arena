@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,8 +23,26 @@ import (
 )
 
 const (
-	defaultGatewayBackendHTTPTimeout = 5 * time.Second
-	maxGatewayBackendHTTPTimeout     = 30 * time.Second
+	defaultGatewayBackendHTTPTimeout           = 5 * time.Second
+	maxGatewayBackendHTTPTimeout               = 30 * time.Second
+	defaultGatewayBackendConnectTimeout        = time.Second
+	maxGatewayBackendConnectTimeout            = 10 * time.Second
+	defaultGatewayBackendResponseHeaderTimeout = 4 * time.Second
+	maxGatewayBackendResponseHeaderTimeout     = 20 * time.Second
+	defaultGatewayBackendIdleConnTimeout       = 90 * time.Second
+	maxGatewayBackendIdleConnTimeout           = 5 * time.Minute
+	defaultGatewayCircuitFailureThreshold      = 5
+	maxGatewayCircuitFailureThreshold          = 100
+	defaultGatewayCircuitOpenTimeout           = 30 * time.Second
+	maxGatewayCircuitOpenTimeout               = 5 * time.Minute
+	defaultGatewayServerReadHeaderTimeout      = 5 * time.Second
+	maxGatewayServerReadHeaderTimeout          = 30 * time.Second
+	defaultGatewayServerReadTimeout            = 15 * time.Second
+	maxGatewayServerReadTimeout                = time.Minute
+	defaultGatewayServerIdleTimeout            = 2 * time.Minute
+	maxGatewayServerIdleTimeout                = 10 * time.Minute
+	defaultGatewayServerMaxHeaderBytes         = 1 << 20
+	maxGatewayServerMaxHeaderBytes             = 2 << 20
 )
 
 func main() {
@@ -69,7 +88,7 @@ func runGateway() error {
 
 	built.startWorkers(rootCtx)
 
-	httpSrv := &http.Server{Addr: addr, Handler: gatewayHTTPHandler(telemetryRuntime, built.server.Handler())}
+	httpSrv := newGatewayHTTPServer(addr, gatewayHTTPHandler(telemetryRuntime, built.server.Handler()), cfg)
 	errCh := make(chan error, 1)
 	go func() {
 		telemetryRuntime.Logger.InfoContext(rootCtx, "gateway started", "event", "service_started", "addr", addr,
@@ -103,33 +122,43 @@ func runGateway() error {
 }
 
 type gatewayConfig struct {
-	IdentityURL                 string
-	RoomURL                     string
-	TournamentURL               string
-	SpectatorURL                string
-	RankingURL                  string
-	AnalyticsURL                string
-	ServiceCredential           string // generic outbound fallback (GATEWAY_SERVICE_CREDENTIAL)
-	IdentityServiceCredential   string // outbound Gateway→Identity
-	RoomServiceCredential       string // outbound Gateway→Room
-	TournamentServiceCredential string // outbound Gateway→Tournament
-	SpectatorServiceCredential  string // outbound Gateway→Spectator
-	IdentityProducerCredential  string // inbound: Identity session-invalidation producer
-	RoomProducerCredential      string // inbound: Room player-private / spectator-safe / room-terminal
-	SpectatorProducerCredential string // inbound: Spectator projection / spectator-stream only
-	AuditLogPath                string
-	RedisURL                    string
-	PlayerFeedRedisURL          string
-	SpectatorRedisURL           string
-	SpectatorRedisKeyPrefix     string
-	BackendHTTPTimeout          time.Duration
-	SessionInvalidationTTL      time.Duration
-	EdgeRateLimit               int
-	EdgeRateWindow              time.Duration
-	PrincipalRateLimit          int
-	PrincipalRateWindow         time.Duration
-	AllowFakes                  bool
-	CapabilityMode              bool
+	IdentityURL                  string
+	RoomURL                      string
+	TournamentURL                string
+	SpectatorURL                 string
+	RankingURL                   string
+	AnalyticsURL                 string
+	ServiceCredential            string // generic outbound fallback (GATEWAY_SERVICE_CREDENTIAL)
+	IdentityServiceCredential    string // outbound Gateway→Identity
+	RoomServiceCredential        string // outbound Gateway→Room
+	TournamentServiceCredential  string // outbound Gateway→Tournament
+	SpectatorServiceCredential   string // outbound Gateway→Spectator
+	IdentityProducerCredential   string // inbound: Identity session-invalidation producer
+	RoomProducerCredential       string // inbound: Room player-private / spectator-safe / room-terminal
+	SpectatorProducerCredential  string // inbound: Spectator projection / spectator-stream only
+	AuditLogPath                 string
+	RedisURL                     string
+	PlayerFeedRedisURL           string
+	SpectatorRedisURL            string
+	SpectatorRedisKeyPrefix      string
+	BackendHTTPTimeout           time.Duration
+	BackendConnectTimeout        time.Duration
+	BackendResponseHeaderTimeout time.Duration
+	BackendIdleConnTimeout       time.Duration
+	CircuitFailureThreshold      int
+	CircuitOpenTimeout           time.Duration
+	ServerReadHeaderTimeout      time.Duration
+	ServerReadTimeout            time.Duration
+	ServerIdleTimeout            time.Duration
+	ServerMaxHeaderBytes         int
+	SessionInvalidationTTL       time.Duration
+	EdgeRateLimit                int
+	EdgeRateWindow               time.Duration
+	PrincipalRateLimit           int
+	PrincipalRateWindow          time.Duration
+	TrustedProxyCIDRs            []string
+	AllowFakes                   bool
+	CapabilityMode               bool
 }
 
 func loadGatewayConfig() gatewayConfig {
@@ -165,40 +194,50 @@ func loadGatewayConfig() gatewayConfig {
 		specOut = svcCred
 	}
 	return gatewayConfig{
-		IdentityURL:                 strings.TrimSpace(os.Getenv("IDENTITY_URL")),
-		RoomURL:                     strings.TrimSpace(firstEnv("ROOM_GAMEPLAY_URL", "ROOM_URL")),
-		TournamentURL:               strings.TrimSpace(firstEnv("TOURNAMENT_URL", "TOURNAMENT_ORCHESTRATION_URL")),
-		SpectatorURL:                strings.TrimSpace(firstEnv("SPECTATOR_VIEW_URL", "SPECTATOR_URL")),
-		RankingURL:                  strings.TrimSpace(os.Getenv("RANKING_URL")),
-		AnalyticsURL:                strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
-		ServiceCredential:           svcCred,
-		IdentityServiceCredential:   identOut,
-		RoomServiceCredential:       roomOut,
-		TournamentServiceCredential: tourOut,
-		SpectatorServiceCredential:  specOut,
-		IdentityProducerCredential:  identCred,
-		RoomProducerCredential:      roomCred,
-		SpectatorProducerCredential: specCred,
-		AuditLogPath:                strings.TrimSpace(os.Getenv("GATEWAY_AUDIT_LOG_PATH")),
-		RedisURL:                    strings.TrimSpace(os.Getenv("REDIS_URL")),
-		PlayerFeedRedisURL:          strings.TrimSpace(os.Getenv("GATEWAY_PLAYER_FEED_REDIS_URL")),
-		SpectatorRedisURL:           strings.TrimSpace(os.Getenv("GATEWAY_SPECTATOR_REDIS_URL")),
-		SpectatorRedisKeyPrefix:     strings.TrimSpace(os.Getenv("GATEWAY_SPECTATOR_REDIS_KEY_PREFIX")),
-		BackendHTTPTimeout:          envDurationMax("GATEWAY_BACKEND_HTTP_TIMEOUT", defaultGatewayBackendHTTPTimeout, maxGatewayBackendHTTPTimeout),
-		SessionInvalidationTTL:      envDuration("GATEWAY_SESSION_INVALIDATION_TTL", store.DefaultSessionInvalidationTTL),
-		EdgeRateLimit:               envInt("GATEWAY_EDGE_RATE_LIMIT", 1000),
-		EdgeRateWindow:              envDuration("GATEWAY_EDGE_RATE_WINDOW", time.Minute),
-		PrincipalRateLimit:          envInt("GATEWAY_PRINCIPAL_RATE_LIMIT", 1000),
-		PrincipalRateWindow:         envDuration("GATEWAY_PRINCIPAL_RATE_WINDOW", time.Minute),
-		AllowFakes:                  envTruthy("GATEWAY_ALLOW_FAKES") || envTruthy("ALLOW_FAKES"),
-		CapabilityMode:              envTruthy("GATEWAY_CAPABILITY_MODE"),
+		IdentityURL:                  strings.TrimSpace(os.Getenv("IDENTITY_URL")),
+		RoomURL:                      strings.TrimSpace(firstEnv("ROOM_GAMEPLAY_URL", "ROOM_URL")),
+		TournamentURL:                strings.TrimSpace(firstEnv("TOURNAMENT_URL", "TOURNAMENT_ORCHESTRATION_URL")),
+		SpectatorURL:                 strings.TrimSpace(firstEnv("SPECTATOR_VIEW_URL", "SPECTATOR_URL")),
+		RankingURL:                   strings.TrimSpace(os.Getenv("RANKING_URL")),
+		AnalyticsURL:                 strings.TrimSpace(os.Getenv("ANALYTICS_URL")),
+		ServiceCredential:            svcCred,
+		IdentityServiceCredential:    identOut,
+		RoomServiceCredential:        roomOut,
+		TournamentServiceCredential:  tourOut,
+		SpectatorServiceCredential:   specOut,
+		IdentityProducerCredential:   identCred,
+		RoomProducerCredential:       roomCred,
+		SpectatorProducerCredential:  specCred,
+		AuditLogPath:                 strings.TrimSpace(os.Getenv("GATEWAY_AUDIT_LOG_PATH")),
+		RedisURL:                     strings.TrimSpace(os.Getenv("REDIS_URL")),
+		PlayerFeedRedisURL:           strings.TrimSpace(os.Getenv("GATEWAY_PLAYER_FEED_REDIS_URL")),
+		SpectatorRedisURL:            strings.TrimSpace(os.Getenv("GATEWAY_SPECTATOR_REDIS_URL")),
+		SpectatorRedisKeyPrefix:      strings.TrimSpace(os.Getenv("GATEWAY_SPECTATOR_REDIS_KEY_PREFIX")),
+		BackendHTTPTimeout:           envDurationMax("GATEWAY_BACKEND_HTTP_TIMEOUT", defaultGatewayBackendHTTPTimeout, maxGatewayBackendHTTPTimeout),
+		BackendConnectTimeout:        envDurationMax("GATEWAY_BACKEND_CONNECT_TIMEOUT", defaultGatewayBackendConnectTimeout, maxGatewayBackendConnectTimeout),
+		BackendResponseHeaderTimeout: envDurationMax("GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT", defaultGatewayBackendResponseHeaderTimeout, maxGatewayBackendResponseHeaderTimeout),
+		BackendIdleConnTimeout:       envDurationMax("GATEWAY_BACKEND_IDLE_CONN_TIMEOUT", defaultGatewayBackendIdleConnTimeout, maxGatewayBackendIdleConnTimeout),
+		CircuitFailureThreshold:      envIntMax("GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", defaultGatewayCircuitFailureThreshold, maxGatewayCircuitFailureThreshold),
+		CircuitOpenTimeout:           envDurationMax("GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT", defaultGatewayCircuitOpenTimeout, maxGatewayCircuitOpenTimeout),
+		ServerReadHeaderTimeout:      envDurationMax("GATEWAY_SERVER_READ_HEADER_TIMEOUT", defaultGatewayServerReadHeaderTimeout, maxGatewayServerReadHeaderTimeout),
+		ServerReadTimeout:            envDurationMax("GATEWAY_SERVER_READ_TIMEOUT", defaultGatewayServerReadTimeout, maxGatewayServerReadTimeout),
+		ServerIdleTimeout:            envDurationMax("GATEWAY_SERVER_IDLE_TIMEOUT", defaultGatewayServerIdleTimeout, maxGatewayServerIdleTimeout),
+		ServerMaxHeaderBytes:         envIntMax("GATEWAY_SERVER_MAX_HEADER_BYTES", defaultGatewayServerMaxHeaderBytes, maxGatewayServerMaxHeaderBytes),
+		SessionInvalidationTTL:       envDuration("GATEWAY_SESSION_INVALIDATION_TTL", store.DefaultSessionInvalidationTTL),
+		EdgeRateLimit:                envInt("GATEWAY_EDGE_RATE_LIMIT", 1000),
+		EdgeRateWindow:               envDuration("GATEWAY_EDGE_RATE_WINDOW", time.Minute),
+		PrincipalRateLimit:           envInt("GATEWAY_PRINCIPAL_RATE_LIMIT", 1000),
+		PrincipalRateWindow:          envDuration("GATEWAY_PRINCIPAL_RATE_WINDOW", time.Minute),
+		TrustedProxyCIDRs:            splitCommaSeparated(os.Getenv("GATEWAY_TRUSTED_PROXY_CIDRS")),
+		AllowFakes:                   envTruthy("GATEWAY_ALLOW_FAKES") || envTruthy("ALLOW_FAKES"),
+		CapabilityMode:               envTruthy("GATEWAY_CAPABILITY_MODE"),
 	}
 }
 
 // StaticReady reports whether the gateway may advertise static readiness without Redis.
 // GATEWAY_ALLOW_FAKES is isolated fake-backend demo. GATEWAY_CAPABILITY_MODE
-// uses real HTTP backends with bounded in-memory limiters; /ready still probes
-// upstreams. Configured durable mode requires Redis rate-limit + LiveFeed adapters.
+// uses real HTTP backends with bounded in-memory limiters. Configured durable
+// mode requires Redis rate-limit + LiveFeed adapters.
 func (c gatewayConfig) StaticReady() bool {
 	return c.AllowFakes || c.CapabilityMode
 }
@@ -296,6 +335,10 @@ func buildGatewayRuntimeWithHTTPClient(cfg gatewayConfig, httpClient *http.Clien
 }
 
 func buildGatewayRuntimeWithTelemetry(cfg gatewayConfig, httpClient *http.Client, instrumentation gatewayClientInstrumentation) (*gatewayRuntime, error) {
+	clientIPResolver, err := bff.NewTrustedProxyClientIPResolver(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("trusted proxy configuration: %w", err)
+	}
 	auditSink, err := openAuditSink(cfg.AuditLogPath, instrumentation.audit)
 	if err != nil {
 		return nil, fmt.Errorf("audit sink: %w", err)
@@ -320,6 +363,7 @@ func buildGatewayRuntimeWithTelemetry(cfg gatewayConfig, httpClient *http.Client
 				Ready:                       true,
 				EdgeLimiter:                 bff.NewMemoryRateLimiter(1000, time.Minute),
 				PrincipalLimiter:            bff.NewMemoryRateLimiter(1000, time.Minute),
+				ClientIPResolver:            clientIPResolver,
 			}),
 			mode: "demo-fakes",
 		}, nil
@@ -328,8 +372,7 @@ func buildGatewayRuntimeWithTelemetry(cfg gatewayConfig, httpClient *http.Client
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
-	identity, room, tournament, spectator, reads := wireGatewayHTTPClients(cfg, httpClient)
-	probes := buildUpstreamProbes(cfg, httpClient)
+	identity, room, tournament, spectator, reads := wireGatewayHTTPClients(cfg, httpClient, instrumentation.breaker)
 
 	if cfg.CapabilityMode {
 		// Capability must ignore Kafka env entirely.
@@ -349,16 +392,16 @@ func buildGatewayRuntimeWithTelemetry(cfg gatewayConfig, httpClient *http.Client
 				RoomProducerCredential:      cfg.RoomProducerCredential,
 				SpectatorProducerCredential: cfg.SpectatorProducerCredential,
 				Ready:                       true,
-				UpstreamProbes:              probes,
 				EdgeLimiter:                 bff.NewMemoryRateLimiter(1000, time.Minute),
 				PrincipalLimiter:            bff.NewMemoryRateLimiter(1000, time.Minute),
+				ClientIPResolver:            clientIPResolver,
 			}),
 			mode: "capability",
 		}, nil
 	}
 
 	if cfg.durableRedisConfigured() {
-		return buildDurableRedisRuntime(cfg, identity, room, tournament, spectator, reads, auditSink, probes, instrumentation)
+		return buildDurableRedisRuntime(cfg, identity, room, tournament, spectator, reads, auditSink, clientIPResolver, instrumentation)
 	}
 
 	hub := bff.NewHub()
@@ -379,9 +422,9 @@ func buildGatewayRuntimeWithTelemetry(cfg gatewayConfig, httpClient *http.Client
 			Ready:                       cfg.StaticReady(),
 			NotReadyReason:              cfg.notReadyReason(),
 			RedisAdapterBlocked:         cfg.redisAdapterBlocked(),
-			UpstreamProbes:              probes,
 			EdgeLimiter:                 bff.AllowAll{},
 			PrincipalLimiter:            bff.AllowAll{},
+			ClientIPResolver:            clientIPResolver,
 		}),
 		mode: "http-backends",
 	}, nil
@@ -395,7 +438,7 @@ func buildDurableRedisRuntime(
 	spectator bff.SpectatorGate,
 	reads bff.ReadModelClient,
 	auditSink bff.AuditSink,
-	probes []bff.UpstreamProbe,
+	clientIPResolver bff.ClientIPResolver,
 	instrumentation gatewayClientInstrumentation,
 ) (*gatewayRuntime, error) {
 	rateRDB, err := store.NewRedisFromURL(cfg.RedisURL)
@@ -493,9 +536,9 @@ func buildDurableRedisRuntime(
 		RedisReady:                  redisReady,
 		WorkerReady:                 rt.workerReady,
 		SessionInvalidation:         &httpSessionInvalidationBridge{store: siStore},
-		UpstreamProbes:              probes,
 		EdgeLimiter:                 edge,
 		PrincipalLimiter:            principal,
+		ClientIPResolver:            clientIPResolver,
 	})
 	return rt, nil
 }
@@ -704,15 +747,28 @@ func (l *sessionInvalidationSubLifecycle) Healthy() bool {
 	return l.healthy.Load()
 }
 
-func wireGatewayHTTPClients(cfg gatewayConfig, httpClient *http.Client) (
+func wireGatewayHTTPClients(cfg gatewayConfig, httpClient *http.Client, observers ...bff.CircuitObserver) (
 	bff.IdentityClient, bff.RoomClient, bff.TournamentClient, bff.SpectatorGate, bff.ReadModelClient,
 ) {
+	var observer bff.CircuitObserver
+	if len(observers) > 0 {
+		observer = observers[0]
+	}
+	breakerConfig := bff.CircuitBreakerConfig{
+		FailureThreshold: cfg.CircuitFailureThreshold,
+		OpenTimeout:      cfg.CircuitOpenTimeout,
+		Observer:         observer,
+	}
+	clientFor := func(upstream string) *http.Client {
+		return bff.NewCircuitBreakingHTTPClient(httpClient, upstream, breakerConfig)
+	}
+
 	var identity bff.IdentityClient = bff.ClosedIdentity{}
 	if cfg.IdentityURL != "" {
 		identity = bff.NewHTTPIdentityClient(bff.HTTPClientConfig{
 			BaseURL:           cfg.IdentityURL,
 			ServiceCredential: cfg.IdentityServiceCredential,
-			HTTPClient:        httpClient,
+			HTTPClient:        clientFor("identity"),
 		})
 	}
 
@@ -721,7 +777,7 @@ func wireGatewayHTTPClients(cfg gatewayConfig, httpClient *http.Client) (
 		room = bff.NewHTTPRoomClient(bff.HTTPClientConfig{
 			BaseURL:           cfg.RoomURL,
 			ServiceCredential: cfg.RoomServiceCredential,
-			HTTPClient:        httpClient,
+			HTTPClient:        clientFor("room"),
 		})
 	}
 
@@ -730,7 +786,7 @@ func wireGatewayHTTPClients(cfg gatewayConfig, httpClient *http.Client) (
 		tournament = bff.NewHTTPTournamentClient(bff.HTTPClientConfig{
 			BaseURL:           cfg.TournamentURL,
 			ServiceCredential: cfg.TournamentServiceCredential,
-			HTTPClient:        httpClient,
+			HTTPClient:        clientFor("tournament"),
 		})
 	}
 
@@ -739,15 +795,49 @@ func wireGatewayHTTPClients(cfg gatewayConfig, httpClient *http.Client) (
 		spectator = bff.NewHTTPSpectatorGate(bff.HTTPClientConfig{
 			BaseURL:           cfg.SpectatorURL,
 			ServiceCredential: cfg.SpectatorServiceCredential,
-			HTTPClient:        httpClient,
+			HTTPClient:        clientFor("spectator"),
 		})
 	}
 
 	var reads bff.ReadModelClient = bff.ClosedReads{}
 	if cfg.RankingURL != "" || cfg.AnalyticsURL != "" {
-		reads = bff.NewHTTPReadModelClient(cfg.RankingURL, cfg.AnalyticsURL, httpClient)
+		reads = bff.NewHTTPReadModelClientWithClients(
+			cfg.RankingURL,
+			cfg.AnalyticsURL,
+			clientFor("ranking"),
+			clientFor("analytics"),
+		)
 	}
 	return identity, room, tournament, spectator, reads
+}
+
+func newGatewayBackendTransport(cfg gatewayConfig) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   cfg.BackendConnectTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.ResponseHeaderTimeout = cfg.BackendResponseHeaderTimeout
+	transport.IdleConnTimeout = cfg.BackendIdleConnTimeout
+	transport.TLSHandshakeTimeout = cfg.BackendConnectTimeout
+	transport.ExpectContinueTimeout = time.Second
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 16
+	return transport
+}
+
+func newGatewayHTTPServer(addr string, handler http.Handler, cfg gatewayConfig) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.ServerReadHeaderTimeout,
+		ReadTimeout:       cfg.ServerReadTimeout,
+		IdleTimeout:       cfg.ServerIdleTimeout,
+		MaxHeaderBytes:    cfg.ServerMaxHeaderBytes,
+		// SSE responses are intentionally unbounded. A non-zero WriteTimeout would
+		// terminate healthy streams; connection lifetime policy belongs at the edge.
+		WriteTimeout: 0,
+	}
 }
 
 func openAuditSink(path string, handler ...slog.Handler) (bff.AuditSink, error) {
@@ -760,40 +850,6 @@ func openAuditSink(path string, handler ...slog.Handler) (bff.AuditSink, error) 
 	return bff.OpenJSONLAudit(path)
 }
 
-func buildUpstreamProbes(cfg gatewayConfig, client *http.Client) []bff.UpstreamProbe {
-	do := func(ctx context.Context, method, url string) (int, error) {
-		req, err := http.NewRequestWithContext(ctx, method, url, nil)
-		if err != nil {
-			return 0, err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return 0, err
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode, nil
-	}
-	out := make([]bff.UpstreamProbe, 0, 6)
-	add := func(name, base string) {
-		base = strings.TrimRight(strings.TrimSpace(base), "/")
-		if base == "" {
-			return
-		}
-		out = append(out, bff.UpstreamProbe{
-			Name: name,
-			URL:  base + "/ready",
-			Do:   do,
-		})
-	}
-	add("identity", cfg.IdentityURL)
-	add("room", cfg.RoomURL)
-	add("tournament", cfg.TournamentURL)
-	add("spectator", cfg.SpectatorURL)
-	add("ranking", cfg.RankingURL)
-	add("analytics", cfg.AnalyticsURL)
-	return out
-}
-
 func firstEnv(keys ...string) string {
 	for _, k := range keys {
 		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
@@ -801,6 +857,16 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitCommaSeparated(raw string) []string {
+	var values []string
+	for _, value := range strings.Split(raw, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func envTruthy(key string) bool {
@@ -815,6 +881,14 @@ func envInt(key string, def int) int {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 {
+		return def
+	}
+	return n
+}
+
+func envIntMax(key string, def, max int) int {
+	n := envInt(key, def)
+	if n > max {
 		return def
 	}
 	return n

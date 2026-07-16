@@ -11,13 +11,33 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"unoarena/services/gateway/bff"
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
+	"unoarena/shared/internalprincipal"
 )
+
+type countingLimiter struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (l *countingLimiter) Allow(_ context.Context, key string) (bool, time.Duration, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keys = append(l.keys, key)
+	return true, 0, nil
+}
+
+func (l *countingLimiter) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.keys)
+}
 
 type harness struct {
 	srv        *bff.Server
@@ -112,6 +132,40 @@ func TestRouting_CreateRoomToRoomBackend(t *testing.T) {
 	}
 	if res.Status != envelope.StatusAccepted || res.Type != "CreateRoom" {
 		t.Fatalf("result=%+v", res)
+	}
+}
+
+func TestCommandAuthorizationOccursAfterDecodeAndUsesResolvedBoundedContext(t *testing.T) {
+	h := newHarness(t)
+	invalid := []byte(`{"commandId":"bad","type":"PlayCard","schemaVersion":1,"payload":{}}`)
+	w := h.do(http.MethodPost, "/v1/rooms/room-1/commands", invalid, h.authHeaders())
+	if w.Code != http.StatusBadRequest || h.identity.AuthorizeCalls != 0 {
+		t.Fatalf("invalid envelope status=%d authorizeCalls=%d body=%s", w.Code, h.identity.AuthorizeCalls, w.Body.String())
+	}
+
+	room := []byte(`{"commandId":"room-cmd","type":"PlayCard","expectedSequenceNumber":0,"schemaVersion":1,"payload":{"roomId":"room-1","cardId":"c1"}}`)
+	w = h.do(http.MethodPost, "/v1/rooms/room-1/commands", room, h.authHeaders())
+	if w.Code != http.StatusOK || h.identity.AuthorizeCalls != 1 {
+		t.Fatalf("room status=%d authorizeCalls=%d body=%s", w.Code, h.identity.AuthorizeCalls, w.Body.String())
+	}
+	authorization := h.identity.LastAuthorization
+	if authorization.BoundedContext != internalprincipal.DefaultRoomAudience || authorization.RoomID != "room-1" || authorization.Command.CommandID != "room-cmd" || authorization.Command.ExpectedSequenceNumber == nil || *authorization.Command.ExpectedSequenceNumber != 0 {
+		t.Fatalf("room authorization=%+v", authorization)
+	}
+	if got := h.room.Dispatched[0].Principal.InternalProof; got == "" {
+		t.Fatal("Room dispatch omitted command proof")
+	}
+
+	tournament := []byte(`{"commandId":"tour-cmd","type":"CreateTournament","schemaVersion":1,"payload":{"tournamentId":"t1"}}`)
+	w = h.do(http.MethodPost, "/v1/commands", tournament, h.authHeaders())
+	if w.Code != http.StatusOK || h.identity.AuthorizeCalls != 2 {
+		t.Fatalf("tournament status=%d authorizeCalls=%d body=%s", w.Code, h.identity.AuthorizeCalls, w.Body.String())
+	}
+	if h.identity.LastAuthorization.BoundedContext != internalprincipal.TournamentContext {
+		t.Fatalf("tournament authorization=%+v", h.identity.LastAuthorization)
+	}
+	if got := h.tournament.Dispatched[0].Principal.InternalProof; got != "" {
+		t.Fatalf("Room proof leaked to Tournament: %q", got)
 	}
 }
 
@@ -367,6 +421,18 @@ func TestAuth_RegisterLoginWhoami(t *testing.T) {
 	who := h.do(http.MethodGet, "/v1/auth/whoami", nil, map[string]string{"Authorization": "Bearer " + loginBody["token"]})
 	if who.Code != http.StatusOK {
 		t.Fatalf("whoami=%d %s", who.Code, who.Body.String())
+	}
+}
+
+func TestAuth_DuplicateRegistrationPreservesSafeClientError(t *testing.T) {
+	h := newHarness(t)
+	body := []byte(`{"username":"bob","password":"secret"}`)
+	if first := h.do(http.MethodPost, "/v1/auth/register", body, nil); first.Code != http.StatusOK {
+		t.Fatalf("first=%d %s", first.Code, first.Body.String())
+	}
+	duplicate := h.do(http.MethodPost, "/v1/auth/register", body, nil)
+	if duplicate.Code != http.StatusBadRequest || !strings.Contains(duplicate.Body.String(), `"code":"username_taken"`) {
+		t.Fatalf("duplicate=%d %s", duplicate.Code, duplicate.Body.String())
 	}
 }
 
@@ -918,6 +984,53 @@ func TestRateLimit_EdgeRejectsBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestRateLimit_AllPublicRoutesAreChargedExactlyOnce(t *testing.T) {
+	limiter := &countingLimiter{}
+	srv := bff.NewServer(bff.Dependencies{Ready: true, EdgeLimiter: limiter})
+	for _, path := range []string{"/v1", "/v1/auth/whoami", "/v1/rankings/leaderboards", "/v1/not-a-route"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "192.0.2.10:4321"
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if got := limiter.count(); got != 4 {
+		t.Fatalf("edge limiter calls=%d want exactly one per public request", got)
+	}
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if got := limiter.count(); got != 4 {
+		t.Fatalf("readiness must not consume edge quota: %d", got)
+	}
+}
+
+func TestRegisterIdentityFailureIsSafeBadGateway(t *testing.T) {
+	srv := bff.NewServer(bff.Dependencies{Ready: true, Identity: bff.ClosedIdentity{}})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/register", bytes.NewBufferString(`{"username":"alice","password":"secret"}`))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway || strings.Contains(w.Body.String(), "not configured") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegisterMapsStructuredIdentityRejectionWithoutLeakingMessage(t *testing.T) {
+	identity := bff.NewHTTPIdentityClient(bff.HTTPClientConfig{
+		BaseURL: "http://identity.test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusConflict,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"username_taken","message":"database SECRET"}`)),
+			}, nil
+		})},
+	})
+	srv := bff.NewServer(bff.Dependencies{Ready: true, Identity: identity})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/register", bytes.NewBufferString(`{"username":"alice","password":"secret"}`))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"username_taken"`) || strings.Contains(w.Body.String(), "SECRET") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestRateLimit_PrincipalRejectsBeforeDispatch(t *testing.T) {
 	identity := bff.NewFakeIdentity()
 	room := bff.NewFakeRoom()
@@ -1034,6 +1147,15 @@ func TestReady_FailsWhenNotConfigured(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d", w.Code)
+	}
+}
+
+func TestReady_GatesExactPublicAPIRoot(t *testing.T) {
+	srv := bff.NewServer(bff.Dependencies{Ready: false})
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"not_ready"`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -1274,4 +1396,63 @@ func TestOpenAPI_CreateRoomMaxSeatsContractShape(t *testing.T) {
 	if !strings.Contains(section, "default to 10") {
 		t.Fatal("maxSeats description must document default 10 for nonpositive")
 	}
+}
+
+func TestOpenAPI_PublicRoutesDeclareCentral503AndCommandErrorVariants(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(root, "contracts", "openapi", "bff-v1.yaml"))
+	if err != nil {
+		t.Fatalf("read openapi: %v", err)
+	}
+	text := string(raw)
+	publicPaths := []string{
+		"/v1/auth/register", "/v1/auth/login", "/v1/auth/whoami", "/v1/auth/logout",
+		"/v1/commands", "/v1/rooms", "/v1/rooms/{roomId}/commands",
+		"/v1/rooms/{roomId}/snapshot", "/v1/spectator/rooms/{roomId}/snapshot",
+		"/v1/streams/player", "/v1/streams/spectator", "/v1/streams/control",
+		"/v1/rankings/leaderboards", "/v1/tournaments/{tournamentId}/bracket",
+		"/v1/tournaments/{tournamentId}/standings",
+		"/v1/tournaments/{tournamentId}/players/{playerId}/assignment", "/v1/analytics/public",
+	}
+	for _, path := range publicPaths {
+		section := openAPIPathSection(t, text, path)
+		if !regexp.MustCompile(`(?m)^        "503":`).MatchString(section) {
+			t.Errorf("%s must declare the centralized readiness/rate-limiter 503", path)
+		}
+	}
+	for _, path := range []string{"/v1/commands", "/v1/rooms/{roomId}/commands"} {
+		section := openAPIPathSection(t, text, path)
+		for _, status := range []string{"404", "413", "422"} {
+			if !strings.Contains(section, `        "`+status+`":`) {
+				t.Errorf("%s must declare mapped ErrorBody status %s", path, status)
+			}
+		}
+		conflictStart := strings.Index(section, `        "409":`)
+		conflictEnd := strings.Index(section, `        "413":`)
+		if conflictStart < 0 || conflictEnd <= conflictStart {
+			t.Fatalf("%s has malformed 409 response section", path)
+		}
+		conflict := section[conflictStart:conflictEnd]
+		if !strings.Contains(conflict, "oneOf:") || !strings.Contains(conflict, "CommandResult") || !strings.Contains(conflict, "ErrorBody") {
+			t.Errorf("%s 409 must preserve CommandResult and admit mapped ErrorBody conflicts", path)
+		}
+	}
+}
+
+func openAPIPathSection(t *testing.T, document, path string) string {
+	t.Helper()
+	marker := "\n  " + path + ":\n"
+	start := strings.Index(document, marker)
+	if start < 0 {
+		t.Fatalf("OpenAPI path %s missing", path)
+	}
+	start += len(marker)
+	end := strings.Index(document[start:], "\n  /")
+	if end < 0 {
+		end = strings.Index(document[start:], "\ncomponents:")
+	}
+	if end < 0 {
+		t.Fatalf("OpenAPI path %s has no section boundary", path)
+	}
+	return document[start : start+end]
 }

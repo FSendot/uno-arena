@@ -1,0 +1,6 @@
+apiVersion: v2
+name: debezium-connect
+description: Kafka Connect CDC workers and idempotent connector registration
+type: application
+version: 0.1.0
+appVersion: "3.6.0.Final"

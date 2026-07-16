@@ -83,6 +83,9 @@ type CommandInput struct {
 	ExpectedSequenceNumber *int64
 	CorrelationID          string
 	AsSystem               bool
+	// PrincipalVerified marks a player command whose signed Identity principal
+	// was verified at the Room HTTP boundary.
+	PrincipalVerified bool
 	// RuntimeGeneration is non-zero only for a dedicated state-machine pod.
 	// Capability mode deliberately remains process-local and leaves it unset.
 	RuntimeGeneration int64
@@ -941,6 +944,9 @@ func (s *Service) validateSession(ctx context.Context, in CommandInput) error {
 	// Player commands require both identifiers unless explicitly trusted as system.
 	if in.SessionID == "" || in.PlayerID == "" {
 		return errors.New("session and player required")
+	}
+	if in.PrincipalVerified {
+		return nil
 	}
 	return s.deps.SessionsV.Validate(ctx, in.SessionID, in.PlayerID)
 }

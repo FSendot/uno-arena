@@ -145,7 +145,7 @@ type HTTPGameIntegrity struct {
 // NewHTTPGameIntegrity constructs a Room→GI append/replay adapter.
 func NewHTTPGameIntegrity(baseURL, credential string, client *http.Client) *HTTPGameIntegrity {
 	if client == nil {
-		client = http.DefaultClient
+		client = NewIntegrityHTTPClient(DefaultIntegrityHTTPTimeout)
 	}
 	return &HTTPGameIntegrity{BaseURL: strings.TrimRight(baseURL, "/"), Credential: credential, Client: client}
 }
@@ -168,7 +168,7 @@ type resMeta struct {
 // NewHTTPDealSource constructs a Room→GI DealSource adapter.
 func NewHTTPDealSource(baseURL, credential string, client *http.Client) *HTTPDealSource {
 	if client == nil {
-		client = http.DefaultClient
+		client = NewIntegrityHTTPClient(DefaultIntegrityHTTPTimeout)
 	}
 	return &HTTPDealSource{
 		BaseURL:    strings.TrimRight(baseURL, "/"),

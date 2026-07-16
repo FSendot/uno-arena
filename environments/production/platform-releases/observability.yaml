@@ -1,0 +1,38 @@
+schemaVersion: 1
+component: observability
+environment: production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-production-observability
+stage: "40-observability"
+destinationNamespace: observability
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: uno-arena-observability
+  version: 0.1.0
+values:
+  storage:
+    s3:
+      endpoint: https://object-storage.example.invalid
+      region: replace-before-release
+      forcePathStyle: false
+      insecure: false
+      existingSecret: uno-arena-observability-s3
+      lokiBucket: replace-before-release-loki
+      tempoBucket: replace-before-release-tempo
+  alertmanager:
+    receiver:
+      existingSecret: uno-arena-observability-alertmanager
+      externalSecret:
+        enabled: true
+        secretStoreRef: {kind: ClusterSecretStore, name: production-secrets}
+        remoteKey: uno-arena/production
+        remoteProperty: alertmanager-webhook-url
+    webhookSink: {enabled: false}
+  grafana: {existingAdminSecret: uno-arena-observability-grafana}
+  redisExporter:
+    address: ""
+    existingSecret: platform-endpoints
+    addressKey: redis-url
+  productionPreflight:
+    redis: {enabled: true}

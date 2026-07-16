@@ -29,6 +29,19 @@ spec:
         unoarena.io/metrics-scrape: pod
         unoarena.io/metrics-exposed: "true"
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-seeding-worker
+      {{- end }}
       serviceAccountName: {{ .Release.Name }}-seeding-worker
       automountServiceAccountToken: false
       containers:

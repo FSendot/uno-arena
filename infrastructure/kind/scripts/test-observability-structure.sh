@@ -34,6 +34,12 @@ grep -Fq 'get job/minio-create-observability-buckets' "${SCRIPT_DIR}/wait.sh" ||
   echo "shared readiness must tolerate the completed bucket job TTL" >&2
   exit 1
 }
+for workload in alertmanager redis-exporter alert-webhook-sink; do
+  grep -Fq "deployment/${workload}" "${SCRIPT_DIR}/wait-observability.sh" || {
+    echo "observability wait missing ${workload}" >&2
+    exit 1
+  }
+done
 for file in "${acceptance[@]}"; do
   grep -Fq "${file}" "${SCRIPT_DIR}/run-live-probes.sh" || { echo "missing acceptance probe ${file}" >&2; exit 1; }
 done
@@ -66,6 +72,26 @@ for contract in \
   '--action-interval "${bot_action_interval}"' \
   'client-checkpoint/bin/unoarena'; do
   grep -Fq -- "${contract}" "${business}" || { echo "business proof missing ${contract}" >&2; exit 1; }
+done
+live="${SCRIPT_DIR}/test-observability-live.sh"
+for contract in \
+  'uno-arena-services uno-arena-workers' \
+  '/v1/rooms?limit=1' \
+  'http_server_request_duration_seconds_count{job="uno-arena-services",service="gateway"}' \
+  'http_server_request_duration_seconds_bucket{job="uno-arena-services",service="gateway"}' \
+  'unoarena:http_requests:rate5m{service="gateway"}' \
+  'unoarena:http_request_duration_seconds:p95_5m{service="gateway"}' \
+  'uno-arena-red-recording' \
+  'uno-arena-service-alerts' \
+  'uno-arena-observability-alerts' \
+  'UnoArenaWebhookDeliveryProbe' \
+  'deployment/alert-webhook-sink' \
+  'POST /alerts?receiver=kind HTTP/1.1" 204' \
+  'Worker health here is scrape availability' \
+  'api-http-red=gateway' \
+  'worker-scrape=up' \
+  'alert-delivery=204'; do
+  grep -Fq -- "${contract}" "${live}" || { echo "observability live proof missing ${contract}" >&2; exit 1; }
 done
 grep -Fq 'OTEL_TRACES_SAMPLER: x_parentbased_mutations' \
   "${ROOT}/services/gateway/helm/gateway/values.kind.yaml" || {

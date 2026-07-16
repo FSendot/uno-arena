@@ -8,6 +8,19 @@ storage:
     lokiBucket: ""
     tempoBucket: ""
 
+alertmanager:
+  receiver:
+    existingSecret: uno-arena-observability-alertmanager
+    externalSecret:
+      enabled: true
+      secretStoreRef:
+        kind: ClusterSecretStore
+        name: production-secrets
+      remoteKey: uno-arena-production-observability
+      remoteProperty: alertmanager-webhook-url
+  webhookSink:
+    enabled: false
+
 grafana:
   existingAdminSecret: uno-arena-observability-grafana
 
@@ -16,3 +29,16 @@ prometheus:
   evaluationInterval: 30s
   scrapeTimeout: 10s
 
+# Production consumes the shared external Redis TLS/auth endpoint contract.
+# Local lanes retain the in-cluster address from the base values.
+redisExporter:
+  address: ""
+  existingSecret: platform-endpoints
+  addressKey: redis-url
+
+productionPreflight:
+  redis:
+    enabled: true
+
+postSyncEvidence:
+  enabled: true

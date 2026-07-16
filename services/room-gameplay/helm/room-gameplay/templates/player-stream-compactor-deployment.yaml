@@ -1,0 +1,108 @@
+{{- if .Values.playerStreamCompactor.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-player-stream-compactor
+  labels:
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+automountServiceAccountToken: false
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+# Fixed-scale cleanup for disposable Room player-feed Redis history. It pages
+# authoritative Postgres high-water metadata; Redis eviction is never correctness.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-player-stream-compactor
+  labels:
+    app: {{ .Release.Name }}-player-stream-compactor
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+    unoarena.io/component: room-player-stream-compactor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-player-stream-compactor
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-player-stream-compactor
+        app.kubernetes.io/name: room-gameplay
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+        unoarena.io/component: room-player-stream-compactor
+        unoarena.io/metrics-scrape: pod
+        unoarena.io/metrics-exposed: "true"
+    spec:
+      serviceAccountName: {{ .Release.Name }}-player-stream-compactor
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-player-stream-compactor
+      {{- end }}
+      containers:
+        - name: player-stream-compactor
+          image: {{ include "room-gameplay.image" . | quote }}
+          imagePullPolicy: {{ include "room-gameplay.imagePullPolicy" . }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "room-gameplay.telemetryEnv" (dict "root" . "component" "room-player-stream-compactor") | nindent 12 }}
+            - name: WORKER_ROLE
+              value: "room-player-stream-compactor"
+            - name: SERVICE_NAME
+              value: {{ .Values.env.SERVICE_NAME | quote }}
+            - name: DEPLOYMENT_ENV
+              value: {{ .Values.env.DEPLOYMENT_ENV | default "" | quote }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            - name: ROOM_DB_POOL_MAX_CONNS
+              value: "1"
+            - name: ROOM_PLAYER_STREAM_MAXLEN
+              value: {{ .Values.playerStreamCompactor.maxLen | quote }}
+            - name: ROOM_PLAYER_STREAM_COMPACTOR_PAGE_SIZE
+              value: {{ .Values.playerStreamCompactor.pageSize | quote }}
+            - name: ROOM_PLAYER_STREAM_TRIM_LIMIT
+              value: {{ .Values.playerStreamCompactor.trimLimit | quote }}
+            - name: ROOM_PLAYER_STREAM_COMPACTOR_INTERVAL_MILLIS
+              value: {{ .Values.playerStreamCompactor.intervalMillis | quote }}
+            - name: ROOM_PLAYER_STREAM_OPERATION_TIMEOUT_MILLIS
+              value: {{ .Values.playerStreamCompactor.operationTimeoutMillis | quote }}
+            {{- if .Values.existingSecret }}
+            - name: ROOM_PGBOUNCER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ .Values.secretEnv.ROOM_PGBOUNCER_URL | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

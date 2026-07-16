@@ -1,0 +1,4 @@
+gitRepoURL: ""
+helmRepoURL: ""
+revision: main
+foundationPath: infrastructure/local-production/gitops/foundation

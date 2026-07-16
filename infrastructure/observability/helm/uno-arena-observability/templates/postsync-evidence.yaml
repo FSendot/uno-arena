@@ -1,0 +1,138 @@
+{{- if .Values.postSyncEvidence.enabled }}
+{{- $name := "uno-arena-observability-postsync-evidence" -}}
+{{- $ns := include "uno-observability.namespace" . -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/component: deployment-evidence
+    unoarena.io/evidence: postsync
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.postSyncEvidence.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/component: deployment-evidence
+        unoarena.io/evidence: postsync
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        {{- include "uno-observability.podSecurityContext" . | nindent 8 }}
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+        - name: evidence
+          image: {{ .Values.images.prometheus | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              gateway="http://gateway.{{ .Values.applicationNamespace }}.svc.cluster.local:8080"
+              prometheus="http://prometheus.{{ $ns }}.svc.cluster.local:9090"
+              alertmanager="http://alertmanager.{{ $ns }}.svc.cluster.local:9093"
+              poll_interval={{ .Values.postSyncEvidence.pollIntervalSeconds }}
+
+              die() { echo "evidence failed: $*" >&2; exit 1; }
+              greater_than() { awk -v current="$1" -v baseline="$2" 'BEGIN { exit !(current > baseline) }'; }
+              prom_scalar() {
+                body="$(wget -qO- "$prometheus/api/v1/query?query=$1")" || return 1
+                value="$(printf '%s' "$body" | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*\[[^,]*,[[:space:]]*"\([^"]*\)".*/\1/p')"
+                case "$value" in ""|NaN|+Inf|-Inf) return 1 ;; esac
+                printf '%s\n' "$value"
+              }
+              alert_metrics() {
+                body="$(wget -qO- "$alertmanager/metrics")" || return 1
+                printf '%s' "$body" | awk '
+                  $1 == "alertmanager_notifications_total" || index($1, "alertmanager_notifications_total{") == 1 { total += $2 }
+                  $1 == "alertmanager_notifications_failed_total" || index($1, "alertmanager_notifications_failed_total{") == 1 { failed += $2 }
+                  END { print total + 0, failed + 0 }
+                '
+              }
+
+              gateway_ready=false
+              attempt=1
+              while [ "$attempt" -le {{ .Values.postSyncEvidence.gatewayWaitAttempts }} ]; do
+                if wget -qO- "$gateway/health" >/dev/null && wget -qO- "$gateway/v1/rooms?limit=1" >/dev/null; then
+                  gateway_ready=true
+                  break
+                fi
+                sleep "$poll_interval"
+                attempt=$((attempt + 1))
+              done
+              [ "$gateway_ready" = true ] || die "Gateway health and real request did not succeed"
+
+              red_ready=false
+              attempt=1
+              while [ "$attempt" -le {{ .Values.postSyncEvidence.evidenceWaitAttempts }} ]; do
+                if value="$(prom_scalar 'sum%28unoarena%3Ahttp_requests%3Arate5m%7Bservice%3D%22gateway%22%7D%29')" && greater_than "$value" 0; then
+                  red_ready=true
+                  break
+                fi
+                sleep "$poll_interval"
+                attempt=$((attempt + 1))
+              done
+              [ "$red_ready" = true ] || die "Gateway API HTTP RED recording output remained empty"
+
+              metrics="$(alert_metrics)" || die "Alertmanager metrics unavailable"
+              set -- $metrics
+              notifications_before="$1"
+              failures_before="$2"
+              evidence_id="$(date -u +%s)-$$"
+              evidence_service="postsync-evidence-$evidence_id"
+              alert_active=false
+              resolve_alert() {
+                status=$?
+                trap - EXIT INT TERM
+                if [ "$alert_active" = true ]; then
+                  ends_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  resolved="$(printf '[{"labels":{"alertname":"UnoArenaPostSyncEvidence","severity":"info","service":"%s","evidence_id":"%s"},"annotations":{"summary":"Argo PostSync observability evidence"},"endsAt":"%s"}]' "$evidence_service" "$evidence_id" "$ends_at")"
+                  wget -qO- --header='Content-Type: application/json' --post-data="$resolved" "$alertmanager/api/v2/alerts" >/dev/null 2>&1 || true
+                fi
+                exit "$status"
+              }
+              trap resolve_alert EXIT INT TERM
+              payload="$(printf '[{"labels":{"alertname":"UnoArenaPostSyncEvidence","severity":"info","service":"%s","evidence_id":"%s"},"annotations":{"summary":"Argo PostSync observability evidence"}}]' "$evidence_service" "$evidence_id")"
+              wget -qO- --header='Content-Type: application/json' --post-data="$payload" "$alertmanager/api/v2/alerts" >/dev/null || die "synthetic alert injection failed"
+              alert_active=true
+
+              alert_seen=false
+              notification_observed=false
+              attempt=1
+              while [ "$attempt" -le {{ .Values.postSyncEvidence.evidenceWaitAttempts }} ]; do
+                if alerts="$(wget -qO- "$alertmanager/api/v2/alerts")" && printf '%s' "$alerts" | grep -Fq "$evidence_id"; then
+                  alert_seen=true
+                fi
+                metrics="$(alert_metrics)" || die "Alertmanager metrics unavailable during delivery poll"
+                set -- $metrics
+                notifications_now="$1"
+                failures_now="$2"
+                if greater_than "$failures_now" "$failures_before"; then
+                  die "Alertmanager notification failures increased"
+                fi
+                if [ "$alert_seen" = true ] && greater_than "$notifications_now" "$notifications_before"; then
+                  notification_observed=true
+                  break
+                fi
+                sleep "$poll_interval"
+                attempt=$((attempt + 1))
+              done
+              [ "$alert_seen" = true ] || die "uniquely labeled synthetic alert was not active"
+              [ "$notification_observed" = true ] || die "Alertmanager notification total did not increase"
+              echo "ok postsync-observability-evidence id=$evidence_id api-http-red=gateway notification=delivered"
+          securityContext:
+            {{- include "uno-observability.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 65534
+            runAsGroup: 65534
+          resources: {{- toYaml .Values.resources.postSyncEvidence | nindent 12 }}
+{{- end }}

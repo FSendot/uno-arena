@@ -24,6 +24,15 @@ env:
   RANKING_URL: http://ranking:8080
   ANALYTICS_URL: http://analytics:8080
   GATEWAY_BACKEND_HTTP_TIMEOUT: "5s"
+  GATEWAY_BACKEND_CONNECT_TIMEOUT: "1s"
+  GATEWAY_BACKEND_RESPONSE_HEADER_TIMEOUT: "4s"
+  GATEWAY_BACKEND_IDLE_CONN_TIMEOUT: "90s"
+  GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
+  GATEWAY_CIRCUIT_BREAKER_OPEN_TIMEOUT: "30s"
+  GATEWAY_SERVER_READ_HEADER_TIMEOUT: "5s"
+  GATEWAY_SERVER_READ_TIMEOUT: "15s"
+  GATEWAY_SERVER_IDLE_TIMEOUT: "2m"
+  GATEWAY_SERVER_MAX_HEADER_BYTES: "1048576"
   REDIS_URL: redis://redis:6379/0
   # Base architecture mode: do not set GATEWAY_ALLOW_FAKES / GATEWAY_CAPABILITY_MODE.
   # Durable Redis requires REDIS_URL (rate-limit DB) plus GATEWAY_PLAYER_FEED_REDIS_URL
@@ -31,6 +40,11 @@ env:
   # must set those URLs (and digests) for /ready to pass; Kafka SessionInvalidated is
   # required in durable configured mode (KAFKA_BROKERS). Room realtime player feeds
   # arrive via Debezium Server → Redis Streams (Gateway XREAD).
+
+# Immediate proxy source networks allowed to supply Forwarded/X-Forwarded-For.
+# Leave empty when Gateway is reached directly. Environment owners must keep this
+# narrower than the general workload network.
+trustedProxyCIDRs: []
 
 # Credentials via existingSecret + secretKeyRef (never inline secrets).
 # Cross-chart equality (secret *values* must match; keys stay chart-local):
@@ -68,3 +82,42 @@ healthProbes:
   periodSeconds: 10
   timeoutSeconds: 1
   failureThreshold: 3
+
+# Primary HTTP API rollout contract. Workers/controllers keep their chart-specific
+# fixed scaling and are never targeted by the API HPA.
+rollout:
+  maxUnavailable: 0
+  maxSurge: 1
+
+startupProbe:
+  enabled: true
+  path: /ready
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+preStop:
+  enabled: true
+  sleepSeconds: 5
+
+terminationGracePeriodSeconds: 30
+
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector: {}
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+# Attached to every workload ServiceAccount rendered by this chart.
+imagePullSecrets: []

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: redis
+description: Durable single-replica Redis AOF for local production
+type: application
+version: 0.1.0
+appVersion: "8.8.0"

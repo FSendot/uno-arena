@@ -1,0 +1,13 @@
+{{- range $context := list "identity" "room-gameplay" "tournament" "ranking" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-{{ $context }}
+  namespace: uno-arena
+automountServiceAccountToken: false
+---
+{{- end }}
+{{- range $file := list "postgres-identity.yaml" "postgres-room-gameplay.yaml" "postgres-tournament.yaml" "postgres-ranking.yaml" }}
+{{ tpl ($.Files.Get (printf "files/%s" $file)) $ }}
+---
+{{- end }}

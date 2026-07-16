@@ -92,6 +92,34 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: grafana-red-dashboard
+  namespace: {{ include "uno-observability.namespace" . }}
+  labels:
+    {{- include "uno-observability.labels" . | nindent 4 }}
+data:
+  red.json: |
+    {
+      "uid": "uno-arena-red",
+      "title": "Uno Arena - API HTTP RED",
+      "editable": false,
+      "schemaVersion": 39,
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {
+        "list": [
+          {"name": "service", "type": "query", "datasource": {"uid": "prometheus", "type": "prometheus"}, "query": {"query": "label_values(unoarena:http_requests:rate5m, service)", "refId": "service"}, "includeAll": true, "multi": true}
+        ]
+      },
+      "panels": [
+        {"id": 1, "type": "timeseries", "title": "Request rate", "datasource": {"uid": "prometheus", "type": "prometheus"}, "targets": [{"expr": "sum by (service) (unoarena:http_requests:rate5m{service=~\"$service\"})", "legendFormat": "{{ "{{" }}service{{ "}}" }}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "reqps"}}, "gridPos": {"x": 0, "y": 0, "w": 8, "h": 8}},
+        {"id": 2, "type": "timeseries", "title": "5xx ratio", "datasource": {"uid": "prometheus", "type": "prometheus"}, "targets": [{"expr": "max by (service) (unoarena:http_error_ratio:rate5m{service=~\"$service\"})", "legendFormat": "{{ "{{" }}service{{ "}}" }}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0}}, "gridPos": {"x": 8, "y": 0, "w": 8, "h": 8}},
+        {"id": 3, "type": "timeseries", "title": "HTTP p95 latency", "datasource": {"uid": "prometheus", "type": "prometheus"}, "targets": [{"expr": "max by (service) (unoarena:http_request_duration_seconds:p95_5m{service=~\"$service\"})", "legendFormat": "{{ "{{" }}service{{ "}}" }}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "s", "min": 0}}, "gridPos": {"x": 16, "y": 0, "w": 8, "h": 8}},
+        {"id": 4, "type": "table", "title": "Down scrape targets (APIs and workers)", "datasource": {"uid": "prometheus", "type": "prometheus"}, "targets": [{"expr": "up == 0", "instant": true, "format": "table", "refId": "A"}], "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8}}
+      ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: grafana-cluster-dashboard
   namespace: {{ include "uno-observability.namespace" . }}
   labels:

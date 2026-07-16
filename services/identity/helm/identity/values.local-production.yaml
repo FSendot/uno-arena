@@ -1,0 +1,47 @@
+# Simulator overlay: render after values.production.yaml. Local Keycloak uses
+# in-cluster HTTP; this profile remains non-production in the application guard.
+env:
+  DEPLOYMENT_ENV: local-production
+  OIDC_ISSUER_URL: http://keycloak.uno-arena.svc.cluster.local:8080/realms/unoarena
+  OIDC_TOKEN_ENDPOINT: http://keycloak.uno-arena.svc.cluster.local:8080/realms/unoarena/protocol/openid-connect/token
+  OIDC_AUDIENCE: unoarena-cli
+  OIDC_CLIENT_ID: unoarena-cli
+  OIDC_ALLOW_HTTP: "true"
+  IDENTITY_ALLOW_PASSWORD_LOGIN: "true"
+  IDENTITY_OIDC_DIRECT_GRANT: "false"
+  IDENTITY_ALLOW_TEST_PROVISIONING: "true"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthProbes:
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 6
+
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector:
+  node-role.kubernetes.io/worker: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+imagePullSecrets:
+  - name: gitlab-registry
+

@@ -1,0 +1,16 @@
+schemaVersion: 1
+component: postgres-contexts
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  identityDsn: {kind: Secret, name: identity-secrets, key: database-url}
+  roomDsn: {kind: Secret, name: room-gameplay-secrets, key: database-url}
+  tournamentDsn: {kind: Secret, name: tournament-orchestration-secrets, key: database-url}
+  rankingDsn: {kind: Secret, name: ranking-secrets, key: database-url}
+preflight:
+  - {type: dns, expect: every configured database hostname resolves}
+  - {type: tcp, expect: every configured database port accepts connections}
+  - {type: tls, expect: sslmode verifies the environment-owned CA}
+  - {type: sql, expect: migrations table equals the released schema version}
+semantics: [one isolated database and role set per bounded context, backups and point-in-time recovery enabled, logical replication enabled only for CDC contexts]

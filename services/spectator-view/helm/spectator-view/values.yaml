@@ -43,3 +43,42 @@ healthProbes:
   periodSeconds: 10
   timeoutSeconds: 1
   failureThreshold: 3
+
+# Primary HTTP API rollout contract. Workers/controllers keep their chart-specific
+# fixed scaling and are never targeted by the API HPA.
+rollout:
+  maxUnavailable: 0
+  maxSurge: 1
+
+startupProbe:
+  enabled: true
+  path: /ready
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+preStop:
+  enabled: true
+  sleepSeconds: 5
+
+terminationGracePeriodSeconds: 30
+
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector: {}
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+# Attached to every workload ServiceAccount rendered by this chart.
+imagePullSecrets: []

@@ -1,4 +1,5 @@
 replicaCount: 1
+principalKeyVersion: keyring-v1
 
 image:
   repository: registry.gitlab.com/group/uno-arena/identity
@@ -15,6 +16,11 @@ env:
   OTEL_TRACES_SAMPLER_ARG: "0.001"
   OTEL_GO_X_OBSERVABILITY: "true"
   METRICS_ADDR: ":9090"
+  # ADR-0021 signed proof consumed only by Room; Gateway forwards it opaquely.
+  IDENTITY_INTERNAL_PRINCIPAL_ISSUER: unoarena.identity
+  IDENTITY_INTERNAL_PRINCIPAL_AUDIENCE: unoarena.room-gameplay
+  IDENTITY_INTERNAL_PRINCIPAL_TTL_SECONDS: "15"
+  IDENTITY_INTERNAL_PRINCIPAL_ACTIVE_KEY_ID: key-current
   # Checkpoint-era HTTP invalidation is capability-only; durable mode uses Debezium CDC.
   # REDIS_URL / KAFKA_BROKERS remain future acceleration / CDC ops surfaces.
   REDIS_URL: redis://redis:6379/1
@@ -24,11 +30,13 @@ env:
 # Cross-chart: identity-internal-credential == gateway gateway-identity-service-credential
 #              (== gateway-service-credential only when that fallback is used)
 #              == gateway gateway-identity-credential (inbound Identity→Gateway producer, when equal)
-#              == room room-identity-credential (Room→Identity session validate).
+# internal-principal-hmac-key-current == Room's current verifier key. It must
+# be supplied by the environment Secret/ExternalSecret and rotated as one trust domain.
 existingSecret: identity-secrets
 secretEnv:
   IDENTITY_INTERNAL_CREDENTIAL: identity-internal-credential
   DATABASE_URL: database-url
+  IDENTITY_INTERNAL_PRINCIPAL_HMAC_KEY_CURRENT: internal-principal-hmac-key-current
 
 resources:
   requests:
@@ -42,3 +50,42 @@ healthProbes:
   periodSeconds: 10
   timeoutSeconds: 1
   failureThreshold: 3
+
+# Primary HTTP API rollout contract. Workers/controllers keep their chart-specific
+# fixed scaling and are never targeted by the API HPA.
+rollout:
+  maxUnavailable: 0
+  maxSurge: 1
+
+startupProbe:
+  enabled: true
+  path: /ready
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+preStop:
+  enabled: true
+  sleepSeconds: 5
+
+terminationGracePeriodSeconds: 30
+
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  whenUnsatisfiable: DoNotSchedule
+
+nodeSelector: {}
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+# Attached to every workload ServiceAccount rendered by this chart.
+imagePullSecrets: []

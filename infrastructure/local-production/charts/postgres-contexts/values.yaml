@@ -1,0 +1,9 @@
+image:
+  repository: postgres:18.4-alpine3.24
+  digest: sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+storageClassName: uno-arena-local-retain
+storage:
+  identity: 2Gi
+  room-gameplay: 4Gi
+  tournament: 2Gi
+  ranking: 2Gi

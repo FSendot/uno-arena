@@ -827,6 +827,52 @@ func TestMatchCompletedConsumer_UnrelatedPartitionProgressesDuringBlock(t *testi
 	}
 }
 
+type signalingReadinessIngester struct {
+	called chan struct{}
+}
+
+func (s signalingReadinessIngester) IngestRoomRuntimeReady(context.Context, RoomRuntimeReadyEvent) (bool, error) {
+	select {
+	case s.called <- struct{}{}:
+	default:
+	}
+	return true, nil
+}
+
+func TestMatchCompletedConsumer_SamePartitionNumberAcrossTopicsProgressesIndependently(t *testing.T) {
+	src := &fakeSource{}
+	blockMatch := make(chan struct{})
+	matchStarted := make(chan struct{}, 1)
+	c := newTestConsumer(src, &fakeDLQ{}, &fakeHandler{blockCh: blockMatch, entered: matchStarted})
+	readyCalled := make(chan struct{}, 1)
+	c.readiness = signalingReadinessIngester{called: readyCalled}
+
+	match := roomRec(1, canonicalMatchCompletedJSON())
+	match.Partition = 7
+	ready := readinessRecord()
+	ready.Partition = 7
+	ready.Offset = 99
+	done := make(chan error, 1)
+	go func() { done <- c.ProcessBatch(context.Background(), []ConsumerRecord{match, ready}) }()
+
+	select {
+	case <-matchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("match topic did not start")
+	}
+	select {
+	case <-readyCalled:
+		// Kafka partition numbers are scoped to topics.
+	case <-time.After(200 * time.Millisecond):
+		close(blockMatch)
+		t.Fatal("runtime-ready topic was incorrectly blocked by match topic partition 7")
+	}
+	close(blockMatch)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMatchCompletedConsumer_KeyMismatchIsTerminal(t *testing.T) {
 	src := &fakeSource{}
 	dlq := &fakeDLQ{}

@@ -1,0 +1,7 @@
+# component	version	official_url	sha256	vendored_path
+argocd	3.4.5	https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.5/manifests/install.yaml	cdf6758b489d25641c2a1fd835642543aaa64fe530867d0136a83ddf3dafe456	argocd/install.yaml
+gateway-api	1.6.0	https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.0/standard-install.yaml	a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d	gateway-api/standard-install.yaml
+cert-manager	1.21.0	https://github.com/cert-manager/cert-manager/releases/download/v1.21.0/cert-manager.yaml	6e499c3f1ab356abe79a7853911f80cb09c213885bfdf81092fdff142ba63c4a	cert-manager/cert-manager.yaml
+external-secrets	2.7.0	https://charts.external-secrets.io/external-secrets-2.7.0.tgz	a2ce165cc59b74c88451c9e21eb72c329b392506c53763df19061e62ec29ac60	external-secrets/external-secrets-2.7.0.tgz
+metrics-server	0.9.0	https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml	1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b	metrics-server/components.yaml
+istio	1.30.2	https://github.com/istio/istio/releases/download/1.30.2/istio-1.30.2-osx-arm64.tar.gz	56deb84b26fefbf425eadc6b71cc9a32da5d8d1a62560c74968d27af80ba18d7	@existing:infrastructure/istio

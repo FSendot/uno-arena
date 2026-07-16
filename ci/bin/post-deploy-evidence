@@ -1,0 +1,106 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "open3"
+require "uri"
+
+ENVIRONMENTS = %w[production local-production].freeze
+BAD_RESOURCE_HEALTH = %w[Degraded Missing Progressing Suspended Unknown].freeze
+SERVICES = %w[analytics game-integrity gateway identity ranking room-gameplay spectator-view tournament-orchestration].freeze
+OBSERVABILITY_EVIDENCE_JOB = "uno-arena-observability-postsync-evidence"
+
+def environment_key(environment)
+  environment.upcase.tr("-", "_")
+end
+
+def curl_json(url, ca_file, token: nil)
+  arguments = ["curl", "--fail-with-body", "--silent", "--show-error", "--cacert", ca_file]
+  arguments += ["--header", "Authorization: Bearer #{token}"] if token
+  out, err, status = Open3.capture3(*arguments, url)
+  abort "post-deploy request failed for #{url}: #{err.strip}" unless status.success?
+  JSON.parse(out.empty? ? "{}" : out)
+rescue JSON::ParserError => e
+  abort "post-deploy response is not JSON for #{url}: #{e.message}"
+end
+
+def successful_observability_evidence_job?(node)
+  return false unless node["group"] == "batch" && node["kind"] == "Job" &&
+                      node["name"] == OBSERVABILITY_EVIDENCE_JOB
+  return false unless node.dig("health", "status") == "Healthy"
+
+  structured_evidence = [node["status"]]
+  structured_evidence.concat(Array(node["info"]).flat_map { |item| item.is_a?(Hash) ? item.values : item })
+  return true if structured_evidence.compact.any? do |value|
+    %w[succeeded complete completed].include?(value.to_s.strip.downcase)
+  end
+
+  node.dig("health", "message").to_s.strip.match?(/\Ajob (?:completed|succeeded)(?: successfully)?\z/i)
+end
+
+selected = ENV.fetch("DEPLOY_ENVIRONMENTS").split(",").map(&:strip).reject(&:empty?)
+abort "invalid post-deploy environments" if selected.empty? || !(selected - ENVIRONMENTS).empty? || selected.uniq.length != selected.length
+
+selected.each do |environment|
+  key = environment_key(environment)
+  server = ENV.fetch("ARGOCD_#{key}_SERVER")
+  token = ENV.fetch("ARGOCD_#{key}_AUTH_TOKEN")
+  argo_ca = ENV.fetch("ARGOCD_#{key}_CA_FILE")
+  abort "ARGOCD_#{key}_CA_FILE does not exist" unless File.file?(argo_ca)
+  applications = ENV.fetch("ARGOCD_APPLICATIONS_#{key}").split(",").map(&:strip).reject(&:empty?)
+  abort "post-deploy applications are empty for #{environment}" if applications.empty?
+
+  applications.each do |application|
+    prefix = "uno-arena-#{environment}-"
+    abort "application #{application} is outside #{environment}" unless application.start_with?(prefix)
+    component = application.delete_prefix(prefix)
+    tree = curl_json("#{server}/api/v1/applications/#{application}/resource-tree", argo_ca, token: token)
+    nodes = tree["nodes"]
+    abort "Argo resource tree is empty for #{application}" unless nodes.is_a?(Array) && !nodes.empty?
+    if component == "observability"
+      evidence_job = nodes.find do |node|
+        node["group"] == "batch" && node["kind"] == "Job" &&
+          node["name"] == OBSERVABILITY_EVIDENCE_JOB
+      end
+      abort "Argo resource tree is missing observability post-sync evidence Job" unless evidence_job
+      unless successful_observability_evidence_job?(evidence_job)
+        abort "observability post-sync evidence Job did not report successful completion"
+      end
+    end
+    unhealthy = nodes.select { |node| BAD_RESOURCE_HEALTH.include?(node.dig("health", "status")) }
+    abort "Argo resource tree is unhealthy for #{application}" unless unhealthy.empty?
+
+    next unless component == "gateway"
+    gateway_url = ENV.fetch("POST_DEPLOY_#{key}_GATEWAY_URL")
+    gateway_ca = ENV.fetch("POST_DEPLOY_#{key}_CA_FILE")
+    uri = URI.parse(gateway_url)
+    abort "Gateway evidence URL must use HTTPS for #{environment}" unless uri.scheme == "https" && uri.host && uri.path == "/health"
+    abort "POST_DEPLOY_#{key}_CA_FILE does not exist" unless File.file?(gateway_ca)
+    gateway = curl_json(gateway_url, gateway_ca)
+    abort "Gateway health evidence has the wrong identity for #{environment}" unless gateway == { "status" => "ok", "service" => "gateway" }
+  rescue URI::InvalidURIError => e
+    abort "invalid Gateway evidence URL for #{environment}: #{e.message}"
+  end
+
+  components = applications.each_with_object([]) do |application, out|
+    prefix = "uno-arena-#{environment}-"
+    component = application.delete_prefix(prefix)
+    out << component if SERVICES.include?(component)
+  end
+  unless components.empty?
+    begin
+      gateway_base = ENV.fetch("POST_DEPLOY_#{key}_GATEWAY_BASE_URL")
+      gateway_ca = ENV.fetch("POST_DEPLOY_#{key}_CA_FILE")
+      base_uri = URI.parse(gateway_base)
+      abort "critical behavior Gateway URL must be an HTTPS origin for #{environment}" unless base_uri.scheme == "https" && base_uri.host && ["", "/"].include?(base_uri.path)
+      abort "POST_DEPLOY_#{key}_CA_FILE does not exist" unless File.file?(gateway_ca)
+      behavior_env = {"UNOARENA_API_URL" => gateway_base.sub(%r{/+\z}, ""), "CURL_CA_BUNDLE" => gateway_ca}
+      stdout, stderr, status = Open3.capture3(
+        behavior_env, "client-checkpoint/tests/run-live-client-parity.sh"
+      )
+      abort "cross-context client parity failed for #{environment}: #{stderr}\n#{stdout}" unless status.success?
+    rescue URI::InvalidURIError => e
+      abort "critical behavior evidence failed for #{environment}: #{e.message}"
+    end
+  end
+end

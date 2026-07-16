@@ -25,17 +25,6 @@ spec: {}
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
-metadata: {name: allow-application-internal, namespace: {{ .Values.applicationNamespace }}}
-spec:
-  action: ALLOW
-  rules:
-    - from:
-        - source: {namespaces: [{{ .Values.applicationNamespace | quote }}]}
-      to:
-        - operation: {notPorts: ["9090"]}
----
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
 metadata: {name: allow-application-otlp, namespace: {{ $ns }}}
 spec:
   selector: {matchLabels: {app.kubernetes.io/name: alloy-otlp}}
@@ -85,6 +74,38 @@ spec:
   rules:
     - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/grafana" $ns | quote }}]}}]
       to: [{operation: {ports: ["9090"]}}]
+{{- if .Values.postSyncEvidence.enabled }}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-postsync-evidence-prometheus, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: prometheus}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/uno-arena-observability-postsync-evidence" $ns | quote }}]}}]
+      to: [{operation: {ports: ["9090"], methods: ["GET"], paths: ["/api/v1/query"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-postsync-evidence-alertmanager, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: alertmanager}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/uno-arena-observability-postsync-evidence" $ns | quote }}]}}]
+      to: [{operation: {ports: ["9093"], methods: ["GET", "POST"], paths: ["/metrics", "/api/v2/alerts"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-postsync-evidence-gateway, namespace: {{ .Values.applicationNamespace }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: gateway}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/uno-arena-observability-postsync-evidence" $ns | quote }}]}}]
+      to: [{operation: {ports: ["8080"], methods: ["GET"], paths: ["/health", "/v1/rooms"]}}]
+{{- end }}
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -95,6 +116,98 @@ spec:
   rules:
     - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
       to: [{operation: {ports: ["8080"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-alloy-logs-metrics, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: alloy-logs}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["12345"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-alloy-otlp-metrics, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: alloy-otlp}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["12345"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-loki-metrics, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: loki}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["3100"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-tempo-metrics, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: tempo}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["3200"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-grafana-metrics, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: grafana}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["3000"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-alertmanager-client, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: alertmanager}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["9093"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-redis-exporter-client, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: redis-exporter}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/prometheus" $ns | quote }}]}}]
+      to: [{operation: {ports: ["9121"]}}]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-redis-exporter-to-redis, namespace: {{ .Values.applicationNamespace }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: redis}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/redis-exporter" $ns | quote }}]}}]
+      to: [{operation: {ports: ["6379"]}}]
+{{- if .Values.alertmanager.webhookSink.enabled }}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: allow-alert-webhook-sink-client, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: alert-webhook-sink}}
+  action: ALLOW
+  rules:
+    - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/alertmanager" $ns | quote }}]}}]
+      to: [{operation: {ports: ["8080"]}}]
+{{- end }}
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -132,6 +245,8 @@ spec:
   podSelector: {matchLabels: {app.kubernetes.io/name: alloy-logs}}
   policyTypes: [Ingress]
   ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports: [{protocol: TCP, port: 12345}]
     - from:
         - ipBlock: {cidr: 169.254.7.127/32}
         - ipBlock: {cidr: "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128"}
@@ -144,6 +259,8 @@ spec:
   podSelector: {matchLabels: {app.kubernetes.io/name: grafana}}
   policyTypes: [Ingress]
   ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports: [{protocol: TCP, port: 3000}]
     - from:
         - ipBlock: {cidr: 169.254.7.127/32}
         - ipBlock: {cidr: "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128"}
@@ -159,7 +276,7 @@ spec:
     - from:
         - podSelector:
             matchExpressions:
-              - {key: app.kubernetes.io/name, operator: In, values: [alloy-logs, grafana]}
+              - {key: app.kubernetes.io/name, operator: In, values: [alloy-logs, grafana, prometheus]}
       ports:
         - {protocol: TCP, port: 3100}
     - ports: [{protocol: TCP, port: 15008}]
@@ -181,6 +298,9 @@ spec:
     - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: grafana}}}]
       ports:
         - {protocol: TCP, port: 3200}
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports:
+        - {protocol: TCP, port: 3200}
     - ports: [{protocol: TCP, port: 15008}]
     - from:
         - ipBlock: {cidr: 169.254.7.127/32}
@@ -197,6 +317,11 @@ spec:
     - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: grafana}}}]
       ports:
         - {protocol: TCP, port: 9090}
+    {{- if .Values.postSyncEvidence.enabled }}
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: uno-arena-observability-postsync-evidence}}}]
+      ports:
+        - {protocol: TCP, port: 9090}
+    {{- end }}
     - ports: [{protocol: TCP, port: 15008}]
     - from:
         - ipBlock: {cidr: 169.254.7.127/32}
@@ -245,6 +370,9 @@ spec:
   podSelector: {matchLabels: {app.kubernetes.io/name: alloy-otlp}}
   policyTypes: [Ingress]
   ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports:
+        - {protocol: TCP, port: 12345}
     - from:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.applicationNamespace }}}}
       ports:
@@ -255,6 +383,45 @@ spec:
         - ipBlock: {cidr: 169.254.7.127/32}
         - ipBlock: {cidr: "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128"}
       ports: [{protocol: TCP, port: 12345}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-alertmanager-client, namespace: {{ $ns }}}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: alertmanager}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports: [{protocol: TCP, port: 9093}]
+    {{- if .Values.postSyncEvidence.enabled }}
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: uno-arena-observability-postsync-evidence}}}]
+      ports: [{protocol: TCP, port: 9093}]
+    {{- end }}
+    - ports: [{protocol: TCP, port: 15008}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-redis-exporter-client, namespace: {{ $ns }}}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: redis-exporter}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: prometheus}}}]
+      ports: [{protocol: TCP, port: 9121}]
+    - ports: [{protocol: TCP, port: 15008}]
+{{- if .Values.alertmanager.webhookSink.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-alert-webhook-sink-client, namespace: {{ $ns }}}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: alert-webhook-sink}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: alertmanager}}}]
+      ports: [{protocol: TCP, port: 8080}]
+    - ports: [{protocol: TCP, port: 15008}]
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -277,4 +444,18 @@ spec:
         - ipBlock: {cidr: 169.254.7.127/32}
         - ipBlock: {cidr: "fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128"}
       ports: [{protocol: TCP, port: 8080}]
+{{- if .Values.postSyncEvidence.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-postsync-evidence-gateway, namespace: {{ .Values.applicationNamespace }}}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $ns }}}}
+          podSelector: {matchLabels: {app.kubernetes.io/name: uno-arena-observability-postsync-evidence}}
+      ports: [{protocol: TCP, port: 8080}]
+{{- end }}
 {{- end }}

@@ -10,18 +10,37 @@ workflow:
     - when: never
 
 stages:
-  - test
-  - build
-  - deliver
-  - deploy-staging
-  - integration-staging
+  - plan
+  - dispatch
 
-include:
-  - local: services/gateway/ci/gateway.gitlab-ci.yml
-  - local: services/identity/ci/identity.gitlab-ci.yml
-  - local: services/room-gameplay/ci/room-gameplay.gitlab-ci.yml
-  - local: services/game-integrity/ci/game-integrity.gitlab-ci.yml
-  - local: services/tournament-orchestration/ci/tournament-orchestration.gitlab-ci.yml
-  - local: services/ranking/ci/ranking.gitlab-ci.yml
-  - local: services/spectator-view/ci/spectator-view.gitlab-ci.yml
-  - local: services/analytics/ci/analytics.gitlab-ci.yml
+variables:
+  GIT_DEPTH: "0"
+  # The local runner targets the long-lived simulator by default. Protected
+  # pipelines may explicitly select production or both environments.
+  DEPLOY_ENVIRONMENTS: "local-production"
+
+plan:impact:
+  stage: plan
+  script:
+    - ruby -Ici/lib ci/test/run.rb
+    - ruby ci/bin/validate-inventories.rb --all
+    - ruby ci/bin/generate-impact-pipeline.rb
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - generated/child-pipeline.yml
+      - generated/impact.json
+
+dispatch:impact:
+  stage: dispatch
+  inherit:
+    default: false
+  needs:
+    - job: plan:impact
+      artifacts: true
+  trigger:
+    include:
+      - artifact: generated/child-pipeline.yml
+        job: plan:impact
+    strategy: depend

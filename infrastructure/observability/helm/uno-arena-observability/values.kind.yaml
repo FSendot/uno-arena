@@ -31,6 +31,12 @@ storage:
     # persistence acceptance budget without forcing more frequent block cuts.
     blocklistPoll: 1m
 
+alertmanager:
+  receiver:
+    inlineUrl: http://alert-webhook-sink.observability.svc.cluster.local:8080/alerts?receiver=kind
+  webhookSink:
+    enabled: true
+
 grafana:
   existingAdminSecret: uno-arena-local-observability
   strategyType: Recreate
@@ -63,6 +69,12 @@ resources:
     limits: {cpu: "2", memory: 2Gi}
   prometheus:
     requests: {cpu: 25m, memory: 128Mi}
+  alertmanager:
+    requests: {cpu: 10m, memory: 32Mi}
+  redisExporter:
+    requests: {cpu: 5m, memory: 16Mi}
+  webhookSink:
+    requests: {cpu: 5m, memory: 8Mi}
   kubeStateMetrics:
     requests: {cpu: 10m, memory: 32Mi}
   grafana:

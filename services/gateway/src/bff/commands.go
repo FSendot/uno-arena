@@ -10,6 +10,7 @@ import (
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
 	"unoarena/shared/httpx"
+	"unoarena/shared/internalprincipal"
 )
 
 func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
@@ -47,9 +48,6 @@ func (s *Server) handleRoomScoped(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePlayerSnapshot(w http.ResponseWriter, r *http.Request, roomID string) {
-	if !s.allowEdge(w, r) {
-		return
-	}
 	principal, ok := s.requirePrincipal(w, r)
 	if !ok {
 		return
@@ -105,19 +103,14 @@ func (s *Server) handleSpectatorSnapshot(w http.ResponseWriter, r *http.Request)
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
 		return
 	}
-	if !s.allowEdge(w, r) {
-		return
-	}
 	roomID := parts[0]
 	corr := s.correlation(r)
 
 	var (
-		token     string
 		principal *Principal
 	)
 	if tok, ok := bearerToken(r); ok {
-		token = tok
-		p, err := s.identity.ValidateSession(r.Context(), token, corr)
+		p, err := s.identity.ValidateSession(r.Context(), tok, corr)
 		if err != nil {
 			s.writeIdentityValidationError(w, r, err)
 			return
@@ -127,7 +120,6 @@ func (s *Server) handleSpectatorSnapshot(w http.ResponseWriter, r *http.Request)
 
 	admit := SpectatorAdmitRequest{
 		RoomID:           roomID,
-		Token:            token,
 		Principal:        principal,
 		InviteCapability: strings.TrimSpace(r.Header.Get("X-Room-Invite")),
 		Correlation:      corr,
@@ -161,17 +153,7 @@ func (s *Server) handleSpectatorSnapshot(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomID string) {
-	// Edge abuse throttle stays pre-auth.
-	if !s.allowEdge(w, r) {
-		return
-	}
-
 	corr := s.correlation(r)
-	principal, ok := s.requirePrincipal(w, r)
-	if !ok {
-		return
-	}
-
 	body, err := readLimitedBody(r)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
@@ -210,6 +192,33 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 		roomID = extractRoomID(cmd.Payload)
 	}
 	tournamentID := extractTournamentID(cmd.Payload)
+	backend := RouteBackend(cmd.Type)
+	if backend == BackendUnknown {
+		// Defense in depth: envelope.Decode already rejects non-catalog types.
+		s.writeErr(w, r, http.StatusBadRequest, "invalid_envelope", "unknown command type", cmd.CommandID)
+		return
+	}
+
+	// ADR-0021: command authorization is distinct from read/SSE validation and
+	// occurs only after the envelope and route-resolved aggregate are known.
+	token, ok := bearerToken(r)
+	if !ok {
+		s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "missing bearer token", cmd.CommandID)
+		return
+	}
+	boundedContext := internalprincipal.TournamentContext
+	if backend == BackendRoom {
+		boundedContext = internalprincipal.DefaultRoomAudience
+	}
+	principal, err := s.identity.AuthorizeCommand(r.Context(), token, CommandAuthorization{
+		BoundedContext: boundedContext,
+		Command:        cmd,
+		RoomID:         roomID,
+	}, corr)
+	if err != nil {
+		s.writeIdentityValidationError(w, r, err)
+		return
+	}
 
 	// Authenticated principal throttle runs after bounded envelope decode so
 	// rejection audit includes commandId/principal/aggregate/sequence with no dispatch.
@@ -232,14 +241,6 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 			w.Header().Set("Retry-After", strconv.Itoa(retrySeconds(retry)))
 		}
 		s.writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "principal rate limit exceeded", cmd.CommandID)
-		return
-	}
-
-	backend := RouteBackend(cmd.Type)
-	if backend == BackendUnknown {
-		// Defense in depth: envelope.Decode already rejects non-catalog types as
-		// invalid_envelope before audit. Keep routing coherent if a type slips through.
-		s.writeErr(w, r, http.StatusBadRequest, "invalid_envelope", "unknown command type", cmd.CommandID)
 		return
 	}
 
@@ -287,12 +288,25 @@ func (s *Server) submitCommand(w http.ResponseWriter, r *http.Request, pathRoomI
 			if he.retryAfter != "" {
 				w.Header().Set("Retry-After", he.retryAfter)
 			}
-			switch he.status {
-			case http.StatusServiceUnavailable, http.StatusConflict:
+			code := he.safeCode()
+			if backend == BackendRoom && code == "room_starting" && (he.status == http.StatusServiceUnavailable || he.status == http.StatusConflict) {
 				s.writeErr(w, r, http.StatusServiceUnavailable, "room_starting", "room runtime is not ready", cmd.CommandID)
 				return
-			case http.StatusTooManyRequests:
+			}
+			if backend == BackendRoom && code == "room_busy" && he.status == http.StatusTooManyRequests {
 				s.writeErr(w, r, http.StatusTooManyRequests, "room_busy", "room mutation queue is full", cmd.CommandID)
+				return
+			}
+			if he.status == http.StatusTooManyRequests {
+				s.writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "backend rate limit exceeded", cmd.CommandID)
+				return
+			}
+			switch he.status {
+			case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity:
+				if code == "" {
+					code = "upstream_rejected"
+				}
+				s.writeErr(w, r, he.status, code, "command rejected by backend", cmd.CommandID)
 				return
 			}
 		}
@@ -368,9 +382,6 @@ func (s *Server) handlePlayerStream(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
 		return
 	}
-	if !s.allowEdge(w, r) {
-		return
-	}
 	principal, ok := s.requirePrincipal(w, r)
 	if !ok {
 		return
@@ -388,9 +399,6 @@ func (s *Server) handleSpectatorStream(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
 		return
 	}
-	if !s.allowEdge(w, r) {
-		return
-	}
 	roomID := strings.TrimSpace(r.URL.Query().Get("roomId"))
 	if roomID == "" {
 		s.writeErr(w, r, http.StatusBadRequest, "bad_request", "roomId query required", "")
@@ -399,12 +407,10 @@ func (s *Server) handleSpectatorStream(w http.ResponseWriter, r *http.Request) {
 	corr := s.correlation(r)
 
 	var (
-		token     string
 		principal *Principal
 	)
 	if tok, ok := bearerToken(r); ok {
-		token = tok
-		p, err := s.identity.ValidateSession(r.Context(), token, corr)
+		p, err := s.identity.ValidateSession(r.Context(), tok, corr)
 		if err != nil {
 			s.writeIdentityValidationError(w, r, err)
 			return
@@ -414,7 +420,6 @@ func (s *Server) handleSpectatorStream(w http.ResponseWriter, r *http.Request) {
 
 	allowed, reason, err := s.spectator.Admit(r.Context(), SpectatorAdmitRequest{
 		RoomID:           roomID,
-		Token:            token,
 		Principal:        principal,
 		InviteCapability: strings.TrimSpace(r.Header.Get("X-Room-Invite")),
 		Correlation:      corr,
@@ -441,9 +446,6 @@ func (s *Server) handleSpectatorStream(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleControlStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
-		return
-	}
-	if !s.allowEdge(w, r) {
 		return
 	}
 	principal, ok := s.requirePrincipal(w, r)

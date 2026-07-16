@@ -139,6 +139,7 @@ var payloadSchemas = map[string]map[string]fieldSpec{
 		"capacity":     {kind: fieldInteger, min: int64ptr(1)},
 		"retryBudget":  {kind: fieldInteger, min: int64ptr(0)},
 		"batchSize":    {kind: fieldInteger, min: int64ptr(1)},
+		"visibility":   {kind: fieldString, enum: stringEnum("public", "private")},
 	},
 	"RegisterPlayer": {
 		"tournamentId": {kind: fieldString},

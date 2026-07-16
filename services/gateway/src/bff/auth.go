@@ -14,9 +14,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
 		return
 	}
-	if !s.allowEdge(w, r) {
-		return
-	}
 	body, err := readLimitedBody(r)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
@@ -37,7 +34,24 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	corr := s.correlation(r)
 	res, err := s.identity.Register(r.Context(), reqBody.Username, reqBody.Password, corr)
 	if err != nil {
-		s.writeErr(w, r, http.StatusBadRequest, "bad_request", err.Error(), "")
+		if he, ok := err.(*httpStatusError); ok {
+			if he.status == http.StatusTooManyRequests {
+				if he.retryAfter != "" {
+					w.Header().Set("Retry-After", he.retryAfter)
+				}
+				s.writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "identity rate limit exceeded", "")
+				return
+			}
+			if he.status == http.StatusBadRequest || he.status == http.StatusConflict || he.status == http.StatusUnprocessableEntity {
+				code := he.safeCode()
+				if code == "" {
+					code = "bad_request"
+				}
+				s.writeErr(w, r, http.StatusBadRequest, code, "registration rejected", "")
+				return
+			}
+		}
+		s.writeErr(w, r, http.StatusBadGateway, "identity_unavailable", "registration unavailable", "")
 		return
 	}
 	s.writeJSON(w, r, http.StatusOK, map[string]string{
@@ -49,9 +63,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
-		return
-	}
-	if !s.allowEdge(w, r) {
 		return
 	}
 	body, err := readLimitedBody(r)
@@ -78,7 +89,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", "invalid credentials", "")
 			return
 		}
-		s.writeErr(w, r, http.StatusUnauthorized, "unauthorized", err.Error(), "")
+		if he, ok := err.(*httpStatusError); ok && he.status == http.StatusTooManyRequests {
+			if he.retryAfter != "" {
+				w.Header().Set("Retry-After", he.retryAfter)
+			}
+			s.writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "identity rate limit exceeded", "")
+			return
+		}
+		s.writeErr(w, r, http.StatusBadGateway, "identity_unavailable", "login unavailable", "")
 		return
 	}
 	s.writeJSON(w, r, http.StatusOK, map[string]string{
@@ -91,9 +109,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeErr(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", "")
-		return
-	}
-	if !s.allowEdge(w, r) {
 		return
 	}
 	token, ok := bearerToken(r)

@@ -1,0 +1,31 @@
+# Long-lived local production simulator. Never use the disposable kind scripts
+# under infrastructure/kind against this cluster.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: uno-arena-production
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        listenAddress: 127.0.0.1
+        protocol: TCP
+      - containerPort: 30443
+        hostPort: 8443
+        listenAddress: 127.0.0.1
+        protocol: TCP
+      - containerPort: 30444
+        hostPort: 8444
+        listenAddress: 127.0.0.1
+        protocol: TCP
+      # Private Argo CD API for a host-local runner. Never route this through
+      # the public uno-arena.local Gateway.
+      - containerPort: 30445
+        hostPort: 9443
+        listenAddress: 127.0.0.1
+        protocol: TCP
+  # kind assigns the reserved node-role.kubernetes.io/worker label after join.
+  # Do not pass that reserved label through kubelet --node-labels: Kubernetes
+  # 1.36 rejects user-supplied labels in the kubernetes.io namespace.
+  - role: worker
+  - role: worker

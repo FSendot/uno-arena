@@ -6,7 +6,9 @@ source "${SCRIPT_DIR}/lib.sh"
 assert_kind_context
 TIMEOUT="${KIND_OBSERVABILITY_TIMEOUT:-600s}"
 
-for resource in deployment/minio deployment/alloy-otlp deployment/loki deployment/tempo deployment/prometheus deployment/kube-state-metrics deployment/grafana daemonset/alloy-logs; do
+for resource in deployment/minio deployment/alloy-otlp deployment/loki deployment/tempo deployment/prometheus \
+  deployment/alertmanager deployment/redis-exporter deployment/alert-webhook-sink \
+  deployment/kube-state-metrics deployment/grafana daemonset/alloy-logs; do
   kubectl -n observability rollout status "${resource}" --timeout="${TIMEOUT}"
 done
 if kubectl -n observability get job/minio-create-observability-buckets >/dev/null 2>&1; then

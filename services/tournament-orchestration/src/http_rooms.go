@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,78 @@ import (
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
 )
+
+type RoomProvisionFailureKind string
+
+const (
+	RoomProvisionFailureHTTP          RoomProvisionFailureKind = "http"
+	RoomProvisionFailureConfiguration RoomProvisionFailureKind = "configuration"
+)
+
+// RoomProvisionError is a sanitized classification boundary for Room failures.
+// It intentionally excludes the upstream message/body so secrets and internal
+// details cannot enter Tournament retry state or logs.
+type RoomProvisionError struct {
+	Kind       RoomProvisionFailureKind
+	StatusCode int
+	Code       string
+	RetryAfter string
+}
+
+func (e *RoomProvisionError) Error() string {
+	if e == nil {
+		return "room provision failed"
+	}
+	if e.Kind == RoomProvisionFailureConfiguration {
+		return "room provision configuration error"
+	}
+	class := fmt.Sprintf("HTTP %d", e.StatusCode)
+	if e.StatusCode >= 500 {
+		class = "HTTP 5xx"
+	} else if e.StatusCode >= 400 {
+		class = "HTTP 4xx"
+	}
+	if e.Code != "" {
+		return "room provision " + class + " (" + e.Code + ")"
+	}
+	return "room provision " + class
+}
+
+// Retryable reports failures safe for the existing bounded provisioning retry
+// budget. Room provisioning is idempotent, but deterministic client/auth/config
+// failures cannot improve through replay.
+func (e *RoomProvisionError) Retryable() bool {
+	return e != nil && e.Kind != RoomProvisionFailureConfiguration &&
+		(e.StatusCode == http.StatusRequestTimeout || e.StatusCode == http.StatusTooEarly ||
+			e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500)
+}
+
+func roomProvisionFailureForcesQuarantine(err error) bool {
+	if errors.Is(err, ErrRoomIDMismatch) {
+		return true
+	}
+	var provisionErr *RoomProvisionError
+	return errors.As(err, &provisionErr) && !provisionErr.Retryable()
+}
+
+func safeRoomProvisionCode(raw []byte) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	code := strings.TrimSpace(body.Code)
+	if len(code) == 0 || len(code) > 64 {
+		return ""
+	}
+	for _, r := range code {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
+			return ""
+		}
+	}
+	return code
+}
 
 // HTTPRoomProvisioner calls Room Gameplay POST /internal/v1/rooms/provision.
 type HTTPRoomProvisioner struct {
@@ -36,7 +109,7 @@ func NewHTTPRoomProvisioner(baseURL, credential string, client *http.Client) *HT
 
 func (p *HTTPRoomProvisioner) Provision(ctx context.Context, req RoomProvisionRequest) (RoomProvisionResult, error) {
 	if p == nil || p.BaseURL == "" {
-		return RoomProvisionResult{}, fmt.Errorf("room provisioner unconfigured")
+		return RoomProvisionResult{}, &RoomProvisionError{Kind: RoomProvisionFailureConfiguration}
 	}
 	players := make([]string, len(req.PlayerIDs))
 	for i, id := range req.PlayerIDs {
@@ -62,7 +135,7 @@ func (p *HTTPRoomProvisioner) Provision(ctx context.Context, req RoomProvisionRe
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/internal/v1/rooms/provision", bytes.NewReader(body))
 	if err != nil {
-		return RoomProvisionResult{}, err
+		return RoomProvisionResult{}, &RoomProvisionError{Kind: RoomProvisionFailureConfiguration}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if p.Credential != "" {
@@ -77,13 +150,12 @@ func (p *HTTPRoomProvisioner) Provision(ctx context.Context, req RoomProvisionRe
 	// Drain body for connection reuse but never include raw bytes in returned errors.
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode >= 500 {
-			return RoomProvisionResult{}, fmt.Errorf("room provision HTTP 5xx")
+		return RoomProvisionResult{}, &RoomProvisionError{
+			Kind:       RoomProvisionFailureHTTP,
+			StatusCode: resp.StatusCode,
+			Code:       safeRoomProvisionCode(raw),
+			RetryAfter: resp.Header.Get("Retry-After"),
 		}
-		if resp.StatusCode >= 400 {
-			return RoomProvisionResult{}, fmt.Errorf("room provision HTTP 4xx")
-		}
-		return RoomProvisionResult{}, fmt.Errorf("room provision HTTP %d", resp.StatusCode)
 	}
 	returnedID, err := parseProvisionedRoomID(raw)
 	if err != nil {

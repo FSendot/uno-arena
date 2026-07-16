@@ -1,0 +1,13 @@
+schemaVersion: 1
+component: oidc
+environment: production
+mode: external
+managedInCluster: false
+configuration:
+  issuer: {kind: ConfigMap, name: identity-runtime, key: oidc-issuer-url}
+  client: {kind: Secret, name: identity-secrets, key: oidc-client-id}
+preflight:
+  - {type: dns, expect: issuer hostname resolves}
+  - {type: tls, expect: issuer certificate verifies}
+  - {type: oidc-discovery, expect: discovery issuer and JWKS match configured audience}
+semantics: [environment-owned provider, no local Keycloak start-dev, stable subject mapping and key rotation]

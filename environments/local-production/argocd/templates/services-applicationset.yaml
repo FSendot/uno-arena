@@ -1,0 +1,1 @@
+{{ include "unoArena.renderFile" (list . "services-applicationset.yaml") }}

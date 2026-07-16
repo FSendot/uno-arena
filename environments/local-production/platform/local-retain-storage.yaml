@@ -1,0 +1,15 @@
+schemaVersion: 1
+component: local-retain-storage
+environment: local-production
+enabled: false
+status: awaiting-immutable-package-publication
+application: uno-arena-local-production-local-retain-storage
+stage: "00-foundation"
+destinationNamespace: uno-arena
+chart:
+  repository: https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable
+  name: local-retain-storage
+  version: 0.1.0
+values:
+  storageClassName: uno-arena-local-retain
+

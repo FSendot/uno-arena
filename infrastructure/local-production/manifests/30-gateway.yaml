@@ -1,0 +1,66 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: uno-arena-gateway
+  namespace: uno-arena
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      hostname: uno-arena.local
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      hostname: uno-arena.local
+      port: 8443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: uno-arena-local-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: uno-arena-http-redirect
+  namespace: uno-arena
+spec:
+  parentRefs:
+    - name: uno-arena-gateway
+      sectionName: http
+  hostnames:
+    - uno-arena.local
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            port: 8443
+            statusCode: 301
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: uno-arena-bff
+  namespace: uno-arena
+spec:
+  parentRefs:
+    - name: uno-arena-gateway
+      sectionName: https
+  hostnames:
+    - uno-arena.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: gateway
+          port: 8080

@@ -1,0 +1,10 @@
+image:
+  repository: redis:8.8.0-alpine
+  digest: sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+storageClassName: uno-arena-local-retain
+storage: 2Gi
+memory:
+  maxmemory: 192mb
+  # Shared streams, idempotency markers, timers, and projections must not be
+  # silently discarded. At the boundary, writes fail and alerts fire instead.
+  maxmemoryPolicy: noeviction

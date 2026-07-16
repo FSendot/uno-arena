@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${DEPLOY_ENVIRONMENTS:?DEPLOY_ENVIRONMENTS is required}"
+case "$DEPLOY_ENVIRONMENTS" in
+  production|local-production|production,local-production|local-production,production) ;;
+  *) echo "DEPLOY_ENVIRONMENTS must be a unique non-empty subset of production,local-production" >&2; exit 1 ;;
+esac
+command -v ruby >/dev/null 2>&1 || { echo "ruby is required" >&2; exit 1; }
+timeout="${ARGOCD_WAIT_SECONDS:-600}"
+[[ "$timeout" =~ ^[1-9][0-9]*$ ]] || { echo "ARGOCD_WAIT_SECONDS must be positive" >&2; exit 1; }
+deadline=$((SECONDS + timeout))
+IFS=',' read -r -a environments <<<"$DEPLOY_ENVIRONMENTS"
+declare -a servers tokens ca_files application_sets
+for environment in "${environments[@]}"; do
+  case "$environment" in
+    production)
+      : "${ARGOCD_PRODUCTION_SERVER:?ARGOCD_PRODUCTION_SERVER is required}"
+      : "${ARGOCD_PRODUCTION_AUTH_TOKEN:?ARGOCD_PRODUCTION_AUTH_TOKEN is required}"
+      : "${ARGOCD_PRODUCTION_CA_FILE:?ARGOCD_PRODUCTION_CA_FILE is required}"
+      : "${ARGOCD_APPLICATIONS_PRODUCTION:?ARGOCD_APPLICATIONS_PRODUCTION is required}"
+      [[ -f "$ARGOCD_PRODUCTION_CA_FILE" && -r "$ARGOCD_PRODUCTION_CA_FILE" ]] || { echo "ARGOCD_PRODUCTION_CA_FILE must be a readable file" >&2; exit 1; }
+      servers+=("$ARGOCD_PRODUCTION_SERVER")
+      tokens+=("$ARGOCD_PRODUCTION_AUTH_TOKEN")
+      ca_files+=("$ARGOCD_PRODUCTION_CA_FILE")
+      application_sets+=("$ARGOCD_APPLICATIONS_PRODUCTION")
+      ;;
+    local-production)
+      : "${ARGOCD_LOCAL_PRODUCTION_SERVER:?ARGOCD_LOCAL_PRODUCTION_SERVER is required}"
+      : "${ARGOCD_LOCAL_PRODUCTION_AUTH_TOKEN:?ARGOCD_LOCAL_PRODUCTION_AUTH_TOKEN is required}"
+      : "${ARGOCD_LOCAL_PRODUCTION_CA_FILE:?ARGOCD_LOCAL_PRODUCTION_CA_FILE is required}"
+      : "${ARGOCD_APPLICATIONS_LOCAL_PRODUCTION:?ARGOCD_APPLICATIONS_LOCAL_PRODUCTION is required}"
+      [[ -f "$ARGOCD_LOCAL_PRODUCTION_CA_FILE" && -r "$ARGOCD_LOCAL_PRODUCTION_CA_FILE" ]] || { echo "ARGOCD_LOCAL_PRODUCTION_CA_FILE must be a readable file" >&2; exit 1; }
+      servers+=("$ARGOCD_LOCAL_PRODUCTION_SERVER")
+      tokens+=("$ARGOCD_LOCAL_PRODUCTION_AUTH_TOKEN")
+      ca_files+=("$ARGOCD_LOCAL_PRODUCTION_CA_FILE")
+      application_sets+=("$ARGOCD_APPLICATIONS_LOCAL_PRODUCTION")
+      ;;
+    *) echo "invalid DEPLOY_ENVIRONMENTS entry: $environment" >&2; exit 1 ;;
+  esac
+done
+expectations_file="${ARGOCD_EXPECTATIONS_FILE:-artifacts/reconciliation-expectations.json}"
+if [[ ! -f "$expectations_file" ]]; then
+  expectations_file="$(mktemp "${TMPDIR:-/tmp}/uno-arena-reconciliation-expectations.json.XXXXXX")"
+  ruby ci/bin/write-reconciliation-expectations.rb --output "$expectations_file"
+fi
+[[ -r "$expectations_file" ]] || { echo "reconciliation expectations must be readable" >&2; exit 1; }
+while (( SECONDS < deadline )); do
+  pending=0
+  for index in "${!servers[@]}"; do
+    IFS=',' read -r -a applications <<<"${application_sets[$index]}"
+    (( ${#applications[@]} > 0 )) || { echo "Argo CD applications are empty for ${environments[$index]}" >&2; exit 1; }
+    for application in "${applications[@]}"; do
+      body="$(curl --fail-with-body --silent --show-error --cacert "${ca_files[$index]}" --header "Authorization: Bearer ${tokens[$index]}" \
+        "${servers[$index]}/api/v1/applications/$application")" || { pending=1; continue; }
+      if ! ruby ci/bin/check-argocd-application.rb --expectations "$expectations_file" \
+          --environment "${environments[$index]}" --application "$application" <<<"$body"; then
+        pending=1
+      fi
+    done
+  done
+  (( pending == 0 )) && exit 0
+  sleep 10
+done
+echo "Argo CD applications did not become Synced and Healthy within ${timeout}s" >&2
+exit 1

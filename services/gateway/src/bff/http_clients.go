@@ -13,6 +13,7 @@ import (
 
 	"unoarena/shared/correlation"
 	"unoarena/shared/envelope"
+	"unoarena/shared/internalprincipal"
 )
 
 const (
@@ -45,6 +46,16 @@ func (c HTTPClientConfig) requireBase() error {
 // HTTPIdentityClient talks to Identity over stdlib HTTP.
 type HTTPIdentityClient struct {
 	cfg HTTPClientConfig
+}
+
+type identityPrincipalResponse struct {
+	PlayerID      string   `json:"playerId"`
+	SessionID     string   `json:"sessionId"`
+	Username      string   `json:"username"`
+	Roles         []string `json:"roles"`
+	Scopes        []string `json:"scopes"`
+	Operator      bool     `json:"operator"`
+	InternalProof string   `json:"internalPrincipalProof"`
 }
 
 // NewHTTPIdentityClient constructs an Identity HTTP client.
@@ -87,14 +98,7 @@ func (c *HTTPIdentityClient) Whoami(ctx context.Context, token string, corr corr
 }
 
 func (c *HTTPIdentityClient) ValidateSession(ctx context.Context, token string, corr correlation.Headers) (Principal, error) {
-	var out struct {
-		PlayerID  string   `json:"playerId"`
-		SessionID string   `json:"sessionId"`
-		Username  string   `json:"username"`
-		Roles     []string `json:"roles"`
-		Scopes    []string `json:"scopes"`
-		Operator  bool     `json:"operator"`
-	}
+	var out identityPrincipalResponse
 	var err error
 	if strings.TrimSpace(c.cfg.ServiceCredential) != "" {
 		err = c.doJSON(ctx, http.MethodPost, "/internal/v1/sessions/validate", token, corr, nil, &out)
@@ -110,6 +114,47 @@ func (c *HTTPIdentityClient) ValidateSession(ctx context.Context, token string, 
 	if out.PlayerID == "" || out.SessionID == "" {
 		return Principal{}, fmt.Errorf("identity validation response omitted principal")
 	}
+	if out.InternalProof != "" {
+		return Principal{}, fmt.Errorf("identity session validation unexpectedly returned mutation proof")
+	}
+	return principalFromIdentityResponse(out), nil
+}
+
+func (c *HTTPIdentityClient) AuthorizeCommand(ctx context.Context, token string, authorization CommandAuthorization, corr correlation.Headers) (Principal, error) {
+	if strings.TrimSpace(c.cfg.ServiceCredential) == "" {
+		return Principal{}, fmt.Errorf("command authorization requires Identity service credential")
+	}
+	payload := map[string]any{
+		"boundedContext": authorization.BoundedContext,
+		"commandId":      authorization.Command.CommandID,
+		"type":           authorization.Command.Type,
+		"roomId":         authorization.RoomID,
+		"payload":        json.RawMessage(authorization.Command.Payload),
+	}
+	if authorization.Command.ExpectedSequenceNumber != nil {
+		payload["expectedSequenceNumber"] = *authorization.Command.ExpectedSequenceNumber
+	}
+	var out identityPrincipalResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/internal/v1/sessions/authorize-command", token, corr, payload, &out); err != nil {
+		if isUnauthorized(err) {
+			return Principal{}, ErrUnauthorized
+		}
+		return Principal{}, err
+	}
+	if out.PlayerID == "" || out.SessionID == "" {
+		return Principal{}, fmt.Errorf("identity command authorization response omitted principal")
+	}
+	if authorization.BoundedContext == internalprincipal.DefaultRoomAudience {
+		if out.InternalProof == "" || len(out.InternalProof) > internalprincipal.MaxTokenSize {
+			return Principal{}, fmt.Errorf("identity command authorization response omitted valid internal principal proof")
+		}
+	} else if out.InternalProof != "" {
+		return Principal{}, fmt.Errorf("identity leaked Room principal proof to another bounded context")
+	}
+	return principalFromIdentityResponse(out), nil
+}
+
+func principalFromIdentityResponse(out identityPrincipalResponse) Principal {
 	return Principal{
 		PlayerID:      out.PlayerID,
 		SessionID:     out.SessionID,
@@ -117,7 +162,8 @@ func (c *HTTPIdentityClient) ValidateSession(ctx context.Context, token string, 
 		Roles:         out.Roles,
 		Scopes:        out.Scopes,
 		OperatorScope: operatorScopeFromIdentity(out.Roles, out.Scopes, out.Operator),
-	}, nil
+		InternalProof: out.InternalProof,
+	}
 }
 
 func operatorScopeFromIdentity(roles, scopes []string, operator bool) bool {
@@ -170,7 +216,7 @@ func (c *HTTPIdentityClient) doJSON(ctx context.Context, method, path, bearer st
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, MaxRequestBodyBytes))
 	if resp.StatusCode >= 400 {
-		return &httpStatusError{status: resp.StatusCode, body: string(raw)}
+		return &httpStatusError{status: resp.StatusCode, body: string(raw), retryAfter: resp.Header.Get("Retry-After")}
 	}
 	if dest == nil {
 		return nil
@@ -192,7 +238,7 @@ func NewHTTPRoomClient(cfg HTTPClientConfig) *HTTPRoomClient {
 }
 
 func (c *HTTPRoomClient) SubmitCommand(ctx context.Context, req CommandDispatch) (envelope.Result, error) {
-	return submitCommandHTTP(ctx, c.cfg, "/internal/v1/commands", req)
+	return submitCommandHTTP(ctx, c.cfg, "/internal/v1/commands", req, true)
 }
 
 func (c *HTTPRoomClient) PlayerSnapshot(ctx context.Context, roomID, playerID string, corr correlation.Headers) (json.RawMessage, error) {
@@ -272,7 +318,7 @@ func NewHTTPTournamentClient(cfg HTTPClientConfig) *HTTPTournamentClient {
 }
 
 func (c *HTTPTournamentClient) SubmitCommand(ctx context.Context, req CommandDispatch) (envelope.Result, error) {
-	return submitCommandHTTP(ctx, c.cfg, "/internal/v1/commands", req)
+	return submitCommandHTTP(ctx, c.cfg, "/internal/v1/commands", req, false)
 }
 
 func (c *HTTPTournamentClient) Bracket(ctx context.Context, tournamentID, rawQuery string, corr correlation.Headers, principal *Principal) (json.RawMessage, error) {
@@ -328,7 +374,7 @@ func (c *HTTPTournamentClient) getTournamentRead(ctx context.Context, path strin
 	return json.RawMessage(raw), nil
 }
 
-func submitCommandHTTP(ctx context.Context, cfg HTTPClientConfig, path string, req CommandDispatch) (envelope.Result, error) {
+func submitCommandHTTP(ctx context.Context, cfg HTTPClientConfig, path string, req CommandDispatch, forwardPrincipalProof bool) (envelope.Result, error) {
 	if err := cfg.requireBase(); err != nil {
 		return envelope.Result{}, err
 	}
@@ -356,6 +402,9 @@ func submitCommandHTTP(ctx context.Context, cfg HTTPClientConfig, path string, r
 	if cfg.ServiceCredential != "" {
 		httpReq.Header.Set(headerServiceCredential, cfg.ServiceCredential)
 	}
+	if forwardPrincipalProof && req.Principal.InternalProof != "" {
+		httpReq.Header.Set(internalprincipal.HeaderName, req.Principal.InternalProof)
+	}
 	req.Correlation.Apply(httpReq.Header)
 	resp, err := cfg.client().Do(httpReq)
 	if err != nil {
@@ -375,9 +424,10 @@ func submitCommandHTTP(ctx context.Context, cfg HTTPClientConfig, path string, r
 
 // HTTPReadModelClient proxies ranking/analytics reads.
 type HTTPReadModelClient struct {
-	rankingURL   string
-	analyticsURL string
-	httpClient   *http.Client
+	rankingURL      string
+	analyticsURL    string
+	rankingClient   *http.Client
+	analyticsClient *http.Client
 }
 
 // NewHTTPReadModelClient constructs read-model HTTP clients.
@@ -385,7 +435,21 @@ func NewHTTPReadModelClient(rankingURL, analyticsURL string, httpClient *http.Cl
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
-	return &HTTPReadModelClient{rankingURL: rankingURL, analyticsURL: analyticsURL, httpClient: httpClient}
+	return NewHTTPReadModelClientWithClients(rankingURL, analyticsURL, httpClient, httpClient)
+}
+
+// NewHTTPReadModelClientWithClients keeps Ranking and Analytics failure domains independent.
+func NewHTTPReadModelClientWithClients(rankingURL, analyticsURL string, rankingClient, analyticsClient *http.Client) *HTTPReadModelClient {
+	if rankingClient == nil {
+		rankingClient = &http.Client{Timeout: defaultHTTPTimeout}
+	}
+	if analyticsClient == nil {
+		analyticsClient = &http.Client{Timeout: defaultHTTPTimeout}
+	}
+	return &HTTPReadModelClient{
+		rankingURL: rankingURL, analyticsURL: analyticsURL,
+		rankingClient: rankingClient, analyticsClient: analyticsClient,
+	}
 }
 
 func (c *HTTPReadModelClient) Leaderboard(ctx context.Context, rawQuery string, corr correlation.Headers) (json.RawMessage, error) {
@@ -396,23 +460,23 @@ func (c *HTTPReadModelClient) Leaderboard(ctx context.Context, rawQuery string, 
 	if rawQuery != "" {
 		endpoint += "?" + rawQuery
 	}
-	return c.get(ctx, endpoint, corr)
+	return c.get(ctx, c.rankingClient, endpoint, corr)
 }
 
 func (c *HTTPReadModelClient) PublicAnalytics(ctx context.Context, corr correlation.Headers) (json.RawMessage, error) {
 	if strings.TrimSpace(c.analyticsURL) == "" {
 		return nil, fmt.Errorf("analytics URL not configured")
 	}
-	return c.get(ctx, strings.TrimRight(c.analyticsURL, "/")+"/v1/analytics/public", corr)
+	return c.get(ctx, c.analyticsClient, strings.TrimRight(c.analyticsURL, "/")+"/v1/analytics/public", corr)
 }
 
-func (c *HTTPReadModelClient) get(ctx context.Context, url string, corr correlation.Headers) (json.RawMessage, error) {
+func (c *HTTPReadModelClient) get(ctx context.Context, client *http.Client, url string, corr correlation.Headers) (json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	corr.Apply(req.Header)
-	resp, err := c.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -461,9 +525,6 @@ func (g *HTTPSpectatorGate) Admit(ctx context.Context, req SpectatorAdmitRequest
 	httpReq.Header.Set("Content-Type", "application/json")
 	if g.cfg.ServiceCredential != "" {
 		httpReq.Header.Set(headerServiceCredential, g.cfg.ServiceCredential)
-	}
-	if req.Token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+req.Token)
 	}
 	if req.InviteCapability != "" {
 		httpReq.Header.Set(headerRoomInvite, req.InviteCapability)
@@ -522,9 +583,6 @@ func (g *HTTPSpectatorGate) Snapshot(ctx context.Context, req SpectatorAdmitRequ
 	if g.cfg.ServiceCredential != "" {
 		httpReq.Header.Set(headerServiceCredential, g.cfg.ServiceCredential)
 	}
-	if req.Token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+req.Token)
-	}
 	if req.Principal != nil {
 		httpReq.Header.Set("X-Player-Id", req.Principal.PlayerID)
 		httpReq.Header.Set("X-Session-Id", req.Principal.SessionID)
@@ -558,7 +616,26 @@ type httpStatusError struct {
 }
 
 func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("upstream status %d: %s", e.status, e.body)
+	if code := e.safeCode(); code != "" {
+		return fmt.Sprintf("upstream status %d (%s)", e.status, code)
+	}
+	return fmt.Sprintf("upstream status %d", e.status)
+}
+
+func (e *httpStatusError) safeCode() string {
+	if e == nil {
+		return ""
+	}
+	code := upstreamErrorCode(e.body)
+	if len(code) == 0 || len(code) > 64 {
+		return ""
+	}
+	for _, r := range code {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
+			return ""
+		}
+	}
+	return code
 }
 
 func isUnauthorized(err error) bool {
@@ -590,6 +667,9 @@ func (ClosedIdentity) Whoami(context.Context, string, correlation.Headers) (Prin
 	return Principal{}, fmt.Errorf("identity client not configured")
 }
 func (ClosedIdentity) ValidateSession(context.Context, string, correlation.Headers) (Principal, error) {
+	return Principal{}, fmt.Errorf("identity client not configured")
+}
+func (ClosedIdentity) AuthorizeCommand(context.Context, string, CommandAuthorization, correlation.Headers) (Principal, error) {
 	return Principal{}, fmt.Errorf("identity client not configured")
 }
 

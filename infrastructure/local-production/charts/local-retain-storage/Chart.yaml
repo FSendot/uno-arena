@@ -1,0 +1,6 @@
+apiVersion: v2
+name: local-retain-storage
+description: Retain-on-delete local-path StorageClass for the long-lived kind simulator
+type: application
+version: 0.1.0
+appVersion: "1"

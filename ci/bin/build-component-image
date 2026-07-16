@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "$0")/platform-metadata.sh"
+configure_release_component
+
+: "${CI_REGISTRY_IMAGE:?CI_REGISTRY_IMAGE is required}"
+: "${CI_COMMIT_REF_SLUG:?CI_COMMIT_REF_SLUG is required}"
+: "${CI_COMMIT_SHORT_SHA:?CI_COMMIT_SHORT_SHA is required}"
+
+image_ref="$CI_REGISTRY_IMAGE/$IMAGE_NAME:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+docker build -f "$DOCKERFILE" -t "$image_ref" .

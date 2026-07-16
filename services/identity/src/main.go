@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"unoarena/services/identity/domain"
 	"unoarena/services/identity/oidc"
 	"unoarena/services/identity/store"
+	"unoarena/shared/internalprincipal"
 )
 
 // internalCredentialHeader authenticates service-to-service callers of internal routes.
@@ -33,16 +35,22 @@ type Server struct {
 	oidc               *oidc.Validator
 	mode               string
 	readyReason        string
+	principalSigner    *internalprincipal.Signer
 }
 
 // NewServer builds a capability-mode HTTP server (tests / checkpoint defaults).
 func NewServer(svc *domain.Service, internalCredential string, invalidationReady bool) *Server {
+	signer, _ := internalprincipal.NewSigner(internalprincipal.SignerConfig{
+		ActiveKey: internalprincipal.Key{ID: "capability-v1", Material: []byte(capabilityPrincipalKey)}, Issuer: internalprincipal.DefaultIssuer,
+		Audience: internalprincipal.DefaultRoomAudience, TTL: 15 * time.Second,
+	})
 	return serverFromRuntime(identityRuntime{
 		svc:                svc,
 		mode:               "capability",
 		ready:              invalidationReady,
 		allowPasswordLogin: true,
 		allowRegister:      true,
+		principalSigner:    signer,
 	}, internalCredential)
 }
 
@@ -56,6 +64,7 @@ func serverFromRuntime(rt identityRuntime, cred string) *Server {
 		oidc:               rt.oidc,
 		mode:               rt.mode,
 		readyReason:        rt.readyReason,
+		principalSigner:    rt.principalSigner,
 	}
 	if rt.mode == "durable" && rt.pool != nil {
 		exp := rt.schemaExp
@@ -83,6 +92,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/whoami", s.whoamiHandler)
 
 	mux.HandleFunc("/internal/v1/sessions/validate", s.validateSessionHandler)
+	mux.HandleFunc("/internal/v1/sessions/authorize-command", s.authorizeCommandHandler)
 	mux.HandleFunc("/internal/v1/sessions/logout", s.logoutSessionHandler)
 	mux.HandleFunc("/internal/v1/sessions/", s.invalidateSessionHandler)
 	return mux
@@ -382,11 +392,93 @@ func (s *Server) validateSessionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"playerId":  principal.PlayerID.String(),
-		"sessionId": principal.SessionID.String(),
-		"roles":     principal.Roles,
-		"expiresAt": principal.ExpiresAt.UTC().Format(time.RFC3339),
+		"playerId": principal.PlayerID.String(), "sessionId": principal.SessionID.String(),
+		"roles": principal.Roles, "expiresAt": principal.ExpiresAt.UTC().Format(time.RFC3339),
 	})
+	logRequest(r, r.URL.Path)
+}
+
+// authorizeCommandHandler is the only Identity route that can mint a Room
+// mutation proof. It is Gateway-authenticated and runs after Gateway has
+// decoded and resolved the bounded command envelope.
+func (s *Server) authorizeCommandHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	if !s.authorizeInternal(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "invalid service credential")
+		return
+	}
+	if !s.requireService(w, r) {
+		return
+	}
+	token, ok := bearerToken(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "missing session token")
+		return
+	}
+	var body struct {
+		BoundedContext         string          `json:"boundedContext"`
+		CommandID              string          `json:"commandId"`
+		Type                   string          `json:"type"`
+		RoomID                 string          `json:"roomId"`
+		ExpectedSequenceNumber *int64          `json:"expectedSequenceNumber"`
+		Payload                json.RawMessage `json:"payload"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid command authorization body")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "invalid command authorization body")
+		return
+	}
+	contextName := strings.TrimSpace(body.BoundedContext)
+	if contextName != internalprincipal.DefaultRoomAudience && contextName != internalprincipal.TournamentContext {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "unsupported bounded context")
+		return
+	}
+	if strings.TrimSpace(body.CommandID) == "" || strings.TrimSpace(body.Type) == "" {
+		writeError(w, r, http.StatusBadRequest, "bad_request", "commandId and type required")
+		return
+	}
+	principal, validationErr := s.svc.ValidateToken(r.Context(), token)
+	// For this release, command eligibility is exactly successful validation of
+	// an active, non-expired Identity session; there is no separate status model.
+	commandEligible := validationErr == nil
+	if validationErr != nil {
+		status, code, msg := mapDomainHTTP(validationErr)
+		writeError(w, r, status, code, msg)
+		return
+	}
+	response := map[string]any{
+		"playerId": principal.PlayerID.String(), "sessionId": principal.SessionID.String(),
+		"roles": principal.Roles, "expiresAt": principal.ExpiresAt.UTC().Format(time.RFC3339),
+	}
+	if contextName == internalprincipal.DefaultRoomAudience {
+		if s.principalSigner == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "unavailable", "internal principal signing unavailable")
+			return
+		}
+		binding, err := internalprincipal.NewRoomCommandBinding(body.CommandID, body.Type, body.RoomID, body.ExpectedSequenceNumber, body.Payload)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "bad_request", "invalid room command binding")
+			return
+		}
+		proof, _, err := s.principalSigner.Issue(internalprincipal.IssueInput{
+			PlayerID: principal.PlayerID.String(), SessionID: principal.SessionID.String(),
+			Roles: principal.Roles, Eligible: commandEligible, SessionNotAfter: principal.ExpiresAt, Command: binding,
+		})
+		if err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "unavailable", "internal principal signing unavailable")
+			return
+		}
+		response["internalPrincipalProof"] = proof
+	}
+	writeJSON(w, http.StatusOK, response)
 	logRequest(r, r.URL.Path)
 }
 
