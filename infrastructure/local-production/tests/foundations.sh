@@ -93,9 +93,22 @@ ruby -ryaml -e '
   abort "GatewayClass mismatch" unless gateway.dig("spec", "gatewayClassName") == "istio"
   listeners = gateway.dig("spec", "listeners")
   abort "listener ports mismatch" unless listeners.map { |l| l["port"] } == [8080, 8443]
+  certificate_ref = listeners.fetch(1).dig("tls", "certificateRefs", 0)
+  expected_certificate_ref = {"group"=>"", "kind"=>"Secret", "name"=>"uno-arena-local-tls"}
+  abort "Gateway certificate reference defaults must be explicit" unless certificate_ref == expected_certificate_ref
   redirect = docs.find { |d| d.dig("metadata", "name") == "uno-arena-http-redirect" }
+  expected_parent = {"group"=>"gateway.networking.k8s.io", "kind"=>"Gateway", "name"=>"uno-arena-gateway"}
+  docs.select { |d| d["kind"] == "HTTPRoute" }.each do |route|
+    parent = route.dig("spec", "parentRefs", 0).reject { |key, _value| key == "sectionName" }
+    abort "HTTPRoute parent reference defaults must be explicit" unless parent == expected_parent
+  end
   filter = redirect.dig("spec", "rules", 0, "filters", 0, "requestRedirect")
   abort "redirect contract mismatch" unless filter == {"scheme"=>"https", "port"=>8443, "statusCode"=>301}
+  redirect_match = redirect.dig("spec", "rules", 0, "matches", 0, "path")
+  abort "redirect match defaults must be explicit" unless redirect_match == {"type"=>"PathPrefix", "value"=>"/"}
+  bff = docs.find { |d| d.dig("metadata", "name") == "uno-arena-bff" }
+  expected_backend = {"group"=>"", "kind"=>"Service", "name"=>"gateway", "port"=>8080, "weight"=>1}
+  abort "BFF backend reference defaults must be explicit" unless bff.dig("spec", "rules", 0, "backendRefs", 0) == expected_backend
   backend_names = docs.flat_map { |d| d.dig("spec", "rules") || [] }.flat_map { |r| r["backendRefs"] || [] }.map { |b| b["name"] }
   abort "only BFF may be public: #{backend_names.inspect}" unless backend_names == ["gateway"]
 ' "${LOCAL}/manifests/30-gateway.yaml"

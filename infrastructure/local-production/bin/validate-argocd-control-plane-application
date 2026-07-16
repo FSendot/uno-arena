@@ -1,0 +1,29 @@
+#!/usr/bin/env ruby
+require "json"
+
+abort "usage: #{$PROGRAM_NAME} ROLE MODE" unless ARGV.length == 2
+role, mode = ARGV
+abort "ROLE must be root or foundation" unless %w[root foundation].include?(role)
+abort "MODE must be full or foundation-only" unless %w[full foundation-only].include?(mode)
+
+application = JSON.parse(STDIN.read)
+expected_name = "uno-arena-local-production-#{role == "root" ? "root" : "foundations"}"
+abort "unexpected Argo Application" unless application.dig("metadata", "name") == expected_name
+abort "root/foundation Application is not Synced" unless application.dig("status", "sync", "status") == "Synced"
+
+health = application.dig("status", "health", "status")
+exit 0 if health == "Healthy"
+expected_degradation = role == "foundation" && mode == "foundation-only" && health == "Degraded"
+abort "root/foundation Application is not Healthy" unless expected_degradation
+
+degraded = Array(application.dig("status", "resources")).select do |resource|
+  resource.dig("health", "status") == "Degraded"
+end
+expected_resource = degraded.length == 1 &&
+  degraded.first.values_at("group", "kind", "namespace", "name") == [
+    "gateway.networking.k8s.io", "HTTPRoute", "uno-arena", "uno-arena-bff"
+  ]
+expected_message = degraded.first&.dig("health", "message").to_s.include?(
+  "backend(gateway.uno-arena.svc.cluster.local) not found"
+)
+abort "foundation has an unexpected degraded resource" unless expected_resource && expected_message

@@ -20,7 +20,8 @@ spec:
       tls:
         mode: Terminate
         certificateRefs:
-          - kind: Secret
+          - group: ""
+            kind: Secret
             name: uno-arena-local-tls
       allowedRoutes:
         namespaces:
@@ -33,12 +34,18 @@ metadata:
   namespace: uno-arena
 spec:
   parentRefs:
-    - name: uno-arena-gateway
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: uno-arena-gateway
       sectionName: http
   hostnames:
     - uno-arena.local
   rules:
-    - filters:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
         - type: RequestRedirect
           requestRedirect:
             scheme: https
@@ -52,7 +59,9 @@ metadata:
   namespace: uno-arena
 spec:
   parentRefs:
-    - name: uno-arena-gateway
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: uno-arena-gateway
       sectionName: https
   hostnames:
     - uno-arena.local
@@ -62,5 +71,8 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: gateway
+        - group: ""
+          kind: Service
+          name: gateway
           port: 8080
+          weight: 1

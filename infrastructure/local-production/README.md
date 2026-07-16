@@ -44,6 +44,7 @@ Artifact acquisition is an explicit networked operator step. See
 ./infrastructure/local-production/tests/seed-secrets.sh
 ./infrastructure/local-production/tests/service-chart-contracts.sh
 ./infrastructure/local-production/tests/argocd-core-manifest-contracts.sh
+./infrastructure/local-production/tests/argocd-control-plane-state-contracts.sh
 ./infrastructure/local-production/tests/argocd-operator-contracts.sh
 ```
 
@@ -94,6 +95,9 @@ Git and Helm repository Secret structure, the root and foundation Applications,
 all four narrowly scoped AppProjects, both ApplicationSets, and the health of
 the Git-backed generators. That proves private Git access and repository
 ownership of the post-bootstrap control plane. It
+allows the foundation Application to report only the expected missing-BFF
+backend degradation while no service release is enabled; full acceptance still
+requires that route and every expected Application to be healthy. It
 does not prove that a Helm package can be fetched; the first promoted Application
 that references an immutable chart version is the Helm connectivity check.
 Follow `FIRST_RUN.md` to publish platform artifacts, seed

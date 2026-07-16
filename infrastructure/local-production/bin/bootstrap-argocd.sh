@@ -56,11 +56,14 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout restart \
   deployment/argocd-repo-server
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
   deployment/argocd-repo-server --timeout=300s
-kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" apply -f "${tmp_dir}/root-seed.yaml"
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" apply --server-side -f "${tmp_dir}/root-seed.yaml"
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
   --for=jsonpath='{.status.sync.status}'=Synced \
   application/uno-arena-local-production-root --timeout=300s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
   --for=jsonpath='{.status.health.status}'=Healthy \
   application/uno-arena-local-production-root --timeout=300s
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
+  --for=jsonpath='{.status.sync.status}'=Synced \
+  application/uno-arena-local-production-foundations --timeout=300s
 echo "ok local-production-bootstrap-argocd context=${LOCAL_PRODUCTION_CONTEXT}"

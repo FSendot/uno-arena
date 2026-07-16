@@ -124,9 +124,14 @@ ruby -e '
   restart = commands.index { |command| command.include?("rollout restart deployment/argocd-repo-server") }
   rollout = commands.index { |command| command.include?("rollout status deployment/argocd-repo-server") }
   root_apply = commands.index { |command| command.include?("root-seed.yaml") }
+  foundation_wait = commands.index do |command|
+    command.include?("wait") && command.include?("application/uno-arena-local-production-foundations")
+  end
   abort "bootstrap must restart repo-server after writing repository Secrets" unless restart
   abort "bootstrap must wait for repo-server after restart" unless rollout && restart < rollout
   abort "bootstrap must refresh repo-server before applying the root Application" unless root_apply && rollout < root_apply
+  abort "bootstrap must adopt the root seed with server-side apply" unless commands.fetch(root_apply).include?("apply --server-side -f")
+  abort "bootstrap must wait for the repository-owned foundation" unless foundation_wait && root_apply < foundation_wait
 ' "${tmp_dir}/bootstrap-kubectl.args"
 
 failed_bootstrap_log="${tmp_dir}/failed-bootstrap.log"
@@ -204,11 +209,12 @@ grep -Fq 'EXPECTED_ARGO_APPLICATIONS' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'if [[ "${pre_source}" == false ]]' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'uno-arena-bootstrap uno-arena-foundations uno-arena-workloads uno-arena-stateful-platform' \
   "${LOCAL}/bin/acceptance.sh"
-grep -Fq 'uno-arena-local-production-root uno-arena-local-production-foundations' \
-  "${LOCAL}/bin/acceptance.sh"
+grep -Fq 'application=uno-arena-local-production-root' "${LOCAL}/bin/acceptance.sh"
+grep -Fq 'application=uno-arena-local-production-foundations' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'uno-arena-local-production-services uno-arena-local-production-platform' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'wait_for_applicationset uno-arena-local-production-services' "${LOCAL}/bin/acceptance.sh"
 grep -Fq 'wait_for_applicationset uno-arena-local-production-platform' "${LOCAL}/bin/acceptance.sh"
+grep -Fq 'validate-argocd-control-plane-application' "${LOCAL}/bin/acceptance.sh"
 grep -Fqx '  "${SCRIPT_DIR}/acceptance.sh" --foundation-only' "${LOCAL}/bin/install-foundations.sh"
 grep -Fqx '  "${SCRIPT_DIR}/acceptance.sh" --pre-source' "${LOCAL}/bin/install-foundations.sh"
 grep -Fq -- '--defer-private-sources' "${LOCAL}/bin/install-foundations.sh"

@@ -160,13 +160,14 @@ wait_for_applicationset() {
   [[ "${applicationset_ready}" == true ]] || die "ApplicationSet is not healthy: ${applicationset_name}"
 }
 if [[ "${pre_source}" == false ]]; then
-  for application in uno-arena-local-production-root uno-arena-local-production-foundations; do
+  control_plane_mode=full
+  [[ "${foundation_only}" == true ]] && control_plane_mode=foundation-only
+  for role in root foundation; do
+    application=uno-arena-local-production-root
+    [[ "${role}" == foundation ]] && application=uno-arena-local-production-foundations
     kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get application "${application}" -o json |
-      ruby -rjson -e '
-        document = JSON.parse(STDIN.read)
-        abort "root/foundation Application is not Synced" unless document.dig("status", "sync", "status") == "Synced"
-        abort "root/foundation Application is not Healthy" unless document.dig("status", "health", "status") == "Healthy"
-      ' || die "repository-owned Argo control plane is not ready: ${application}"
+      "${SCRIPT_DIR}/validate-argocd-control-plane-application" "${role}" "${control_plane_mode}" ||
+      die "repository-owned Argo control plane is not ready: ${application}"
   done
   kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get applicationprojects.argoproj.io \
     uno-arena-bootstrap uno-arena-foundations uno-arena-workloads uno-arena-stateful-platform >/dev/null
