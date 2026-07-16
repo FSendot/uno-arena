@@ -5,7 +5,8 @@ LOCAL="${ROOT}/infrastructure/local-production"
 
 for script in "${LOCAL}/bin/configure-argocd-repositories.sh" \
   "${LOCAL}/bin/generate-argocd-ci-token.sh" "${LOCAL}/bin/install-argocd-core.sh" \
-  "${LOCAL}/bin/bootstrap-argocd.sh" "${LOCAL}/bin/acceptance.sh"; do
+  "${LOCAL}/bin/bootstrap-argocd.sh" "${LOCAL}/bin/acceptance.sh" \
+  "${LOCAL}/bin/check-argocd-controller-network.sh"; do
   bash -n "${script}"
 done
 
@@ -40,9 +41,16 @@ if [[ "$*" == config\ view* ]]; then
   esac
   exit 0
 fi
-if [[ "$*" == *"apply -f -" ]]; then
+if [[ "$*" == *"apply"*"-f -"* ]]; then
   ruby -e 'File.open(ENV.fetch("CAPTURE_FILE"), "a", 0600) { |file| file.puts(STDIN.read) }'
   exit 0
+fi
+if [[ "$*" == *"-n argocd exec argocd-application-controller-0 --"* &&
+  "${FAIL_ARGOCD_CONTROLLER_NETWORK:-0}" == "1" ]]; then
+  if [[ -n "${KUBECTL_ARGS_FILE:-}" ]]; then
+    printf '%s\n' "$*" >>"${KUBECTL_ARGS_FILE}"
+  fi
+  exit 124
 fi
 if [[ -n "${KUBECTL_ARGS_FILE:-}" ]]; then
   printf '%s\n' "$*" >>"${KUBECTL_ARGS_FILE}"
@@ -55,7 +63,11 @@ cat >"${fake_bin}/argocd" <<'FAKE_ARGOCD'
 printf '%s\n' "$*" >"${ARGOCD_ARGS_FILE}"
 printf '%s' 'generated-ci-account-token'
 FAKE_ARGOCD
-chmod 700 "${fake_bin}/kind" "${fake_bin}/kubectl" "${fake_bin}/argocd"
+cat >"${fake_bin}/sleep" <<'FAKE_SLEEP'
+#!/usr/bin/env bash
+exit 0
+FAKE_SLEEP
+chmod 700 "${fake_bin}/kind" "${fake_bin}/kubectl" "${fake_bin}/argocd" "${fake_bin}/sleep"
 
 capture_file="${tmp_dir}/repositories.jsonl"
 operator_log="${tmp_dir}/repositories.log"
@@ -92,14 +104,38 @@ ruby -rjson -e '
 bootstrap_log="${tmp_dir}/bootstrap.log"
 bootstrap_git_url='https://gitlab.com/itba-73-40-microservicios/alumnos/2026-s1/grupo-6/uno-arena.git'
 bootstrap_helm_url='https://gitlab.com/api/v4/projects/17/packages/helm/stable'
-PATH="${fake_bin}:${PATH}" CAPTURE_FILE="${capture_file}" KUBECTL_ARGS_FILE="${tmp_dir}/bootstrap-kubectl.args" \
+if ! PATH="${fake_bin}:${PATH}" CAPTURE_FILE="${capture_file}" \
+  KUBECTL_ARGS_FILE="${tmp_dir}/bootstrap-kubectl.args" \
   ARGOCD_GIT_REPO_URL="${bootstrap_git_url}" ARGOCD_HELM_REPO_URL="${bootstrap_helm_url}" \
   ARGOCD_GIT_READ_USERNAME='git-reader' ARGOCD_GIT_READ_PASSWORD="${git_password}" \
   ARGOCD_HELM_READ_USERNAME='helm-reader' ARGOCD_HELM_READ_PASSWORD="${helm_password}" \
-  "${LOCAL}/bin/bootstrap-argocd.sh" >"${bootstrap_log}" 2>&1
+  "${LOCAL}/bin/bootstrap-argocd.sh" >"${bootstrap_log}" 2>&1; then
+  sed -e "s/${git_password}/REDACTED/g" -e "s/${helm_password}/REDACTED/g" \
+    "${bootstrap_log}" >&2
+  exit 1
+fi
 grep -Fq 'ok local-production-bootstrap-argocd' "${bootstrap_log}"
 if rg -F -e "${git_password}" -e "${helm_password}" "${bootstrap_log}"; then
   echo "bootstrap helper printed a credential" >&2
+  exit 1
+fi
+
+failed_bootstrap_log="${tmp_dir}/failed-bootstrap.log"
+failed_bootstrap_args="${tmp_dir}/failed-bootstrap-kubectl.args"
+if PATH="${fake_bin}:${PATH}" CAPTURE_FILE="${capture_file}" KUBECTL_ARGS_FILE="${failed_bootstrap_args}" \
+  FAIL_ARGOCD_CONTROLLER_NETWORK=1 \
+  ARGOCD_GIT_REPO_URL="${bootstrap_git_url}" ARGOCD_HELM_REPO_URL="${bootstrap_helm_url}" \
+  ARGOCD_GIT_READ_USERNAME='git-reader' ARGOCD_GIT_READ_PASSWORD="${git_password}" \
+  ARGOCD_HELM_READ_USERNAME='helm-reader' ARGOCD_HELM_READ_PASSWORD="${helm_password}" \
+  "${LOCAL}/bin/bootstrap-argocd.sh" >"${failed_bootstrap_log}" 2>&1; then
+  echo "bootstrap continued after the Argo controller network probe failed" >&2
+  exit 1
+fi
+grep -Fq 'Argo application controller cannot reach DNS, Kubernetes API, and Redis' \
+  "${failed_bootstrap_log}"
+grep -Fq -- '-n argocd exec argocd-application-controller-0 --' "${failed_bootstrap_args}"
+if grep -Fq 'root-seed.yaml' "${failed_bootstrap_args}"; then
+  echo "bootstrap seeded the root Application after the controller network probe failed" >&2
   exit 1
 fi
 

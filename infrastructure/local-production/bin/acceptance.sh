@@ -93,6 +93,7 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n uno-arena get authorizationpo
 
 [[ "$(kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get service argocd-server \
   -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}')" == "30445" ]] || die "Argo API NodePort mismatch"
+"${SCRIPT_DIR}/check-argocd-controller-network.sh"
 
 validate_repository_secret() {
   local secret_name="$1"

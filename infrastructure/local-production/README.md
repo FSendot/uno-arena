@@ -26,6 +26,10 @@ acceptance cluster under `infrastructure/kind`.
   SANs. It is forbidden in a real production overlay.
 - `uno-arena` and `observability` use Istio Ambient, strict mTLS, and
   workload/service-account-specific L4 policies.
+- This kind simulator omits only the seven ingress-oriented NetworkPolicies
+  bundled with Argo CD. kind's userspace NFQUEUE policy engine cannot enforce
+  them on the OrbStack kernel without blocking the Argo controller's DNS, API,
+  and Redis traffic. Production renders retain their CNI-enforced policies.
 
 ## Acquisition and offline checks
 
@@ -39,6 +43,7 @@ Artifact acquisition is an explicit networked operator step. See
 ./infrastructure/local-production/tests/platform-charts.sh
 ./infrastructure/local-production/tests/seed-secrets.sh
 ./infrastructure/local-production/tests/service-chart-contracts.sh
+./infrastructure/local-production/tests/argocd-core-manifest-contracts.sh
 ./infrastructure/local-production/tests/argocd-operator-contracts.sh
 ```
 

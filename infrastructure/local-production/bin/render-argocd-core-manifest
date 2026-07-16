@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# Keep upstream Argo resources except CNI-enforced policies unsupported by this kind lane.
+require "yaml"
+
+abort "usage: #{$PROGRAM_NAME} ARGOCD_INSTALL_MANIFEST" unless ARGV.length == 1
+documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+expected_network_policies = %w[
+  argocd-application-controller-network-policy
+  argocd-applicationset-controller-network-policy
+  argocd-dex-server-network-policy
+  argocd-notifications-controller-network-policy
+  argocd-redis-network-policy
+  argocd-repo-server-network-policy
+  argocd-server-network-policy
+].sort
+actual_network_policies = documents.select { |document| document["kind"] == "NetworkPolicy" }
+  .map { |document| document.dig("metadata", "name") }.sort
+unless actual_network_policies == expected_network_policies
+  abort "vendored Argo NetworkPolicy inventory changed: #{actual_network_policies.inspect}"
+end
+
+documents.reject { |document| document["kind"] == "NetworkPolicy" }
+  .each { |document| puts YAML.dump(document) }
