@@ -37,8 +37,16 @@ if rg -n 'example\.invalid|GROUP/PROJECT|PROJECT_ID' "${tmp_dir}/root-seed.yaml"
 fi
 grep -Fq "name: uno-arena-local-production-root" "${tmp_dir}/root-seed.yaml" ||
   die "rendered Argo root Application missing"
-grep -Fq "repoURL: ${ARGOCD_GIT_REPO_URL}" "${tmp_dir}/root-seed.yaml" ||
-  die "rendered Argo root repository mismatch"
+EXPECTED_GIT_REPO_URL="${ARGOCD_GIT_REPO_URL}" ruby -ryaml -e '
+  documents = YAML.load_stream(File.read(ARGV.fetch(0))).compact
+  root = documents.find do |document|
+    document["kind"] == "Application" &&
+      document.dig("metadata", "name") == "uno-arena-local-production-root"
+  end
+  abort "rendered Argo root Application missing" unless root
+  actual = root.dig("spec", "source", "repoURL")
+  abort "rendered Argo root repository mismatch" unless actual == ENV.fetch("EXPECTED_GIT_REPO_URL")
+' "${tmp_dir}/root-seed.yaml"
 
 "${SCRIPT_DIR}/install-argocd-core.sh"
 "${SCRIPT_DIR}/configure-argocd-repositories.sh"

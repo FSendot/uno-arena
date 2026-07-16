@@ -5,7 +5,7 @@ LOCAL="${ROOT}/infrastructure/local-production"
 
 for script in "${LOCAL}/bin/configure-argocd-repositories.sh" \
   "${LOCAL}/bin/generate-argocd-ci-token.sh" "${LOCAL}/bin/install-argocd-core.sh" \
-  "${LOCAL}/bin/acceptance.sh"; do
+  "${LOCAL}/bin/bootstrap-argocd.sh" "${LOCAL}/bin/acceptance.sh"; do
   bash -n "${script}"
 done
 
@@ -88,6 +88,20 @@ ruby -rjson -e '
     abort "wrong repository password" unless document.dig("stringData", "password") == password
   end
 ' "${capture_file}"
+
+bootstrap_log="${tmp_dir}/bootstrap.log"
+bootstrap_git_url='https://gitlab.com/itba-73-40-microservicios/alumnos/2026-s1/grupo-6/uno-arena.git'
+bootstrap_helm_url='https://gitlab.com/api/v4/projects/17/packages/helm/stable'
+PATH="${fake_bin}:${PATH}" CAPTURE_FILE="${capture_file}" KUBECTL_ARGS_FILE="${tmp_dir}/bootstrap-kubectl.args" \
+  ARGOCD_GIT_REPO_URL="${bootstrap_git_url}" ARGOCD_HELM_REPO_URL="${bootstrap_helm_url}" \
+  ARGOCD_GIT_READ_USERNAME='git-reader' ARGOCD_GIT_READ_PASSWORD="${git_password}" \
+  ARGOCD_HELM_READ_USERNAME='helm-reader' ARGOCD_HELM_READ_PASSWORD="${helm_password}" \
+  "${LOCAL}/bin/bootstrap-argocd.sh" >"${bootstrap_log}" 2>&1
+grep -Fq 'ok local-production-bootstrap-argocd' "${bootstrap_log}"
+if rg -F -e "${git_password}" -e "${helm_password}" "${bootstrap_log}"; then
+  echo "bootstrap helper printed a credential" >&2
+  exit 1
+fi
 
 kubectl_args_file="${tmp_dir}/kubectl.args"
 PATH="${fake_bin}:${PATH}" KUBECTL_ARGS_FILE="${kubectl_args_file}" \

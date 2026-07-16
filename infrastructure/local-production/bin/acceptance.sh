@@ -97,8 +97,10 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n uno-arena get authorizationpo
 validate_repository_secret() {
   local secret_name="$1"
   local expected_type="$2"
-  kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get secret "${secret_name}" -o json |
-    EXPECTED_REPOSITORY_TYPE="${expected_type}" ruby -rbase64 -rjson -e '
+  local secret_json
+  secret_json="$(kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd \
+    get secret "${secret_name}" -o json 2>/dev/null)" || return 1
+  EXPECTED_REPOSITORY_TYPE="${expected_type}" ruby -rbase64 -rjson -e '
       document = JSON.parse(STDIN.read)
       label = document.dig("metadata", "labels", "argocd.argoproj.io/secret-type")
       abort "wrong Argo repository label" unless label == "repository"
@@ -108,7 +110,7 @@ validate_repository_secret() {
       end
       type = Base64.strict_decode64(data.fetch("type"))
       abort "wrong Argo repository type" unless type == ENV.fetch("EXPECTED_REPOSITORY_TYPE")
-    '
+    ' <<<"${secret_json}"
 }
 if [[ "${pre_source}" == false ]]; then
   validate_repository_secret uno-arena-git-repository git || die "private Git repository credential is not ready"
