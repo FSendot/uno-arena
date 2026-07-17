@@ -9,9 +9,11 @@ acceptance cluster under `infrastructure/kind`.
 - Every mutating command uses the exact active context
   `kind-uno-arena-production`; no script switches context.
 - The cluster is one control-plane plus two explicitly labeled workers.
-- Docker must expose at least 8 CPUs. Every kind node receives a quota matching
-  the Docker CPU count its kubelet advertises; relative shares preserve
-  control-plane priority during cold-start reconciliation.
+- Docker must expose at least 8 CPUs and 10 GiB of memory. The memory floor
+  preserves enough file cache for the full stack so etcd is not starved by
+  major-fault churn. Every kind node receives a quota matching the Docker CPU
+  count its kubelet advertises; relative shares preserve control-plane priority
+  during cold-start reconciliation.
 - The kube-apiserver keeps strict readiness while allowing five minutes of
   liveness probe failures during bounded cold-start contention, preventing an
   otherwise healthy etcd member from being hidden behind repeated API restarts.

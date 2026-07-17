@@ -19,6 +19,10 @@ KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553
 docker_cpu_count="$(docker info --format '{{.NCPU}}')"
 [[ "${docker_cpu_count}" =~ ^[0-9]+$ && "${docker_cpu_count}" -ge 8 ]] ||
   die "local-production requires at least 8 CPUs assigned to Docker; found ${docker_cpu_count}"
+docker_memory_bytes="$(docker info --format '{{.MemTotal}}')"
+minimum_memory_bytes="$((10 * 1024 * 1024 * 1024))"
+[[ "${docker_memory_bytes}" =~ ^[0-9]+$ && "${docker_memory_bytes}" -ge "${minimum_memory_bytes}" ]] ||
+  die "local-production requires at least 10 GiB assigned to Docker; found ${docker_memory_bytes} bytes"
 
 if kind get clusters 2>/dev/null | grep -qx "${LOCAL_PRODUCTION_CLUSTER}"; then
   echo "kind cluster '${LOCAL_PRODUCTION_CLUSTER}' already exists"
