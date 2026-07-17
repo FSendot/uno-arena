@@ -40,10 +40,14 @@ class PipelineRendererTest < Minitest::Test
     assert pipeline.key?("validate:inventories")
   end
 
-  def test_argocd_change_waits_for_exact_root_and_foundation_applications
+  def test_argocd_change_waits_for_control_plane_and_all_released_applications
     pipeline = render(["environments/local-production/argocd/templates/root-application.yaml"])
     applications = pipeline.dig("reconcile:wait", "variables", "ARGOCD_APPLICATIONS_LOCAL_PRODUCTION").split(",")
-    assert_equal %w[uno-arena-local-production-foundations uno-arena-local-production-root], applications
+    expected = released_local_production_applications + %w[
+      uno-arena-local-production-foundations
+      uno-arena-local-production-root
+    ]
+    assert_equal expected.uniq.sort, applications
   end
 
 
@@ -110,5 +114,15 @@ class PipelineRendererTest < Minitest::Test
                  pipeline.dig("reconcile:wait", "variables", "ARGOCD_APPLICATIONS_PRODUCTION")
     assert_equal "", pipeline.dig("reconcile:wait", "variables", "ARGOCD_APPLICATIONS_LOCAL_PRODUCTION")
     refute pipeline.key?("rollback:stateless")
+  end
+
+  private
+
+  def released_local_production_applications
+    %w[services platform].flat_map do |inventory|
+      Dir[File.join("environments/local-production", inventory, "enabled", "*.yaml")]
+    end.map do |path|
+      YAML.safe_load(File.read(path), [], [], true).fetch("application")
+    end
   end
 end

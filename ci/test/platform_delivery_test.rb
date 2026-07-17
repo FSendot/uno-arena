@@ -33,6 +33,20 @@ class PlatformDeliveryTest < Minitest::Test
   def test_initial_context_bootstrap_promotion_fails_without_image_artifact
     Dir.mktmpdir do |dir|
       copy_platform_inventory(dir, "context-bootstrap")
+      path = File.join(dir, "environments/local-production/platform/context-bootstrap.yaml")
+      document = YAML.safe_load(File.read(path), [], [], true)
+      document["enabled"] = false
+      document["status"] = "awaiting-immutable-package-publication"
+      document["chart"] = {
+        "repository" => "https://gitlab.example.invalid/api/v4/projects/PROJECT_ID/packages/helm/stable",
+        "name" => "context-bootstrap",
+        "version" => "0.1.0"
+      }
+      document["values"]["image"] = {
+        "repository" => "registry.gitlab.example.invalid/GROUP/PROJECT/bootstrap",
+        "digest" => "sha256:#{'0' * 64}"
+      }
+      File.write(path, YAML.dump(document))
       write_artifact(dir, "context-bootstrap", "chart", {
         "chart" => { "repository" => "https://gitlab.test/api/v4/projects/1/packages/helm/stable", "name" => "context-bootstrap", "version" => "0.1.42" }
       })
@@ -51,9 +65,15 @@ class PlatformDeliveryTest < Minitest::Test
       document = YAML.safe_load(File.read(path), [], [], true)
       document["enabled"] = true
       document["status"] = "released"
-      document["chart"]["repository"] = "https://gitlab.test/api/v4/projects/1/packages/helm/stable"
+      document["chart"] = {
+        "repository" => "https://gitlab.test/api/v4/projects/1/packages/helm/stable",
+        "name" => "context-bootstrap",
+        "version" => "0.1.7",
+        "packageSha256" => "#{'d' * 64}"
+      }
       document["values"]["image"] = { "repository" => "registry.gitlab.test/project/bootstrap", "digest" => "sha256:#{'c' * 64}" }
       File.write(path, YAML.dump(document))
+      original_chart = document.fetch("chart")
       write_artifact(dir, "context-bootstrap", "image", {
         "image" => { "repository" => "registry.gitlab.test/project/bootstrap", "digest" => DIGEST }
       })
@@ -62,7 +82,7 @@ class PlatformDeliveryTest < Minitest::Test
       )
       assert status.success?, "#{stdout}\n#{stderr}"
       promoted = YAML.safe_load(File.read(path), [], [], true)
-      assert_equal "0.1.0", promoted.dig("chart", "version")
+      assert_equal original_chart, promoted["chart"]
       assert_equal DIGEST, promoted.dig("values", "image", "digest")
     end
   end
