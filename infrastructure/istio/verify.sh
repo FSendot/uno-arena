@@ -64,8 +64,8 @@ printf '%s' "${cni_render}" | ruby -ryaml -e '
     configmap&.dig("data", "AMBIENT_IPV6") == "false"
   abort "local Istio CNI must avoid optional DNS-proxy work on constrained kind nodes" unless
     configmap&.dig("data", "AMBIENT_DNS_CAPTURE") == "false"
-  abort "local Istio CNI must not replay every pod network namespace after an agent-only restart" unless
-    configmap&.dig("data", "AMBIENT_RECONCILE_POD_RULES_ON_STARTUP") == "false"
+  abort "local Istio CNI must restore ambient rules for surviving pod sandboxes after a node restart" unless
+    configmap&.dig("data", "AMBIENT_RECONCILE_POD_RULES_ON_STARTUP") == "true"
 '
 printf '%s' "${ztunnel_render}" | ruby -ryaml -e '
   docs = YAML.load_stream(STDIN.read).compact

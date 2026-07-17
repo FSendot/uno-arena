@@ -8,10 +8,10 @@ ambient:
   # ambient DNS proxy keeps native nftables programming within CNI's deadline
   # on the deliberately small worker nodes.
   dnsCapture: false
-  # Pod network namespaces retain their rules across an agent-only restart;
-  # replaying every pod blocks CNI readiness for minutes on a full local node.
-  # A node restart recreates the pods and programs them through normal CNI ADD.
-  reconcileIptablesOnStartup: false
+  # OrbStack/node restarts can preserve pod sandboxes while losing their ambient
+  # redirection state. Reconcile existing namespaces so strict mTLS does not
+  # reject their traffic as plaintext after the node returns.
+  reconcileIptablesOnStartup: true
 global:
   imagePullPolicy: IfNotPresent
   nativeNftables: true

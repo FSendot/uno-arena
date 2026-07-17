@@ -19,6 +19,8 @@ acceptance cluster under `infrastructure/kind`.
   otherwise healthy etcd member from being hidden behind repeated API restarts.
 - Istio CNI and ztunnel both disable IPv6 behavior in this IPv4-only kind lane,
   so ztunnel never blocks pod sandbox creation while trying to bind `::1`.
+  CNI startup reconciliation restores ambient rules for pod sandboxes that
+  survive an OrbStack or kind-node restart.
 - CoreDNS runs three replicas with one replica per node.
 - Both local ApplicationSets use health-gated RollingSync with `maxUpdate: 1`,
   bounding a disaster-recovery replay to one platform and one service sync.
