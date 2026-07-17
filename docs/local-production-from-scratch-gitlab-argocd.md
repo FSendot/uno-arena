@@ -52,6 +52,7 @@ cd /Users/martin.zahnd/Documents/microservicios/uno-arena
 | kind cluster/context | `uno-arena-production` / `kind-uno-arena-production` |
 | topology | one control-plane and two workers |
 | Docker capacity | at least 8 CPUs; each kind node quota matches Docker's CPU count |
+| API cold-start budget | strict readiness; five-minute kube-apiserver liveness failure budget |
 | host ports | HTTP 8080, edge TLS 8443, reserved 8444, private Argo TLS 9443 |
 | public hostname | `uno-arena.local` |
 | kind/node | kind 0.32.0; Kubernetes 1.36.1 digest pinned in `create-cluster.sh` |

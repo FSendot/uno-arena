@@ -71,11 +71,14 @@ printf '%s' "${ztunnel_render}" | ruby -ryaml -e '
   docs = YAML.load_stream(STDIN.read).compact
   daemonset = docs.find { |doc| doc["kind"] == "DaemonSet" && doc.dig("metadata", "name") == "ztunnel" }
   resources = daemonset&.dig("spec", "template", "spec", "containers", 0, "resources")
+  env = daemonset&.dig("spec", "template", "spec", "containers", 0, "env") || []
   abort "local ztunnel must reserve CPU for ambient pod enrollment" unless
     resources&.dig("limits", "cpu").to_s == "1" &&
     resources&.dig("limits", "memory") == "512Mi" &&
     resources&.dig("requests", "cpu") == "500m" &&
     resources&.dig("requests", "memory") == "128Mi"
+  abort "local ztunnel must not bind IPv6 listeners in the IPv4-only kind cluster" unless
+    env.any? { |item| item == {"name" => "IPV6_ENABLED", "value" => "false"} }
 '
 for component in istiod cni ztunnel; do
   render_var="${component}_render"

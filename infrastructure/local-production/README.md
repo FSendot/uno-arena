@@ -10,8 +10,13 @@ acceptance cluster under `infrastructure/kind`.
   `kind-uno-arena-production`; no script switches context.
 - The cluster is one control-plane plus two explicitly labeled workers.
 - Docker must expose at least 8 CPUs. Every kind node receives a quota matching
-  the Docker CPU count its kubelet advertises; relative shares preserve control-plane
-  priority during cold-start reconciliation.
+  the Docker CPU count its kubelet advertises; relative shares preserve
+  control-plane priority during cold-start reconciliation.
+- The kube-apiserver keeps strict readiness while allowing five minutes of
+  liveness probe failures during bounded cold-start contention, preventing an
+  otherwise healthy etcd member from being hidden behind repeated API restarts.
+- Istio CNI and ztunnel both disable IPv6 behavior in this IPv4-only kind lane,
+  so ztunnel never blocks pod sandbox creation while trying to bind `::1`.
 - CoreDNS runs three replicas with one replica per node.
 - Both local ApplicationSets use health-gated RollingSync with `maxUpdate: 1`,
   bounding a disaster-recovery replay to one platform and one service sync.

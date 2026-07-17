@@ -54,6 +54,26 @@ printf '%s' '{"data":{"Corefile":".:53 {\n    forward . /etc/resolv.conf {\n    
       corefile.index("template IN AAAA .") < corefile.index("forward . /etc/resolv.conf")
   '
 
+printf '%s' 'apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: kube-apiserver
+      livenessProbe:
+        failureThreshold: 8
+        httpGet: {path: /livez, port: 6443}
+      readinessProbe:
+        failureThreshold: 3
+        httpGet: {path: /readyz, port: 6443}
+' |
+  "${LOCAL}/bin/render-kube-apiserver-probe-manifest" |
+  ruby -ryaml -e '
+    pod = YAML.safe_load(STDIN.read)
+    container = pod.dig("spec", "containers", 0)
+    abort "API liveness budget mismatch" unless container.dig("livenessProbe", "failureThreshold") == 30
+    abort "API readiness must remain strict" unless container.dig("readinessProbe", "failureThreshold") == 3
+  '
+
 grep -q 'LOCAL_PRODUCTION_CONTEXT="kind-' "${LOCAL}/bin/lib.sh"
 grep -q 'kind get kubeconfig --name' "${LOCAL}/bin/lib.sh"
 grep -q 'certificate-authority-data' "${LOCAL}/bin/lib.sh"
@@ -71,6 +91,8 @@ grep -Fq 'docker update --cpus "${docker_cpu_count}" "${LOCAL_PRODUCTION_CLUSTER
 grep -Fq 'docker update --cpu-shares 4096 "${LOCAL_PRODUCTION_CLUSTER}-control-plane"' "${LOCAL}/bin/create-cluster.sh"
 grep -Fq 'docker update --cpu-shares 1024 "${LOCAL_PRODUCTION_CLUSTER}-worker"' "${LOCAL}/bin/create-cluster.sh"
 grep -Fq 'docker update --cpu-shares 1024 "${LOCAL_PRODUCTION_CLUSTER}-worker2"' "${LOCAL}/bin/create-cluster.sh"
+grep -Fq 'render-kube-apiserver-probe-manifest' "${LOCAL}/bin/create-cluster.sh"
+grep -Fq 'get --raw=/readyz' "${LOCAL}/bin/create-cluster.sh"
 grep -Fq 'patch deployment coredns' "${LOCAL}/bin/create-cluster.sh"
 grep -Fq '"replicas":3' "${LOCAL}/bin/create-cluster.sh"
 grep -Fq 'render-coredns-ipv4-patch' "${LOCAL}/bin/create-cluster.sh"

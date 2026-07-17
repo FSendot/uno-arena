@@ -30,9 +30,9 @@ else
 fi
 
 # kind's kubelets advertise the Docker VM's full CPU count for every node. Keep
-# the container quotas aligned with that advertised capacity: a 4+2+2
-# split makes the scheduler admit work that the worker cgroups cannot run and
-# can starve CoreDNS, etcd, and the API during cold-start reconciliation.
+# the container quotas aligned with that advertised capacity: a 4+2+2 split
+# makes the scheduler admit work that the worker cgroups cannot run and can
+# starve CoreDNS, etcd, and the API during cold-start reconciliation.
 docker update --cpus "${docker_cpu_count}" "${LOCAL_PRODUCTION_CLUSTER}-control-plane" >/dev/null
 docker update --cpus "${docker_cpu_count}" "${LOCAL_PRODUCTION_CLUSTER}-worker" >/dev/null
 docker update --cpus "${docker_cpu_count}" "${LOCAL_PRODUCTION_CLUSTER}-worker2" >/dev/null
@@ -42,8 +42,33 @@ docker update --cpu-shares 4096 "${LOCAL_PRODUCTION_CLUSTER}-control-plane" >/de
 docker update --cpu-shares 1024 "${LOCAL_PRODUCTION_CLUSTER}-worker" >/dev/null
 docker update --cpu-shares 1024 "${LOCAL_PRODUCTION_CLUSTER}-worker2" >/dev/null
 
+# kubeadm's default liveness budget restarts the API server after 80 seconds of
+# probe timeouts. A cold three-node replay can legitimately exceed that while
+# exact pinned images initialize, even though etcd remains alive and recovers.
+# Keep readiness strict, but allow five minutes before liveness restarts the API
+# and temporarily loses its warmed RBAC/discovery caches.
+apiserver_manifest="$(mktemp)"
+apiserver_manifest_patched="${apiserver_manifest}.patched"
+trap 'rm -f "${apiserver_manifest}" "${apiserver_manifest_patched}"' EXIT
+docker cp "${LOCAL_PRODUCTION_CLUSTER}-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml" \
+  "${apiserver_manifest}" >/dev/null
+"${SCRIPT_DIR}/render-kube-apiserver-probe-manifest" \
+  <"${apiserver_manifest}" >"${apiserver_manifest_patched}"
+docker cp "${apiserver_manifest_patched}" \
+  "${LOCAL_PRODUCTION_CLUSTER}-control-plane:/etc/kubernetes/manifests/kube-apiserver.yaml" >/dev/null
+rm -f "${apiserver_manifest}" "${apiserver_manifest_patched}"
+trap - EXIT
+
 assert_simulator_cluster_exists
 assert_exact_context
+for attempt in {1..60}; do
+  if kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" --request-timeout=10s \
+    get --raw=/readyz >/dev/null 2>&1; then
+    break
+  fi
+  [[ "${attempt}" != "60" ]] || die "kube-apiserver did not recover after its liveness manifest update"
+  sleep 5
+done
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" wait --for=condition=Ready nodes --all --timeout=180s
 
 # Kubernetes 1.36 rejects reserved node-role labels when they are passed via

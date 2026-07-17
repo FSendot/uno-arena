@@ -1,0 +1,20 @@
+#!/usr/bin/env ruby
+# Keep the local kube-apiserver alive through bounded cold-start CPU storms.
+require "yaml"
+
+document = YAML.safe_load($stdin.read)
+abort "expected a Kubernetes Pod manifest" unless document["kind"] == "Pod"
+
+containers = document.dig("spec", "containers")
+abort "kube-apiserver manifest has no containers" unless containers.is_a?(Array)
+
+apiserver = containers.find { |container| container["name"] == "kube-apiserver" }
+abort "kube-apiserver container is missing" unless apiserver
+
+liveness = apiserver["livenessProbe"]
+abort "kube-apiserver liveness probe is missing" unless liveness.is_a?(Hash)
+abort "kube-apiserver liveness probe no longer targets /livez" unless
+  liveness.dig("httpGet", "path") == "/livez"
+
+liveness["failureThreshold"] = 30
+puts YAML.dump(document)
