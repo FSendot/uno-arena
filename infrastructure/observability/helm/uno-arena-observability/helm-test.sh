@@ -179,9 +179,9 @@ assert_postsync_render() {
     abort "#{profile} evidence identity must not receive Kubernetes RBAC" if privileged
     principal="cluster.local/ns/observability/sa/#{name}"
     expected_auth={
-      "allow-postsync-evidence-gateway" => ["uno-arena", "gateway", {"ports"=>["8080"], "methods"=>["GET"], "paths"=>["/health", "/v1/rooms"]}],
-      "allow-postsync-evidence-prometheus" => ["observability", "prometheus", {"ports"=>["9090"], "methods"=>["GET"], "paths"=>["/api/v1/query"]}],
-      "allow-postsync-evidence-alertmanager" => ["observability", "alertmanager", {"ports"=>["9093"], "methods"=>["GET", "POST"], "paths"=>["/metrics", "/api/v2/alerts"]}]
+      "allow-postsync-evidence-gateway" => ["uno-arena", "gateway", {"ports"=>["8080"]}],
+      "allow-postsync-evidence-prometheus" => ["observability", "prometheus", {"ports"=>["9090"]}],
+      "allow-postsync-evidence-alertmanager" => ["observability", "alertmanager", {"ports"=>["9093"]}]
     }
     expected_auth.each do |policy_name, (namespace, target, operation)|
       policy=documents.find { |document| document["kind"] == "AuthorizationPolicy" && document.dig("metadata", "name") == policy_name }

@@ -77,6 +77,8 @@ spec:
     - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/grafana" $ns | quote }}]}}]
       to: [{operation: {ports: ["9090"]}}]
 {{- if .Values.postSyncEvidence.enabled }}
+# The ambient data plane has no waypoint, so these policies must remain L4.
+# The evidence script still limits its own HTTP requests to the named paths.
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -86,7 +88,7 @@ spec:
   action: ALLOW
   rules:
     - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/uno-arena-observability-postsync-evidence" $ns | quote }}]}}]
-      to: [{operation: {ports: ["9090"], methods: ["GET"], paths: ["/api/v1/query"]}}]
+      to: [{operation: {ports: ["9090"]}}]
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -96,7 +98,7 @@ spec:
   action: ALLOW
   rules:
     - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/uno-arena-observability-postsync-evidence" $ns | quote }}]}}]
-      to: [{operation: {ports: ["9093"], methods: ["GET", "POST"], paths: ["/metrics", "/api/v2/alerts"]}}]
+      to: [{operation: {ports: ["9093"]}}]
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -106,7 +108,7 @@ spec:
   action: ALLOW
   rules:
     - from: [{source: {principals: [{{ printf "cluster.local/ns/%s/sa/uno-arena-observability-postsync-evidence" $ns | quote }}]}}]
-      to: [{operation: {ports: ["8080"], methods: ["GET"], paths: ["/health", "/v1/rooms"]}}]
+      to: [{operation: {ports: ["8080"]}}]
 {{- end }}
 ---
 apiVersion: security.istio.io/v1
