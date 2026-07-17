@@ -16,8 +16,8 @@ assert_kind_cluster_name
 assert_kind_context
 
 DEBEZIUM_CONNECT_VERSION="${DEBEZIUM_CONNECT_VERSION:-3.6.0.Final}"
-DEBEZIUM_CONNECT_INDEX_DIGEST="${DEBEZIUM_CONNECT_INDEX_DIGEST:-sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada}"
-DEBEZIUM_CONNECT_SOURCE_IMAGE="${DEBEZIUM_CONNECT_SOURCE_IMAGE:-quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada}"
+DEBEZIUM_CONNECT_INDEX_DIGEST="${DEBEZIUM_CONNECT_INDEX_DIGEST:-sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22}"
+DEBEZIUM_CONNECT_SOURCE_IMAGE="${DEBEZIUM_CONNECT_SOURCE_IMAGE:-quay.io/debezium/connect:3.6.0.Final@sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22}"
 
 # Prior broken local runtime tag from kind-load staging (remove so crictl cannot reuse bad metadata).
 DEBEZIUM_CONNECT_STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"

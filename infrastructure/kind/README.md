@@ -209,7 +209,7 @@ does not embed or pre-stage an ARM64 child in a generic manifest.
 | ClickHouse | `clickhouse/clickhouse-server:26.6.1.1193` | `sha256:1d1f6508eba2dccce2cee9913907c5f7766327debc57a6b1991f2c9e3176c163` |
 | Keycloak | `quay.io/keycloak/keycloak:26.7.0` | `sha256:2eb3cd316835c990e69e26ade292ffa78f6fb0db7d5fc6377463c162e1979ac0` |
 | PgBouncer | `edoburu/pgbouncer:v1.24.1-p1` | `sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e` |
-| Debezium Connect | `quay.io/debezium/connect:3.6.0.Final` | `sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada` |
+| Debezium Connect | `quay.io/debezium/connect:3.6.0.Final` | `sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22` |
 | Debezium Server | `quay.io/debezium/server:3.6.0.Final` | `sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2` |
 | Istio pilot | `docker.io/istio/pilot:1.30.2` | `sha256:d158739d5286f7899bc039589d248720c2a9b6622d54eeb7a3fdfbb65200c22c` |
 | Istio CNI | `docker.io/istio/install-cni:1.30.2` | `sha256:b2eb80818fc345e3e9033f424ec7757cbf1a9d9a6494fea79648dab4887f2f7f` |
@@ -384,7 +384,7 @@ Connectors and Server use `snapshot.mode=no_data` (streaming only). Structure/st
 checks do not claim live CDC delivery.
 
 Debezium `3.6.0.Final` is pinned to Connect index
-`sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada`
+`sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22`
 and Server index
 `sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2`.
 The release tag remains documentation only and registry republishing cannot change

@@ -36,9 +36,9 @@ metadata:
     uno-arena.local/debezium-role: kafka-connect
 data:
   # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
-  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22
   IMAGE_VERSION: 3.6.0.Final
-  MULTIARCH_INDEX_DIGEST: sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+  MULTIARCH_INDEX_DIGEST: sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22
   # Shared Outbox Event Router field contract (column names match migrations).
   OUTBOX_ROUTER_NOTES: |
     route.by.field=topic
@@ -208,7 +208,7 @@ spec:
       containers:
         - name: connect
           # Exact quay multiarch index; Never = node must already hold its resolved child.
-          image: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
+          image: quay.io/debezium/connect:3.6.0.Final@sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22
           imagePullPolicy: Never
           ports:
             - containerPort: 8083

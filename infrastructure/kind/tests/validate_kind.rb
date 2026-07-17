@@ -313,7 +313,7 @@ fail_collect(failures, "Debezium Server loader must not encode ctr content / con
 puts "ok debezium-server-room-realtime"
 
 # --- Debezium Kafka Connect (four outbox routers); structure only, no delivery claim ---
-DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada"
+DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:d574a7c9575ed78e2349a034ebdf57a99c516771b3dddb7bbeeb44f912a36e22"
 DEBEZIUM_CONNECT_SOURCE_IMAGE = "quay.io/debezium/connect:3.6.0.Final@#{DEBEZIUM_CONNECT_MULTIARCH_DIGEST}"
 DEBEZIUM_CONNECT_STALE_TAG = "docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 DEBEZIUM_CONNECT_SHORT_STALE = "uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
