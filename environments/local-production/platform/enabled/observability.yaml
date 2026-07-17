@@ -10,8 +10,8 @@ destinationNamespace: observability
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: uno-arena-observability
-  version: 0.1.32
-  packageSha256: 277c2cfc1714e95e2f16405f948555970c1d542f74e2445bd70a52c77e2488f7
+  version: 0.1.45
+  packageSha256: db64788f8556b71028ab90733fe8a6149e69173b8bdd186dd141e6c9d72c653c
 values:
   images:
     alertmanager: quay.io/prometheus/alertmanager:v0.32.1@sha256:51a825c2a40acc3e338fdd00d622e01ec090f72be2b3ea46be0839cd47a4d286
