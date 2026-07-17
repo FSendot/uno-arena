@@ -155,6 +155,7 @@ metadata:
   name: tempo-wal
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: tempo}
+  annotations: {argocd.argoproj.io/sync-wave: "1"}
 spec:
   accessModes: [ReadWriteOnce]
   {{- with .Values.storage.tempoWal.storageClassName }}
@@ -223,6 +224,7 @@ metadata:
   name: prometheus-data
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: prometheus}
+  annotations: {argocd.argoproj.io/sync-wave: "3"}
 spec:
   accessModes: [ReadWriteOnce]
   {{- with .Values.storage.prometheus.storageClassName }}

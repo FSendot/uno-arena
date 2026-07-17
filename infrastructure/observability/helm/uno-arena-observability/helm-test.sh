@@ -111,6 +111,12 @@ ruby -ryaml -e '
     abort "local production observability sync wave mismatch: #{name}" unless
       workload&.dig("metadata", "annotations", "argocd.argoproj.io/sync-wave") == wave
   end
+  expected_pvc_waves = {"tempo-wal" => "1", "prometheus-data" => "3"}
+  expected_pvc_waves.each do |name, wave|
+    pvc = documents.find { |document| document["kind"] == "PersistentVolumeClaim" && document.dig("metadata", "name") == name }
+    abort "local production observability PVC sync wave mismatch: #{name}" unless
+      pvc&.dig("metadata", "annotations", "argocd.argoproj.io/sync-wave") == wave
+  end
   expected_cpu_limits = {"alloy-logs" => "2", "alloy-otlp" => "2", "tempo" => "2", "grafana" => "1"}
   expected_cpu_limits.each do |name, limit|
     workload = workloads.find { |document| document.dig("metadata", "name") == name }
