@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: analytics
-  version: 0.1.32
-  packageSha256: 915c1fc7870a5c4d29e460c3ee33ad583bcdb45a25536bf203230e8e027140b4
+  version: 0.1.26
+  packageSha256: 11993da7aec0ce2efcc91a6db924154d60e4b79f56742c8f98b8c81f4a6d0a46
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/analytics
   digest: sha256:28a10c612e60e4a4aed686475588a35d78564cec9b3e72cdb0bcf4c3961bd52a
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: ce91a015b643779dcbb75637291268f1264d3e0f
+  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
   files:
   - services/analytics/helm/analytics/values.production.yaml
   - services/analytics/helm/analytics/values.local-production.yaml

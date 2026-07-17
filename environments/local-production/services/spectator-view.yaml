@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: spectator-view
-  version: 0.1.32
-  packageSha256: 0f4c6c81c9b7d27eef14f371c5a6056843e62cacd35817a5a185ffd5da623b23
+  version: 0.1.26
+  packageSha256: fc3f19d23664b885cb620d2f5d6703ad6651bb35b6cb66f70d06ddf3d22db444
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/spectator-view
   digest: sha256:d6f782457dd6292caaffed3adf4ff9f5fa1c54c7cfa1385e910b00e869963a3b
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: ce91a015b643779dcbb75637291268f1264d3e0f
+  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
   files:
   - services/spectator-view/helm/spectator-view/values.production.yaml
   - services/spectator-view/helm/spectator-view/values.local-production.yaml

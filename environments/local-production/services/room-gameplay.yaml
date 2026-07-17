@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: room-gameplay
-  version: 0.1.32
-  packageSha256: ff661f3448d91459b01c7f3d9fbdef1ce483892516575677d1aa85c5b3046fba
+  version: 0.1.26
+  packageSha256: eef332877e81c9d2601beb943ac4cedd7f697e06935f3df9dde7871fe525812a
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/room-gameplay
   digest: sha256:6b6b936bb17bb98d1c69f023eadbb4f99843496bca9944476ea8b91e8d1b8fd4
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: ce91a015b643779dcbb75637291268f1264d3e0f
+  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
   files:
   - services/room-gameplay/helm/room-gameplay/values.production.yaml
   - services/room-gameplay/helm/room-gameplay/values.local-production.yaml

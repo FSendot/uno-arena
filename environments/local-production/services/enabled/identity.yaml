@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: identity
-  version: 0.1.32
-  packageSha256: ebebbf10d0be4e5bcf35195ae9b05efe467bb18d35ffa28b2fca2b847b3aa0d6
+  version: 0.1.26
+  packageSha256: 31ca17fc385181733f9617665481911a83f1bdde8a2a083ae4355088fc6e2b3c
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/identity
   digest: sha256:5d53e6498e4e5892581eb297fa37af30386fef39c45e8724a498180e7f7c9185
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: ce91a015b643779dcbb75637291268f1264d3e0f
+  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
   files:
   - services/identity/helm/identity/values.production.yaml
   - services/identity/helm/identity/values.local-production.yaml

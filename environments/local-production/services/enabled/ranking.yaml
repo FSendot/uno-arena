@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: ranking
-  version: 0.1.32
-  packageSha256: e1c538ae41933c2f7c88d13d7dd76e28daf6885fd24da73fb81b2981cad721e8
+  version: 0.1.26
+  packageSha256: ab53222c103bff99829138381f24b42be82c388d2b03d4704a3b839adf258cb2
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/ranking
   digest: sha256:4919c085d5f7db2816a5fcdfbebd5c3b4401b21935ee34e989740fa37b54952a
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: ce91a015b643779dcbb75637291268f1264d3e0f
+  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
   files:
   - services/ranking/helm/ranking/values.production.yaml
   - services/ranking/helm/ranking/values.local-production.yaml
