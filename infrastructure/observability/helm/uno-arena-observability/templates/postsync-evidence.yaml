@@ -52,12 +52,9 @@ spec:
                 printf '%s\n' "$value"
               }
               alert_metrics() {
-                body="$(wget -qO- "$alertmanager/metrics")" || return 1
-                printf '%s' "$body" | awk '
-                  $1 == "alertmanager_notifications_total" || index($1, "alertmanager_notifications_total{") == 1 { total += $2 }
-                  $1 == "alertmanager_notifications_failed_total" || index($1, "alertmanager_notifications_failed_total{") == 1 { failed += $2 }
-                  END { print total + 0, failed + 0 }
-                '
+                total="$(prom_scalar 'sum%28alertmanager_notifications_total%29')" || return 1
+                failed="$(prom_scalar 'sum%28alertmanager_notifications_failed_total%29')" || return 1
+                printf '%s %s\n' "$total" "$failed"
               }
 
               gateway_ready=false

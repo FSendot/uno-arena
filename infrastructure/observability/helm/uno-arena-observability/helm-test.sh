@@ -171,6 +171,8 @@ assert_postsync_render() {
     %w[/health /v1/rooms?limit=1 unoarena%3Ahttp_requests%3Arate5m alertmanager_notifications_total alertmanager_notifications_failed_total evidence_id /api/v2/alerts].each do |contract|
       abort "#{profile} evidence script missing #{contract}" unless script.include?(contract)
     end
+    abort "#{profile} evidence must read Alertmanager counters through Prometheus" unless script.include?("sum%28alertmanager_notifications_total%29") && script.include?("sum%28alertmanager_notifications_failed_total%29")
+    abort "#{profile} evidence must not buffer the full Alertmanager metrics response" if script.include?("$alertmanager/metrics")
     abort "#{profile} evidence Job must not use cluster credentials" if script.match?(/kubectl|kubeconfig/i)
     service_account=documents.find { |document| document["kind"] == "ServiceAccount" && document.dig("metadata", "name") == name }
     abort "#{profile} evidence ServiceAccount missing" unless service_account && service_account["automountServiceAccountToken"] == false
