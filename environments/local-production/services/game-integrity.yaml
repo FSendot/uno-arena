@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: game-integrity
-  version: 0.1.26
-  packageSha256: 6f3f9ee75f37b2174fc57faa7d3ff13f5b75f649793f31609cbaf09ad9bc592d
+  version: 0.1.32
+  packageSha256: 8e8fe6d70ff0c0b47b3dd8acbe1432e05ecddcac15a0f97888a6c4c8d2f9bbe8
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/game-integrity
   digest: sha256:871b2705805191ccdcf625957782fc794a5725e2930555947c3805966118e4e6
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
+  revision: ce91a015b643779dcbb75637291268f1264d3e0f
   files:
   - services/game-integrity/helm/game-integrity/values.production.yaml
   - services/game-integrity/helm/game-integrity/values.local-production.yaml

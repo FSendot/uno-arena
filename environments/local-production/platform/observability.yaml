@@ -10,8 +10,8 @@ destinationNamespace: observability
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: uno-arena-observability
-  version: 0.1.26
-  packageSha256: fffef510fb56c37ee13f9d9451477cf5bda9732fe313c96a7e3348ba2e70008a
+  version: 0.1.32
+  packageSha256: 277c2cfc1714e95e2f16405f948555970c1d542f74e2445bd70a52c77e2488f7
 values:
   images:
     alertmanager: quay.io/prometheus/alertmanager:v0.32.1@sha256:51a825c2a40acc3e338fdd00d622e01ec090f72be2b3ea46be0839cd47a4d286
@@ -46,20 +46,66 @@ values:
     strategyType: Recreate
     preinstallDisabled: true
     goMemoryLimit: 256MiB
-    dataEmptyDir: {medium: Memory, sizeLimit: 128Mi}
+    dataEmptyDir:
+      medium: Memory
+      sizeLimit: 128Mi
   security:
     managePeerAuthentication: false
     networkPoliciesEnabled: false
-  postSyncEvidence: {enabled: true}
-  probes: {readinessTimeoutSeconds: 10}
+  postSyncEvidence:
+    enabled: true
+  probes:
+    readinessTimeoutSeconds: 10
   resources:
-    alloyLogs: {requests: {cpu: 250m, memory: 32Mi}, limits: {cpu: "2", memory: 512Mi}}
-    alloyOtlp: {requests: {cpu: 250m, memory: 64Mi}, limits: {cpu: "2", memory: 512Mi}}
-    loki: {requests: {cpu: 100m, memory: 128Mi}}
-    tempo: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: "2", memory: 1Gi}}
-    prometheus: {requests: {cpu: 100m, memory: 128Mi}}
-    alertmanager: {requests: {cpu: 25m, memory: 32Mi}}
-    redisExporter: {requests: {cpu: 10m, memory: 16Mi}}
-    webhookSink: {requests: {cpu: 5m, memory: 8Mi}}
-    kubeStateMetrics: {requests: {cpu: 20m, memory: 32Mi}}
-    grafana: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: "1", memory: 512Mi}}
+    alloyLogs:
+      requests:
+        cpu: 250m
+        memory: 32Mi
+      limits:
+        cpu: '2'
+        memory: 512Mi
+    alloyOtlp:
+      requests:
+        cpu: 250m
+        memory: 64Mi
+      limits:
+        cpu: '2'
+        memory: 512Mi
+    loki:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    tempo:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: '2'
+        memory: 1Gi
+    prometheus:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    alertmanager:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+    redisExporter:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+    webhookSink:
+      requests:
+        cpu: 5m
+        memory: 8Mi
+    kubeStateMetrics:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+    grafana:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: '1'
+        memory: 512Mi

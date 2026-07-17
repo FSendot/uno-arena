@@ -10,8 +10,8 @@ destinationNamespace: uno-arena
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: keycloak
-  version: 0.1.26
-  packageSha256: 54747f7d12440aed11c846497d454eb854aae792117faf13ad28e9da796e045c
+  version: 0.1.32
+  packageSha256: b0db911134c329132dd3643f38ba84e3f0eed1556676c8f8fb9761dd54e38cdf
 values:
   image:
     repository: quay.io/keycloak/keycloak:26.7.0

@@ -10,8 +10,8 @@ destinationNamespace: uno-arena
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: postgres-contexts
-  version: 0.1.26
-  packageSha256: e00cf73f24b298784bb8f1013890523ea961eae9bd3622abca85ec9a081174df
+  version: 0.1.32
+  packageSha256: 501d77c30d30ef14fc75e67cf451694081284cfb1fd2ed7f8c5c2a74a348f718
 values:
   image:
     repository: postgres:18.4-alpine3.24

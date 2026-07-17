@@ -10,8 +10,8 @@ destinationNamespace: uno-arena
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: clickhouse
-  version: 0.1.26
-  packageSha256: 948ba842b341512a59ebf76ed427e14715870a2cdc7fcfc7df3d0f79f9946c45
+  version: 0.1.32
+  packageSha256: d47008228c81f52bf3f9c2a6c9dd2b586284ff02baced12bab13083f0f9f2bd4
 values:
   image:
     repository: clickhouse/clickhouse-server:26.6.1.1193

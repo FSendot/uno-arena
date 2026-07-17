@@ -12,14 +12,14 @@ destination:
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: tournament-orchestration
-  version: 0.1.26
-  packageSha256: 4891ff80430ef5c9ff658585637e5968b30bad314ddabcb384b7abd813a130d7
+  version: 0.1.32
+  packageSha256: 9ce9300faac24d906a45512e4161682b8502fbb1ff54ace3de70f9167538263e
 image:
   repository: registry.gitlab.com/fsendot/uno-arena/tournament-orchestration
   digest: sha256:5ae17ff0e2c52cd6e50ffd3f6d0a339c40120e278aeb7dc5400d008246137ddf
 values:
   repository: https://gitlab.com/FSendot/uno-arena.git
-  revision: e48ef9de1ce36e66118925636f2ecf4e9263e06b
+  revision: ce91a015b643779dcbb75637291268f1264d3e0f
   files:
   - services/tournament-orchestration/helm/tournament-orchestration/values.production.yaml
   - services/tournament-orchestration/helm/tournament-orchestration/values.local-production.yaml

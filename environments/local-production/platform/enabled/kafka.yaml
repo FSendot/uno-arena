@@ -10,8 +10,8 @@ destinationNamespace: uno-arena
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: kafka
-  version: 0.1.26
-  packageSha256: 2b1900f58007178a2e576df6867733c46fdc8dec93081eb1ab51148d5c4e2777
+  version: 0.1.32
+  packageSha256: f50930c05fd645bf83c1b5c3cfd20b4af996e97cc2f21626d71bbfee55ac7482
 values:
   image:
     repository: apache/kafka:4.3.1
