@@ -229,6 +229,7 @@ ruby -ryaml -e '
 grep -Fq 'render-argocd-core-manifest' "${LOCAL}/bin/install-argocd-core.sh"
 grep -Fq -- '--ignore-not-found' "${LOCAL}/bin/install-argocd-core.sh"
 grep -Fq 'controller.repo.server.timeout.seconds' "${LOCAL}/bin/install-argocd-core.sh"
+grep -Fq '\"applicationsetcontroller.enable.progressive.syncs\":\"true\"' "${LOCAL}/bin/install-argocd-core.sh"
 grep -Fq 'controller.status.processors' "${LOCAL}/bin/install-argocd-core.sh"
 grep -Fq 'controller.operation.processors' "${LOCAL}/bin/install-argocd-core.sh"
 grep -Fq 'reposerver.parallelism.limit' "${LOCAL}/bin/install-argocd-core.sh"

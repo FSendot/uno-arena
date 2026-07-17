@@ -9,6 +9,12 @@ acceptance cluster under `infrastructure/kind`.
 - Every mutating command uses the exact active context
   `kind-uno-arena-production`; no script switches context.
 - The cluster is one control-plane plus two explicitly labeled workers.
+- Docker must expose at least 8 CPUs. Every kind node receives a quota matching
+  the Docker CPU count its kubelet advertises; relative shares preserve control-plane
+  priority during cold-start reconciliation.
+- CoreDNS runs three replicas with one replica per node.
+- Both local ApplicationSets use health-gated RollingSync with `maxUpdate: 1`,
+  bounding a disaster-recovery replay to one platform and one service sync.
 - Host ports are loopback-only: HTTP `8080`, application TLS `8443`, reserved
   local service port `8444`, and private Argo API TLS `9443`.
 - The only public Gateway API backend is the BFF service named `gateway`.

@@ -92,10 +92,19 @@ class ReleaseInventoryTest < Minitest::Test
 
   def test_applicationsets_watch_only_released_copies_with_exact_overlays
     local = File.read("environments/local-production/argocd/services-applicationset.yaml")
+    local_document = YAML.safe_load(local, [], [], true)
     production = File.read("environments/production/argocd/services-applicationset.yaml")
     assert_includes local, "services/enabled/*.yaml"
     assert_includes local, "values.production.yaml"
     assert_includes local, "values.local-production.yaml"
+    assert_equal "RollingSync", local_document.dig("spec", "strategy", "type")
+    service_steps = local_document.dig("spec", "strategy", "rollingSync", "steps")
+    assert_equal [1], service_steps.map { |step| step["maxUpdate"] }
+    service_label = local_document.dig("spec", "template", "metadata", "labels", "unoarena.io/service-stage")
+    assert_equal({"key" => "unoarena.io/service-stage", "operator" => "In", "values" => [service_label]},
+                 service_steps.first.dig("matchExpressions", 0))
+    assert_equal "services", service_label
+    refute_includes local, "automated:"
     assert_includes production, "services/enabled/*.yaml"
     refute_includes production, "values.local-production.yaml"
   end

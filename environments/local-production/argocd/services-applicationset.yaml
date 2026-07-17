@@ -15,12 +15,21 @@ spec:
           # Only promotion-created released copies are watched. Disabled bootstrap
           # placeholders under services/*.yaml can never generate Applications.
           - path: environments/local-production/services/enabled/*.yaml
+  strategy:
+    type: RollingSync
+    rollingSync:
+      steps:
+        - matchExpressions:
+            - {key: unoarena.io/service-stage, operator: In, values: ["services"]}
+          maxUpdate: 1
   syncPolicy:
     preserveResourcesOnDeletion: true
   template:
     metadata:
       name: '{{.application}}'
       namespace: argocd
+      labels:
+        unoarena.io/service-stage: services
       annotations:
         unoarena.io/inventory-status: '{{.status}}'
     spec:
@@ -45,9 +54,6 @@ spec:
         server: '{{.destination.server}}'
         namespace: '{{.destination.namespace}}'
       syncPolicy:
-        automated:
-          prune: true
-          selfHeal: true
         syncOptions:
           - ApplyOutOfSyncOnly=true
           - CreateNamespace=false

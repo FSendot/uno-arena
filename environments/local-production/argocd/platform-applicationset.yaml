@@ -18,14 +18,19 @@ spec:
       steps:
         - matchExpressions:
             - {key: unoarena.io/platform-stage, operator: In, values: ["00-foundation"]}
+          maxUpdate: 1
         - matchExpressions:
             - {key: unoarena.io/platform-stage, operator: In, values: ["10-stateful"]}
+          maxUpdate: 1
         - matchExpressions:
             - {key: unoarena.io/platform-stage, operator: In, values: ["20-bootstrap"]}
+          maxUpdate: 1
         - matchExpressions:
             - {key: unoarena.io/platform-stage, operator: In, values: ["30-cdc"]}
+          maxUpdate: 1
         - matchExpressions:
             - {key: unoarena.io/platform-stage, operator: In, values: ["40-observability"]}
+          maxUpdate: 1
   syncPolicy:
     preserveResourcesOnDeletion: true
   template:

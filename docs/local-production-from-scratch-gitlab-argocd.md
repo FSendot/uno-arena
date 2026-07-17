@@ -51,6 +51,7 @@ cd /Users/martin.zahnd/Documents/microservicios/uno-arena
 | --- | --- |
 | kind cluster/context | `uno-arena-production` / `kind-uno-arena-production` |
 | topology | one control-plane and two workers |
+| Docker capacity | at least 8 CPUs; each kind node quota matches Docker's CPU count |
 | host ports | HTTP 8080, edge TLS 8443, reserved 8444, private Argo TLS 9443 |
 | public hostname | `uno-arena.local` |
 | kind/node | kind 0.32.0; Kubernetes 1.36.1 digest pinned in `create-cluster.sh` |
@@ -666,7 +667,11 @@ Success must reach `promote:desired-state`, `reconcile:wait`, and
 `verify:post-deploy`. Publication alone is not success. The promotion job
 pushes a `[skip ci]` desired-state commit, and Argo creates Applications in
 RollingSync order: secrets/foundation, stateful stores, schema bootstrap, CDC,
-observability, then services/dependent verification.
+observability, then services/dependent verification. Within the platform
+ApplicationSet, each stage advances one Application at a time and waits for
+Healthy before starting the next. The service ApplicationSet independently
+does the same, so a disaster-recovery replay cannot launch an unbounded service
+wave; at most one platform and one service Application reconcile concurrently.
 
 ## 18. Final verification
 

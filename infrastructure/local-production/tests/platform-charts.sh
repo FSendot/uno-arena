@@ -359,12 +359,14 @@ ruby -ryaml -e '
   abort "platform must use RollingSync" unless appset.dig("spec", "strategy", "type") == "RollingSync"
   steps = appset.dig("spec", "strategy", "rollingSync", "steps").map { |step| step.dig("matchExpressions", 0, "values", 0) }
   abort "platform ordering mismatch" unless steps == %w[00-foundation 10-stateful 20-bootstrap 30-cdc 40-observability]
+  max_updates = appset.dig("spec", "strategy", "rollingSync", "steps").map { |step| step["maxUpdate"] }
+  abort "local platform reconciliation must advance one Application at a time" unless max_updates == [1, 1, 1, 1, 1]
   abort "RollingSync template must not enable automated sync" if appset.dig("spec", "template", "spec", "syncPolicy", "automated")
   path = appset.dig("spec", "generators", 0, "git", "files", 0, "path")
   abort "generator must watch released copies only" unless path == "environments/local-production/platform/enabled/*.yaml"
 ' "${ROOT}/environments/local-production/argocd/platform-applicationset.yaml"
 
-grep -Fq 'applicationsetcontroller.enable.progressive.syncs' "${LOCAL}/bin/install-argocd-core.sh"
+grep -Fq '\"applicationsetcontroller.enable.progressive.syncs\":\"true\"' "${LOCAL}/bin/install-argocd-core.sh"
 if grep -Fq 'roles:' "${ROOT}/environments/local-production/argocd/platform-app-project.yaml"; then
   echo "platform project must not define a misleading project-only CI token role" >&2
   exit 1

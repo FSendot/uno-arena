@@ -259,6 +259,21 @@ module UnoArenaCI
           expected_files = ["values.production.yaml"]
           expected_files << "values.local-production.yaml" if environment == "local-production"
           expected_files.each { |file| assert(serialized.include?(file), path, "ApplicationSet missing #{file}") }
+          if environment == "local-production"
+            strategy = document.dig("spec", "strategy")
+            steps = strategy&.dig("rollingSync", "steps")
+            assert(strategy&.fetch("type", nil) == "RollingSync", path,
+                   "local services must use RollingSync")
+            assert(steps.is_a?(Array) && steps.length == 1 && steps.first["maxUpdate"] == 1, path,
+                   "local services must reconcile one Application at a time")
+            expression = steps&.first&.dig("matchExpressions", 0)
+            label = document.dig("spec", "template", "metadata", "labels", "unoarena.io/service-stage")
+            assert(label == "services" && expression == {
+              "key" => "unoarena.io/service-stage", "operator" => "In", "values" => [label]
+            }, path, "local service RollingSync selector must match every generated Application")
+            assert(!serialized.include?("automated:"), path,
+                   "local service RollingSync must not configure automated sync")
+          end
         elsif name == "platform-applicationset.yaml"
           directory = environment == "production" ? "platform-releases" : "platform"
           assert(serialized.include?("environments/#{environment}/#{directory}/enabled/*.yaml"), path,

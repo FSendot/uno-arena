@@ -39,6 +39,12 @@ RollingSync owns generated Application operations, so the template deliberately
 does not configure per-Application automated sync. Stateful PVCs and the local
 StorageClass carry both Helm keep and Argo `Prune=false`; stateful Deployments
 also refuse Argo pruning. Manual data deletion is a separate operator action.
+Every stage advances at most one Application at a time and waits for it to
+become Healthy before starting the next, preventing first publication from
+turning a stateful stage into a cold-start burst.
+The service ApplicationSet uses its own one-at-a-time RollingSync gate and also
+omits per-Application automated sync. Platform and service reconciliation may
+overlap, but neither ApplicationSet can launch an unbounded wave.
 
 ## First-pipeline prerequisites and promotion
 
