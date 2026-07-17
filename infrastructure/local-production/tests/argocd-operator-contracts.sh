@@ -52,6 +52,13 @@ if [[ "$*" == *"-n argocd exec argocd-application-controller-0 --"* &&
   fi
   exit 124
 fi
+if [[ "$*" == *"-n argocd get service argocd-redis"*".spec.clusterIP"* ]]; then
+  if [[ -n "${KUBECTL_ARGS_FILE:-}" ]]; then
+    printf '%s\n' "$*" >>"${KUBECTL_ARGS_FILE}"
+  fi
+  printf '%s' '10.96.0.10'
+  exit 0
+fi
 if [[ -n "${KUBECTL_ARGS_FILE:-}" ]]; then
   printf '%s\n' "$*" >>"${KUBECTL_ARGS_FILE}"
   exit 0
