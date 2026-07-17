@@ -404,6 +404,11 @@ Expected:
 ok local-production-bootstrap-argocd context=kind-uno-arena-production
 ~~~
 
+If remote `main` already contains promoted descriptors, the root may remain
+`Progressing` while its bounded RollingSync replay runs. Bootstrap requires the
+root and repository-owned foundation to be `Synced`; final acceptance owns the
+aggregate health gate and must not be replaced by a fixed root-health timeout.
+
 Gate the empty Git-owned state:
 
 ~~~bash

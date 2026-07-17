@@ -131,6 +131,10 @@ ruby -e '
   restart = commands.index { |command| command.include?("rollout restart deployment/argocd-repo-server") }
   rollout = commands.index { |command| command.include?("rollout status deployment/argocd-repo-server") }
   root_apply = commands.index { |command| command.include?("root-seed.yaml") }
+  root_health_wait = commands.find do |command|
+    command.include?("application/uno-arena-local-production-root") &&
+      command.include?(".status.health.status")
+  end
   foundation_wait = commands.index do |command|
     command.include?("wait") && command.include?("application/uno-arena-local-production-foundations")
   end
@@ -138,6 +142,7 @@ ruby -e '
   abort "bootstrap must wait for repo-server after restart" unless rollout && restart < rollout
   abort "bootstrap must refresh repo-server before applying the root Application" unless root_apply && rollout < root_apply
   abort "bootstrap must adopt the root seed with server-side apply" unless commands.fetch(root_apply).include?("apply --server-side -f")
+  abort "bootstrap must not block disaster recovery on aggregate root health" if root_health_wait
   abort "bootstrap must wait for the repository-owned foundation" unless foundation_wait && root_apply < foundation_wait
 ' "${tmp_dir}/bootstrap-kubectl.args"
 

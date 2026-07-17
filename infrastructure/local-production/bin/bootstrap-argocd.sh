@@ -60,9 +60,11 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" apply --server-side -f "${tmp_di
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
   --for=jsonpath='{.status.sync.status}'=Synced \
   application/uno-arena-local-production-root --timeout=300s
-kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
-  --for=jsonpath='{.status.health.status}'=Healthy \
-  application/uno-arena-local-production-root --timeout=300s
+# Root health aggregates its ApplicationSets. During disaster recovery it stays
+# Progressing until every promoted platform/service Application is Healthy, so
+# blocking bootstrap here would impose an arbitrary timeout on the full replay.
+# The repository-owned foundation sync is the bootstrap boundary; acceptance
+# owns the later health gate.
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
   --for=jsonpath='{.status.sync.status}'=Synced \
   application/uno-arena-local-production-foundations --timeout=300s
