@@ -21,7 +21,11 @@ for chart in "${ROOT}"/services/*/helm/*; do
       abort "#{release}: primary Deployment missing" unless deploy
       spec = deploy.fetch("spec")
       abort "#{release}: unsafe rollout" unless spec.dig("strategy", "rollingUpdate", "maxUnavailable") == 0 && spec.dig("strategy", "rollingUpdate", "maxSurge") == 1
-      abort "#{release}: HPA-managed Deployment must omit replicas" if spec.key?("replicas")
+      if environment == "local-production"
+        abort "#{release}: local-production must render one primary replica" unless spec["replicas"] == 1
+      else
+        abort "#{release}: HPA-managed Deployment must omit replicas" if spec.key?("replicas")
+      end
       pod = spec.dig("template", "spec")
       abort "#{release}: termination grace missing" unless pod["terminationGracePeriodSeconds"].to_i >= 30
       abort "#{release}: worker node selector missing" unless pod.dig("nodeSelector", "node-role.kubernetes.io/worker") == ""
@@ -31,7 +35,13 @@ for chart in "${ROOT}"/services/*/helm/*; do
       abort "#{release}: preStop drain missing" unless container.dig("lifecycle", "preStop", "exec", "command")&.join(" ")&.include?("sleep")
       hpa = docs.find { |d| d["kind"] == "HorizontalPodAutoscaler" }
       pdb = docs.find { |d| d["kind"] == "PodDisruptionBudget" }
-      abort "#{release}: HPA missing" unless hpa && hpa.dig("spec", "scaleTargetRef", "name") == release
+      if environment == "local-production"
+        abort "#{release}: local-production HPA must be disabled" if hpa
+      else
+        abort "#{release}: production HPA missing" unless hpa && hpa.dig("spec", "scaleTargetRef", "name") == release
+        abort "#{release}: production HPA minReplicas must be 2" unless hpa.dig("spec", "minReplicas") == 2
+        abort "#{release}: production HPA maxReplicas must be 4" unless hpa.dig("spec", "maxReplicas") == 4
+      end
       abort "#{release}: PDB missing" unless pdb && pdb.dig("spec", "minAvailable") == 1
       abort "#{release}: worker/controller HPA rendered" if docs.any? { |d| d["kind"] == "HorizontalPodAutoscaler" && d.dig("metadata", "name") != release }
       sas = docs.select { |d| d["kind"] == "ServiceAccount" }

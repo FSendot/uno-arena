@@ -6,6 +6,7 @@ metadata:
   name: alloy-logs
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: alloy-logs, app.kubernetes.io/component: logs}
+  annotations: {argocd.argoproj.io/sync-wave: "2"}
 spec:
   selector:
     matchLabels: {app.kubernetes.io/name: alloy-logs}
@@ -55,6 +56,7 @@ metadata:
   name: alloy-otlp
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: alloy-otlp, app.kubernetes.io/component: traces}
+  annotations: {argocd.argoproj.io/sync-wave: "2"}
 spec:
   replicas: 1
   selector:
@@ -102,6 +104,7 @@ metadata:
   name: loki
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: loki, app.kubernetes.io/component: logs}
+  annotations: {argocd.argoproj.io/sync-wave: "1"}
 spec:
   replicas: 1
   selector:
@@ -166,6 +169,7 @@ metadata:
   name: tempo
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: tempo, app.kubernetes.io/component: traces}
+  annotations: {argocd.argoproj.io/sync-wave: "1"}
 spec:
   strategy: {type: Recreate}
   replicas: 1
@@ -233,6 +237,7 @@ metadata:
   name: prometheus
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: prometheus, app.kubernetes.io/component: metrics}
+  annotations: {argocd.argoproj.io/sync-wave: "3"}
 spec:
   strategy: {type: Recreate}
   replicas: 1
@@ -288,6 +293,7 @@ metadata:
   name: kube-state-metrics
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: kube-state-metrics, app.kubernetes.io/component: metrics}
+  annotations: {argocd.argoproj.io/sync-wave: "3"}
 spec:
   replicas: 1
   selector:
@@ -324,6 +330,7 @@ metadata:
   name: grafana
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: grafana, app.kubernetes.io/component: visualization}
+  annotations: {argocd.argoproj.io/sync-wave: "4"}
 spec:
   replicas: 1
   strategy:
@@ -377,7 +384,7 @@ spec:
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: data
-          emptyDir: {}
+          emptyDir: {{- toYaml .Values.grafana.dataEmptyDir | nindent 12 }}
         - name: tmp
           emptyDir: {}
         - name: datasources
@@ -471,6 +478,7 @@ metadata:
   name: redis-exporter
   namespace: {{ $ns }}
   labels: {app.kubernetes.io/name: redis-exporter, app.kubernetes.io/component: metrics}
+  annotations: {argocd.argoproj.io/sync-wave: "3"}
 spec:
   replicas: 1
   selector:

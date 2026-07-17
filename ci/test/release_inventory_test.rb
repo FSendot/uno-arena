@@ -57,6 +57,7 @@ class ReleaseInventoryTest < Minitest::Test
       document["status"] = "released"
       document["chart"]["repository"] = "https://gitlab.test/api/v4/projects/1/packages/helm/stable"
       document["values"]["image"]["repository"] = "registry.gitlab.test/project/bootstrap"
+      document["values"]["image"]["digest"] = "sha256:#{'0' * 64}"
       File.write(path, YAML.dump(document))
       error = assert_raises(UnoArenaCI::ConfigurationError) do
         UnoArenaCI::ReleaseInventory.new(dir).validate_platform_file!(path, component: "context-bootstrap")

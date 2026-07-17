@@ -105,6 +105,13 @@ spec:
           # Lightweight TCP probes: kafka-topics.sh exec probes can hang while the
           # broker is already listening, leaving the Service with no ready endpoints.
           # Topic create/drift checks remain in the bootstrap-kafka-topics Job.
+          startupProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 300
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             tcpSocket:
               port: 9092

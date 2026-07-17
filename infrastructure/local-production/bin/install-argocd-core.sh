@@ -32,16 +32,30 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd delete networkpolicy \
 "${SCRIPT_DIR}/render-argocd-core-manifest" "${ARGOCD_INSTALL_MANIFEST}" |
   kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd apply --server-side -f -
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd wait \
-  --for=condition=Available deployments --all --timeout=300s
+  --for=condition=Available deployments --all --timeout=600s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
-  statefulset/argocd-application-controller --timeout=300s
+  statefulset/argocd-application-controller --timeout=600s
 "${SCRIPT_DIR}/check-argocd-controller-network.sh"
+redis_cluster_ip="$(kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd get service argocd-redis \
+  -o jsonpath='{.spec.clusterIP}')"
+[[ "${redis_cluster_ip}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] ||
+  die "Argo Redis service did not expose an IPv4 ClusterIP: ${redis_cluster_ip}"
+redis_server="${redis_cluster_ip}:6379"
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd patch configmap argocd-cmd-params-cm \
   --type=merge \
-  -p='{"data":{"applicationsetcontroller.enable.progressive.syncs":"true"}}'
+  -p="{\"data\":{\"applicationsetcontroller.enable.progressive.syncs\":\"true\",\"applicationsetcontroller.repo.server.timeout.seconds\":\"300\",\"controller.repo.server.timeout.seconds\":\"300\",\"server.repo.server.timeout.seconds\":\"300\",\"controller.status.processors\":\"2\",\"controller.operation.processors\":\"1\",\"reposerver.parallelism.limit\":\"1\",\"reposerver.git.request.timeout\":\"300s\",\"redis.server\":\"${redis_server}\"}}"
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout restart deployment/argocd-repo-server
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
+  deployment/argocd-repo-server --timeout=600s
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout restart deployment/argocd-server
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
+  deployment/argocd-server --timeout=600s
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout restart statefulset/argocd-application-controller
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
+  statefulset/argocd-application-controller --timeout=600s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout restart deployment/argocd-applicationset-controller
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd rollout status \
-  deployment/argocd-applicationset-controller --timeout=300s
+  deployment/argocd-applicationset-controller --timeout=600s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n argocd patch service argocd-server \
   --type=strategic \
   -p='{"spec":{"type":"NodePort","ports":[{"name":"https","port":443,"targetPort":8080,"nodePort":30445}]}}'

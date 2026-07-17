@@ -35,9 +35,21 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" wait --for=condition=Established
 
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" apply --server-side \
   -f "${VENDOR}/cert-manager/cert-manager.yaml"
+# The full production-like simulator saturates a small Mac during cold
+# reconciliation. Keep cert-manager out of BestEffort and prevent kubelet from
+# repeatedly killing the admission webhook while its API watches catch up.
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n cert-manager patch deployment cert-manager \
+  --type=strategic \
+  -p='{"spec":{"template":{"spec":{"containers":[{"name":"cert-manager-controller","resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}]}}}}'
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n cert-manager patch deployment cert-manager-cainjector \
+  --type=strategic \
+  -p='{"spec":{"template":{"spec":{"containers":[{"name":"cert-manager-cainjector","resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"512Mi"}}}]}}}}'
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n cert-manager patch deployment cert-manager-webhook \
+  --type=strategic \
+  -p='{"spec":{"template":{"spec":{"containers":[{"name":"cert-manager-webhook","startupProbe":{"httpGet":{"path":"/livez","port":"healthcheck"},"periodSeconds":10,"timeoutSeconds":10,"failureThreshold":60},"livenessProbe":{"httpGet":{"path":"/livez","port":"healthcheck"},"initialDelaySeconds":60,"periodSeconds":10,"timeoutSeconds":10,"failureThreshold":10},"readinessProbe":{"httpGet":{"path":"/healthz","port":"healthcheck"},"initialDelaySeconds":5,"periodSeconds":5,"timeoutSeconds":10,"failureThreshold":10},"resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"500m","memory":"256Mi"}}}]}}}}'
 for deployment in cert-manager cert-manager-cainjector cert-manager-webhook; do
   kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n cert-manager rollout status \
-    "deployment/${deployment}" --timeout=300s
+    "deployment/${deployment}" --timeout=600s
 done
 
 helm upgrade --install external-secrets "${VENDOR}/external-secrets/external-secrets-2.7.0.tgz" \

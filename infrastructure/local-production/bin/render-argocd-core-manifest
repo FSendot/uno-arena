@@ -19,5 +19,116 @@ unless actual_network_policies == expected_network_policies
   abort "vendored Argo NetworkPolicy inventory changed: #{actual_network_policies.inspect}"
 end
 
+repo_server = documents.find do |document|
+  document["kind"] == "Deployment" && document.dig("metadata", "name") == "argocd-repo-server"
+end
+repo_server_container = repo_server&.dig("spec", "template", "spec", "containers")&.find do |container|
+  container["name"] == "argocd-repo-server"
+end
+abort "vendored Argo repo-server Deployment changed" unless repo_server_container
+
+repo_server_container["startupProbe"] = {
+  "httpGet" => { "path" => "/healthz", "port" => 8084 },
+  "periodSeconds" => 10,
+  "timeoutSeconds" => 10,
+  "failureThreshold" => 60
+}
+repo_server_container.fetch("livenessProbe")["timeoutSeconds"] = 10
+repo_server_container.fetch("livenessProbe")["failureThreshold"] = 20
+repo_server_container.fetch("readinessProbe")["timeoutSeconds"] = 10
+repo_server_container.fetch("readinessProbe")["failureThreshold"] = 10
+repo_server_container.fetch("env").concat([
+  { "name" => "ARGOCD_EXEC_TIMEOUT", "value" => "300s" },
+  { "name" => "ARGOCD_EXEC_FATAL_TIMEOUT", "value" => "330s" }
+])
+repo_server_container["resources"] = {
+  "requests" => { "cpu" => "500m", "memory" => "256Mi" },
+  "limits" => { "cpu" => "2", "memory" => "1Gi" }
+}
+
+server = documents.find do |document|
+  document["kind"] == "Deployment" && document.dig("metadata", "name") == "argocd-server"
+end
+server_container = server&.dig("spec", "template", "spec", "containers")&.find do |container|
+  container["name"] == "argocd-server"
+end
+abort "vendored Argo server Deployment changed" unless server_container
+
+server_container["startupProbe"] = {
+  "httpGet" => { "path" => "/healthz", "port" => 8080 },
+  "periodSeconds" => 10,
+  "timeoutSeconds" => 10,
+  "failureThreshold" => 60
+}
+server_container.fetch("livenessProbe")["timeoutSeconds"] = 10
+server_container.fetch("livenessProbe")["failureThreshold"] = 10
+server_container.fetch("readinessProbe")["timeoutSeconds"] = 10
+server_container["resources"] = {
+  "requests" => { "cpu" => "100m", "memory" => "128Mi" },
+  "limits" => { "cpu" => "1", "memory" => "512Mi" }
+}
+
+application_controller = documents.find do |document|
+  document["kind"] == "StatefulSet" && document.dig("metadata", "name") == "argocd-application-controller"
+end
+application_controller_container = application_controller&.dig("spec", "template", "spec", "containers")&.find do |container|
+  container["name"] == "argocd-application-controller"
+end
+abort "vendored Argo application-controller StatefulSet changed" unless application_controller_container
+
+application_controller_container.fetch("readinessProbe")["timeoutSeconds"] = 10
+application_controller_container.fetch("readinessProbe")["failureThreshold"] = 10
+application_controller_container["resources"] = {
+  "requests" => { "cpu" => "250m", "memory" => "256Mi" },
+  "limits" => { "cpu" => "1", "memory" => "1Gi" }
+}
+
+redis = documents.find do |document|
+  document["kind"] == "Deployment" && document.dig("metadata", "name") == "argocd-redis"
+end
+redis_container = redis&.dig("spec", "template", "spec", "containers")&.find do |container|
+  container["name"] == "redis"
+end
+abort "vendored Argo Redis Deployment changed" unless redis_container
+
+redis_container["startupProbe"] = {
+  "tcpSocket" => { "port" => 6379 },
+  "periodSeconds" => 10,
+  "timeoutSeconds" => 5,
+  "failureThreshold" => 60
+}
+redis_container["readinessProbe"] = {
+  "tcpSocket" => { "port" => 6379 },
+  "periodSeconds" => 10,
+  "timeoutSeconds" => 5,
+  "failureThreshold" => 10
+}
+redis_container["livenessProbe"] = {
+  "tcpSocket" => { "port" => 6379 },
+  "periodSeconds" => 30,
+  "timeoutSeconds" => 5,
+  "failureThreshold" => 10
+}
+redis_container["resources"] = {
+  "requests" => { "cpu" => "250m", "memory" => "64Mi" },
+  "limits" => { "cpu" => "1", "memory" => "256Mi" }
+}
+
+# Keep the local Argo control path node-local. All kind node containers share
+# one constrained Mac; cross-worker Redis/repo traffic becomes unreliable when
+# the full production-like stack is cold. The exact simulator name is enforced
+# by lib.sh, so this hostname is deterministic and local-only.
+applicationset_controller = documents.find do |document|
+  document["kind"] == "Deployment" && document.dig("metadata", "name") == "argocd-applicationset-controller"
+end
+abort "vendored Argo ApplicationSet controller Deployment changed" unless applicationset_controller
+
+[repo_server, server, application_controller, redis, applicationset_controller].each do |workload|
+  pod_spec = workload.dig("spec", "template", "spec")
+  abort "vendored Argo workload pod template changed" unless pod_spec
+  pod_spec["nodeSelector"] ||= {}
+  pod_spec["nodeSelector"]["kubernetes.io/hostname"] = "uno-arena-production-worker"
+end
+
 documents.reject { |document| document["kind"] == "NetworkPolicy" }
   .each { |document| puts YAML.dump(document) }

@@ -32,9 +32,42 @@ metadata:
 data:
   99-kind-memory.xml: |
     <clickhouse>
+      <logger>
+        <level>warning</level>
+        <console>true</console>
+      </logger>
       <max_server_memory_usage>805306368</max_server_memory_usage>
       <mark_cache_size>67108864</mark_cache_size>
       <uncompressed_cache_size>33554432</uncompressed_cache_size>
+      <max_thread_pool_size>256</max_thread_pool_size>
+      <background_buffer_flush_schedule_pool_size>2</background_buffer_flush_schedule_pool_size>
+      <background_pool_size>4</background_pool_size>
+      <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+      <background_move_pool_size>2</background_move_pool_size>
+      <background_fetches_pool_size>2</background_fetches_pool_size>
+      <background_common_pool_size>2</background_common_pool_size>
+      <background_schedule_pool_size>8</background_schedule_pool_size>
+      <background_message_broker_schedule_pool_size>2</background_message_broker_schedule_pool_size>
+      <background_distributed_schedule_pool_size>2</background_distributed_schedule_pool_size>
+      <merge_tree>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+      </merge_tree>
+      <query_log remove="1"/>
+      <query_thread_log remove="1"/>
+      <query_views_log remove="1"/>
+      <query_metric_log remove="1"/>
+      <trace_log remove="1"/>
+      <text_log remove="1"/>
+      <metric_log remove="1"/>
+      <asynchronous_metric_log remove="1"/>
+      <asynchronous_insert_log remove="1"/>
+      <error_log remove="1"/>
+      <part_log remove="1"/>
+      <processors_profile_log remove="1"/>
+      <background_schedule_pool_log remove="1"/>
+      <opentelemetry_span_log remove="1"/>
     </clickhouse>
 ---
 apiVersion: apps/v1
@@ -50,6 +83,7 @@ metadata:
     uno-arena.local/context: analytics
     uno-arena.local/non-production: "true"
 spec:
+  progressDeadlineSeconds: 7200
   replicas: 1
   strategy:
     type: Recreate
@@ -102,23 +136,32 @@ spec:
               port: 8123
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 18
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           livenessProbe:
             httpGet:
               path: /ping
               port: 8123
             initialDelaySeconds: 20
             periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 6
+            timeoutSeconds: 10
+            failureThreshold: 30
           resources:
             requests:
-              cpu: 100m
-              memory: 512Mi
+              cpu: 500m
+              memory: 1Gi
             limits:
               cpu: "1"
-              memory: 1024Mi
+              # The arm64 server binary is roughly 730 MiB by itself. A 1 GiB
+              # cgroup repeatedly evicts its executable pages during cold start.
+              memory: 2Gi
       volumes:
         - name: data
           persistentVolumeClaim:

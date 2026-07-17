@@ -33,8 +33,50 @@ istiod_render="$(${HELM} template istiod "${ROOT}/charts/istiod" -n istio-system
 cni_render="$(${HELM} template istio-cni "${ROOT}/charts/cni" -n istio-system -f "${ROOT}/values/cni.kind.yaml")"
 ztunnel_render="$(${HELM} template ztunnel "${ROOT}/charts/ztunnel" -n istio-system -f "${ROOT}/values/ztunnel.kind.yaml")"
 grep -Fq 'docker.io/istio/pilot@sha256:d158739d5286f7899bc039589d248720c2a9b6622d54eeb7a3fdfbb65200c22c' <<<"${istiod_render}"
+printf '%s' "${istiod_render}" | ruby -ryaml -e '
+  docs = YAML.load_stream(STDIN.read).compact
+  deploy = docs.find { |doc| doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "istiod" }
+  abort "local Istiod must render one replica" unless deploy&.dig("spec", "replicas") == 1
+  abort "local Istiod must use spare control-plane capacity" unless
+    deploy&.dig("spec", "template", "spec", "nodeSelector") == {"node-role.kubernetes.io/control-plane" => ""}
+  tolerations = deploy&.dig("spec", "template", "spec", "tolerations") || []
+  abort "local Istiod must tolerate the control-plane taint" unless tolerations.any? do |item|
+    item == {"key" => "node-role.kubernetes.io/control-plane", "operator" => "Exists", "effect" => "NoSchedule"}
+  end
+  abort "local Istiod must not autoscale and amplify simulator CPU pressure" if
+    docs.any? { |doc| doc["kind"] == "HorizontalPodAutoscaler" && doc.dig("metadata", "name") == "istiod" }
+'
 grep -Fq 'docker.io/istio/install-cni@sha256:b2eb80818fc345e3e9033f424ec7757cbf1a9d9a6494fea79648dab4887f2f7f' <<<"${cni_render}"
 grep -Fq 'docker.io/istio/ztunnel@sha256:64d7c4ea9621fdad66160744dcf76999995fcc0ac399d04aba76d6d0aae72242' <<<"${ztunnel_render}"
+printf '%s' "${cni_render}" | ruby -ryaml -e '
+  docs = YAML.load_stream(STDIN.read).compact
+  daemonset = docs.find { |doc| doc["kind"] == "DaemonSet" && doc.dig("metadata", "name") == "istio-cni-node" }
+  configmap = docs.find { |doc| doc["kind"] == "ConfigMap" && doc.dig("metadata", "name") == "istio-cni-config" }
+  resources = daemonset&.dig("spec", "template", "spec", "containers", 0, "resources")
+  abort "local Istio CNI must reserve CPU for sandbox setup" unless
+    resources&.dig("limits", "cpu").to_s == "2" &&
+    resources&.dig("limits", "memory") == "512Mi" &&
+    resources&.dig("requests", "cpu") == "500m" &&
+    resources&.dig("requests", "memory") == "100Mi"
+  abort "local Istio CNI must use native nftables on kind nodes" unless
+    configmap&.dig("data", "NATIVE_NFTABLES") == "true"
+  abort "local Istio CNI must not advertise IPv6 in the IPv4-only kind cluster" unless
+    configmap&.dig("data", "AMBIENT_IPV6") == "false"
+  abort "local Istio CNI must avoid optional DNS-proxy work on constrained kind nodes" unless
+    configmap&.dig("data", "AMBIENT_DNS_CAPTURE") == "false"
+  abort "local Istio CNI must not replay every pod network namespace after an agent-only restart" unless
+    configmap&.dig("data", "AMBIENT_RECONCILE_POD_RULES_ON_STARTUP") == "false"
+'
+printf '%s' "${ztunnel_render}" | ruby -ryaml -e '
+  docs = YAML.load_stream(STDIN.read).compact
+  daemonset = docs.find { |doc| doc["kind"] == "DaemonSet" && doc.dig("metadata", "name") == "ztunnel" }
+  resources = daemonset&.dig("spec", "template", "spec", "containers", 0, "resources")
+  abort "local ztunnel must reserve CPU for ambient pod enrollment" unless
+    resources&.dig("limits", "cpu").to_s == "1" &&
+    resources&.dig("limits", "memory") == "512Mi" &&
+    resources&.dig("requests", "cpu") == "500m" &&
+    resources&.dig("requests", "memory") == "128Mi"
+'
 for component in istiod cni ztunnel; do
   render_var="${component}_render"
   grep -Fq 'imagePullPolicy: IfNotPresent' <<<"${!render_var}" || {

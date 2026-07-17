@@ -30,6 +30,11 @@ helm upgrade --install ztunnel "${ISTIO_DIR}/charts/ztunnel" \
   --values "${ISTIO_DIR}/values/ztunnel.kind.yaml" \
   --wait --timeout 5m
 
+# The upstream CNI chart mounts its ConfigMap through envFrom without a pod
+# template checksum, so an in-place value change otherwise leaves old agents
+# running with stale settings (for example NATIVE_NFTABLES).
+kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n istio-system \
+  rollout restart daemonset/istio-cni-node
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n istio-system rollout status deployment/istiod --timeout=300s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n istio-system rollout status daemonset/istio-cni-node --timeout=300s
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n istio-system rollout status daemonset/ztunnel --timeout=300s

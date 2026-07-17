@@ -1,5 +1,6 @@
 {{- $ns := include "uno-observability.namespace" . -}}
 {{- if .Values.security.ambientRequired }}
+{{- if .Values.security.managePeerAuthentication }}
 ---
 apiVersion: security.istio.io/v1
 kind: PeerAuthentication
@@ -12,6 +13,7 @@ kind: PeerAuthentication
 metadata: {name: strict-mtls, namespace: {{ .Values.applicationNamespace }}}
 spec:
   mtls: {mode: STRICT}
+{{- end }}
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy

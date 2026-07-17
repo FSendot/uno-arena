@@ -17,7 +17,7 @@ LOAD_SCRIPT="${SCRIPT_DIR}/load-debezium-connect.sh"
 STATUS_SCRIPT="${SCRIPT_DIR}/test-debezium-connectors.sh"
 STRUCT_SCRIPT="${SCRIPT_DIR}/test-debezium-connect-structure.sh"
 LIVE_KAFKA_SCRIPT="${SCRIPT_DIR}/test-debezium-postgres-to-kafka-live.sh"
-MULTIARCH_DIGEST="sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455"
+MULTIARCH_DIGEST="sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada"
 STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 SHORT_STALE_TAG="uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 SOURCE_IMAGE="quay.io/debezium/connect:3.6.0.Final@${MULTIARCH_DIGEST}"
@@ -213,7 +213,9 @@ expand="$(grep -cF '"transforms.outbox.table.expand.json.payload": "true"' "${CO
 # --- Probes ---
 grep -qF 'readinessProbe:' "${CONNECT_MANIFEST}" || die "connect readinessProbe required"
 grep -qF 'livenessProbe:' "${CONNECT_MANIFEST}" || die "connect livenessProbe required"
-grep -qF 'curl' "${CONNECT_MANIFEST}" || die "probes should use curl (available in image)"
+grep -qF 'startupProbe:' "${CONNECT_MANIFEST}" || die "connect startupProbe required"
+[[ "$(grep -cF 'httpGet:' "${CONNECT_MANIFEST}")" -ge 3 ]] \
+  || die "Connect probes must use the REST endpoint without exec children"
 
 # --- Labels ---
 grep -qF 'app.kubernetes.io/part-of: uno-arena' "${CONNECT_MANIFEST}" || die "part-of label required"

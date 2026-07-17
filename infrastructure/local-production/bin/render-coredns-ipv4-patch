@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+# Suppress AAAA answers in the deliberately IPv4-only local kind simulator.
+require "json"
+
+document = JSON.parse($stdin.read)
+corefile = document.dig("data", "Corefile")
+abort "CoreDNS ConfigMap does not contain data.Corefile" unless corefile.is_a?(String)
+
+marker = "template IN AAAA ."
+unless corefile.include?(marker)
+  forward = "    forward . /etc/resolv.conf {"
+  abort "CoreDNS Corefile forward block changed" unless corefile.include?(forward)
+
+  ipv4_only = <<~COREFILE.lines.map { |line| "    #{line}" }.join
+    # kind is IPv4-only; do not hand unroutable external AAAA records to clients.
+    template IN AAAA . {
+       rcode NOERROR
+    }
+  COREFILE
+  corefile = corefile.sub(forward, "#{ipv4_only}#{forward}")
+end
+
+puts JSON.generate("data" => { "Corefile" => corefile })

@@ -149,7 +149,7 @@ end
 kind_infra_budgets = {
   "30-kafka/kafka.yaml" => ["kafka", "kafka", "384Mi", "768Mi"],
   "40-kurrentdb/kurrentdb.yaml" => ["kurrentdb", "kurrentdb", "512Mi", "1024Mi"],
-  "50-clickhouse/clickhouse.yaml" => ["clickhouse", "clickhouse", "512Mi", "1024Mi"],
+  "50-clickhouse/clickhouse.yaml" => ["clickhouse", "clickhouse", "1Gi", "2Gi"],
   "60-keycloak/keycloak.yaml" => ["keycloak", "keycloak", "256Mi", "768Mi"],
   "80-debezium/connect.yaml" => ["debezium-connect", "connect", "384Mi", "1024Mi"],
   "80-debezium-server/debezium-server-room-realtime.yaml" => ["debezium-server-room-realtime", "debezium-server", "256Mi", "768Mi"]
@@ -174,6 +174,7 @@ minio_env = minio_container.fetch("env", []).to_h { |entry| [entry["name"], entr
 fail_collect(failures, "MinIO must not surge a second heavy kind pod") unless minio_dep&.dig("spec", "strategy", "type") == "Recreate"
 fail_collect(failures, "MinIO kind memory limit drift") unless minio_container.dig("resources", "limits", "memory") == "512Mi"
 fail_collect(failures, "MinIO kind Go memory target drift") unless minio_env["GOMEMLIMIT"] == "256MiB"
+fail_collect(failures, "MinIO readiness must tolerate local storage contention") unless minio_container.dig("readinessProbe", "timeoutSeconds") == 10
 
 kafka_budget_dep = load_all_yaml(File.join(MANIFESTS, "30-kafka/kafka.yaml")).find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" }
 kafka_budget_container = kafka_budget_dep&.dig("spec", "template", "spec", "containers", 0) || {}
@@ -194,6 +195,15 @@ clickhouse_memory_xml = clickhouse_memory&.dig("data", "99-kind-memory.xml").to_
 fail_collect(failures, "ClickHouse kind server memory cap drift") unless clickhouse_memory_xml.include?("<max_server_memory_usage>805306368</max_server_memory_usage>")
 fail_collect(failures, "ClickHouse kind mark cache cap drift") unless clickhouse_memory_xml.include?("<mark_cache_size>67108864</mark_cache_size>")
 fail_collect(failures, "ClickHouse kind uncompressed cache cap drift") unless clickhouse_memory_xml.include?("<uncompressed_cache_size>33554432</uncompressed_cache_size>")
+clickhouse_dep = clickhouse_docs.find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "clickhouse" }
+fail_collect(failures, "ClickHouse progress deadline must cover cold start") unless
+  clickhouse_dep&.dig("spec", "progressDeadlineSeconds").to_i >= 7200
+fail_collect(failures, "ClickHouse must reserve CPU for cold start") unless
+  clickhouse_dep&.dig("spec", "template", "spec", "containers", 0, "resources", "requests", "cpu") == "500m"
+clickhouse_startup = clickhouse_dep&.dig("spec", "template", "spec", "containers", 0, "startupProbe")
+fail_collect(failures, "ClickHouse kind startup probe must tolerate laptop cold starts") unless
+  clickhouse_startup&.dig("timeoutSeconds") == 10 &&
+  clickhouse_startup&.dig("failureThreshold").to_i >= 720
 puts "ok image-pins-and-kurrent"
 
 # --- Redis local AOF (same-pod emptyDir restart; disposable / not authoritative) ---
@@ -202,6 +212,8 @@ fail_collect(failures, "missing redis manifest") unless File.file?(redis_manifes
 redis_docs = load_all_yaml(redis_manifest_path)
 redis_dep = redis_docs.find { |d| d.is_a?(Hash) && d["kind"] == "Deployment" && d.dig("metadata", "name") == "redis" }
 fail_collect(failures, "redis Deployment missing") if redis_dep.nil?
+fail_collect(failures, "redis pod sandbox must reap exec-probe children") unless
+  redis_dep&.dig("spec", "template", "spec", "shareProcessNamespace") == true
 redis_container = (redis_dep&.dig("spec", "template", "spec", "containers") || []).find { |c| c["name"] == "redis" }
 fail_collect(failures, "redis container missing") if redis_container.nil?
 redis_args = Array(redis_container&.fetch("args", []))
@@ -223,6 +235,10 @@ redis_ready_s = redis_ready_cmd.join(" ")
 unless redis_ready_s.include?("PONG") || redis_ready_s.include?("pong")
   fail_collect(failures, "redis readinessProbe must require PONG so AOF LOADING fails readiness")
 end
+%w[readinessProbe livenessProbe].each do |probe|
+  fail_collect(failures, "redis #{probe} must tolerate local CPU contention") unless
+    redis_container&.dig(probe, "timeoutSeconds") == 10
+end
 redis_text = File.read(redis_manifest_path)
 fail_collect(failures, "redis manifest must retain disposable wording") unless redis_text.match?(/Disposable|emptyDir/i)
 fail_collect(failures, "redis manifest must not claim Redis is authoritative") if redis_text.match?(/Redis is authoritative|authoritative store/i)
@@ -233,7 +249,7 @@ fail_collect(failures, "missing test-redis-aof-structure.sh") unless File.file?(
 puts "ok redis-local-aof"
 
 # --- Debezium Server (Room realtime → Redis); structure only, no delivery claim ---
-DEBEZIUM_SERVER_INDEX_DIGEST = "sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d"
+DEBEZIUM_SERVER_INDEX_DIGEST = "sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2"
 DEBEZIUM_SERVER_SOURCE_IMAGE = "quay.io/debezium/server:3.6.0.Final@#{DEBEZIUM_SERVER_INDEX_DIGEST}"
 DEBEZIUM_SERVER_STALE_TAG = "docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 DEBEZIUM_SERVER_SHORT_STALE = "uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
@@ -297,7 +313,7 @@ fail_collect(failures, "Debezium Server loader must not encode ctr content / con
 puts "ok debezium-server-room-realtime"
 
 # --- Debezium Kafka Connect (four outbox routers); structure only, no delivery claim ---
-DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455"
+DEBEZIUM_CONNECT_MULTIARCH_DIGEST = "sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada"
 DEBEZIUM_CONNECT_SOURCE_IMAGE = "quay.io/debezium/connect:3.6.0.Final@#{DEBEZIUM_CONNECT_MULTIARCH_DIGEST}"
 DEBEZIUM_CONNECT_STALE_TAG = "docker.io/uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
 DEBEZIUM_CONNECT_SHORT_STALE = "uno-arena/debezium-connect:3.6.0.Final-b7ca129320f4"
@@ -307,6 +323,17 @@ fail_collect(failures, "missing Debezium Connect manifest") unless File.file?(de
 fail_collect(failures, "missing Debezium connector registration Job") unless File.file?(debezium_register_path)
 dc_text = File.read(debezium_connect_path)
 dr_text = File.read(debezium_register_path)
+dc_docs = load_all_yaml(debezium_connect_path)
+dc_dep = dc_docs.find { |doc| doc.is_a?(Hash) && doc["kind"] == "Deployment" && doc.dig("metadata", "name") == "debezium-connect" }
+dc_container = dc_dep&.dig("spec", "template", "spec", "containers", 0)
+%w[startupProbe readinessProbe livenessProbe].each do |probe|
+  fail_collect(failures, "Debezium Connect #{probe} must use the REST endpoint") unless
+    dc_container&.dig(probe, "httpGet", "path") == "/" &&
+    dc_container&.dig(probe, "httpGet", "port") == "rest" &&
+    dc_container&.dig(probe, "timeoutSeconds") == 10
+end
+fail_collect(failures, "Debezium Connect startup probe must protect plugin scanning") unless
+  dc_container&.dig("startupProbe", "failureThreshold").to_i >= 60
 fail_collect(failures, "Debezium Connect must use exact source #{DEBEZIUM_CONNECT_SOURCE_IMAGE}") unless dc_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
 fail_collect(failures, "Debezium Connect must document multiarch index #{DEBEZIUM_CONNECT_MULTIARCH_DIGEST}") unless dc_text.include?(DEBEZIUM_CONNECT_MULTIARCH_DIGEST)
 fail_collect(failures, "Debezium Connect register Job must use same exact source") unless dr_text.include?(DEBEZIUM_CONNECT_SOURCE_IMAGE)
@@ -373,7 +400,7 @@ fail_collect(failures, "Kafka Connect must not capture realtime_outbox") if dc_t
 fail_collect(failures, "no Heartbeat SMT / heartbeat.action.query") if dc_text.match?(/Heartbeat|heartbeat\.action\.query/i)
 fail_collect(failures, "Connect Deployment missing readinessProbe") unless dc_text.include?("readinessProbe:")
 fail_collect(failures, "Connect Deployment missing livenessProbe") unless dc_text.include?("livenessProbe:")
-fail_collect(failures, "Connect probes should use curl") unless dc_text.include?("curl")
+fail_collect(failures, "Connect Deployment missing startupProbe") unless dc_text.include?("startupProbe:")
 # Heap must be explicit and safely below the container memory limit (image default -Xmx2G is unbounded for kind).
 fail_collect(failures, "Connect must set KAFKA_HEAP_OPTS (reject image-default unbounded heap)") unless dc_text.match?(/^\s+- name: KAFKA_HEAP_OPTS\s*$/)
 dc_mem_limit = dc_text[/limits:\s*\n\s+memory:\s*(\d+)Mi/, 1]&.to_i
@@ -1153,7 +1180,7 @@ if File.file?(plan_path)
     doc.is_a?(Hash) && doc["kind"] == "Deployment"
   end
   kafka_container = kafka_deployment&.dig("spec", "template", "spec", "containers", 0) || {}
-  %w[readinessProbe livenessProbe].each do |probe_name|
+  %w[startupProbe readinessProbe livenessProbe].each do |probe_name|
     probe = kafka_container[probe_name] || {}
     if probe.key?("exec") || probe.to_s.include?("kafka-topics")
       fail_collect(
@@ -1169,6 +1196,11 @@ if File.file?(plan_path)
   end
   readiness = kafka_container["readinessProbe"] || {}
   liveness = kafka_container["livenessProbe"] || {}
+  startup = kafka_container["startupProbe"] || {}
+  unless startup["initialDelaySeconds"].to_i >= 300 &&
+         startup["failureThreshold"].to_i >= 60 && startup["periodSeconds"] == 10
+    fail_collect(failures, "kafka startupProbe must protect retained KRaft recovery for at least ten minutes")
+  end
   unless (readiness["initialDelaySeconds"] || 0) >= 10
     fail_collect(failures, "kafka readinessProbe must retain a reasonable initialDelaySeconds (>= 10)")
   end

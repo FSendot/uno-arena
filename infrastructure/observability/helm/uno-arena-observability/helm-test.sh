@@ -55,6 +55,10 @@ grep -Fq 'regex = "uno-arena"' <<<"${kind_out}" || {
   echo "Alloy must collect only the application namespace and avoid observability feedback loops" >&2
   exit 1
 }
+grep -Fq 'names = ["uno-arena"]' <<<"${kind_out}" || {
+  echo "Alloy must scope Kubernetes discovery at the API source" >&2
+  exit 1
+}
 [[ "$(grep -c 'timeoutSeconds: 10' <<<"${kind_out}")" -eq 10 ]] || {
   echo "kind observability readiness probes must tolerate single-node contention" >&2
   exit 1
@@ -88,6 +92,48 @@ grep -Fq 'path: /readyz' <<<"${kind_out}" || {
 production_out="$(${HELM} template production "${CHART}" -n observability -f "${CHART}/values.production.yaml" \
   --set storage.s3.region=us-east-1 --set storage.s3.lokiBucket=prod-loki --set storage.s3.tempoBucket=prod-tempo)"
 local_production_out="$(${HELM} template local-production "${CHART}" -n observability -f "${CHART}/values.local-production.yaml")"
+
+if grep -Fq 'kind: PeerAuthentication' <<<"${local_production_out}"; then
+  echo "local production foundations must remain the sole PeerAuthentication owner" >&2
+  exit 1
+fi
+ruby -ryaml -e '
+  documents = YAML.load_stream($stdin.read).compact
+  workloads = documents.select { |document| %w[Deployment DaemonSet].include?(document["kind"]) }
+  expected_waves = {
+    "loki" => "1", "tempo" => "1",
+    "alloy-logs" => "2", "alloy-otlp" => "2",
+    "prometheus" => "3", "kube-state-metrics" => "3", "redis-exporter" => "3",
+    "grafana" => "4"
+  }
+  expected_waves.each do |name, wave|
+    workload = workloads.find { |document| document.dig("metadata", "name") == name }
+    abort "local production observability sync wave mismatch: #{name}" unless
+      workload&.dig("metadata", "annotations", "argocd.argoproj.io/sync-wave") == wave
+  end
+  expected_cpu_limits = {"alloy-logs" => "2", "alloy-otlp" => "2", "tempo" => "2", "grafana" => "1"}
+  expected_cpu_limits.each do |name, limit|
+    workload = workloads.find { |document| document.dig("metadata", "name") == name }
+    abort "local production startup CPU limit mismatch: #{name}" unless
+      workload&.dig("spec", "template", "spec", "containers", 0, "resources", "limits", "cpu").to_s == limit
+  end
+  %w[alloy-logs alloy-otlp].each do |name|
+    workload = workloads.find { |document| document.dig("metadata", "name") == name }
+    abort "local production Alloy CPU request must prevent startup starvation: #{name}" unless
+      workload&.dig("spec", "template", "spec", "containers", 0, "resources", "requests", "cpu").to_s == "250m"
+    abort "local production Alloy memory limit must fit the executable working set: #{name}" unless
+      workload&.dig("spec", "template", "spec", "containers", 0, "resources", "limits", "memory").to_s == "512Mi"
+  end
+  local_workloads = workloads.select { |document| %w[Deployment DaemonSet].include?(document["kind"]) }
+  abort "local production readiness probes must tolerate laptop contention" unless
+    local_workloads.all? do |workload|
+      workload.dig("spec", "template", "spec", "containers", 0, "readinessProbe", "timeoutSeconds") == 10
+    end
+  grafana = workloads.find { |document| document.dig("metadata", "name") == "grafana" }
+  grafana_data = grafana&.dig("spec", "template", "spec", "volumes")&.find { |volume| volume["name"] == "data" }
+  abort "local production Grafana data must avoid Btrfs migration stalls" unless
+    grafana_data&.dig("emptyDir") == {"medium" => "Memory", "sizeLimit" => "128Mi"}
+' <<<"${local_production_out}"
 
 if grep -Fq 'name: uno-arena-observability-postsync-evidence' <<<"${kind_out}"; then
   echo "disposable kind must not render the Argo PostSync evidence Job" >&2

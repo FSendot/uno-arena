@@ -100,9 +100,11 @@ grafana:
   strategyType: RollingUpdate
   preinstallDisabled: true
   goMemoryLimit: ""
+  dataEmptyDir: {}
 
 security:
   ambientRequired: true
+  managePeerAuthentication: true
   networkPoliciesEnabled: true
   applicationServiceAccounts:
     - identity

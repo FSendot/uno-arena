@@ -1,5 +1,20 @@
 profile: ambient
 image: docker.io/istio/install-cni@sha256:b2eb80818fc345e3e9033f424ec7757cbf1a9d9a6494fea79648dab4887f2f7f
+ambient:
+  # kind is created as IPv4-only. Advertising IPv6 makes ztunnel bind ::1 in
+  # new pod namespaces where IPv6 is unavailable, blocking CNI ADD.
+  ipv6: false
+  # Kubernetes DNS remains authoritative locally. Avoiding the optional
+  # ambient DNS proxy keeps native nftables programming within CNI's deadline
+  # on the deliberately small worker nodes.
+  dnsCapture: false
+  # Pod network namespaces retain their rules across an agent-only restart;
+  # replaying every pod blocks CNI readiness for minutes on a full local node.
+  # A node restart recreates the pods and programs them through normal CNI ADD.
+  reconcileIptablesOnStartup: false
 global:
   imagePullPolicy: IfNotPresent
-
+  nativeNftables: true
+resources:
+  requests: {cpu: 500m, memory: 100Mi}
+  limits: {cpu: "2", memory: 512Mi}

@@ -48,6 +48,7 @@ metadata:
     uno-arena.local/context: analytics
     uno-arena.local/non-production: "true"
 spec:
+  progressDeadlineSeconds: 7200
   replicas: 1
   strategy:
     type: Recreate
@@ -98,23 +99,32 @@ spec:
               port: 8123
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 18
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
           livenessProbe:
             httpGet:
               path: /ping
               port: 8123
             initialDelaySeconds: 20
             periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 6
+            timeoutSeconds: 10
+            failureThreshold: 30
           resources:
             requests:
-              cpu: 100m
-              memory: 512Mi
+              cpu: 500m
+              memory: 1Gi
             limits:
               cpu: "1"
-              memory: 1024Mi
+              # The arm64 server binary is roughly 730 MiB by itself. A 1 GiB
+              # cgroup repeatedly evicts its executable pages during cold start.
+              memory: 2Gi
       volumes:
         - name: data
           emptyDir: {}

@@ -5,6 +5,15 @@ LOCAL="${ROOT}/infrastructure/local-production"
 
 "${LOCAL}/vendor/verify.sh" >/dev/null
 
+grep -Fq 'patch deployment cert-manager-webhook' "${LOCAL}/bin/install-foundations.sh"
+grep -Fq '"startupProbe":{"httpGet":{"path":"/livez","port":"healthcheck"}' \
+  "${LOCAL}/bin/install-foundations.sh"
+grep -Fq '"readinessProbe":{"httpGet":{"path":"/healthz","port":"healthcheck"}' \
+  "${LOCAL}/bin/install-foundations.sh"
+grep -Fq '"requests":{"cpu":"100m","memory":"128Mi"}' \
+  "${LOCAL}/bin/install-foundations.sh"
+[[ "$(grep -Fc -- '--timeout=600s' "${LOCAL}/bin/install-foundations.sh")" -ge 1 ]]
+
 rendered_foundation="$(mktemp)"
 rendered_root="$(mktemp)"
 trap 'rm -f "${rendered_foundation}" "${rendered_root}"' EXIT
@@ -18,6 +27,18 @@ ruby -ryaml -e '
   end
   duplicates = identities.group_by(&:itself).select { |_identity, matches| matches.length > 1 }.keys
   abort "foundation renders duplicate resources: #{duplicates.inspect}" unless duplicates.empty?
+  metrics_server = documents.find do |document|
+    document["kind"] == "Deployment" && document.dig("metadata", "name") == "metrics-server"
+  end
+  container = metrics_server&.dig("spec", "template", "spec", "containers", 0)
+  abort "metrics-server liveness must not amplify local kubelet contention" unless
+    container&.dig("livenessProbe", "timeoutSeconds") == 10 &&
+    container&.dig("livenessProbe", "failureThreshold").to_i >= 12
+  abort "metrics-server startup probe must protect a cold page cache" unless
+    container&.dig("startupProbe", "timeoutSeconds") == 10 &&
+    container&.dig("startupProbe", "failureThreshold").to_i >= 60
+  abort "metrics-server readiness must tolerate local kubelet contention" unless
+    container&.dig("readinessProbe", "timeoutSeconds") == 10
 ' "${rendered_foundation}"
 
 helm template uno-arena-local-production-root \

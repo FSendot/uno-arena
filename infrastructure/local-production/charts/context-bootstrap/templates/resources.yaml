@@ -5,6 +5,8 @@ kind: ServiceAccount
 metadata:
   name: context-bootstrap
   namespace: uno-arena
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 imagePullSecrets:
   - name: gitlab-registry
 automountServiceAccountToken: false

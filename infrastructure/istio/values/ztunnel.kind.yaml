@@ -2,5 +2,5 @@ profile: ambient
 image: docker.io/istio/ztunnel@sha256:64d7c4ea9621fdad66160744dcf76999995fcc0ac399d04aba76d6d0aae72242
 imagePullPolicy: IfNotPresent
 resources:
-  requests: {cpu: 50m, memory: 128Mi}
-  limits: {cpu: 500m, memory: 512Mi}
+  requests: {cpu: 500m, memory: 128Mi}
+  limits: {cpu: "1", memory: 512Mi}

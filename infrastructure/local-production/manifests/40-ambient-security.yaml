@@ -233,6 +233,30 @@ spec:
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
+  name: room-gameplay-pgbouncer-callers
+  namespace: uno-arena
+spec:
+  selector:
+    matchLabels:
+      app: room-gameplay-pgbouncer
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/uno-arena/sa/room-gameplay-router
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime-controller
+              - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
+              - cluster.local/ns/uno-arena/sa/room-gameplay-timer-worker
+              - cluster.local/ns/uno-arena/sa/room-gameplay-integrity-reconciler
+              - cluster.local/ns/uno-arena/sa/room-gameplay-player-stream-compactor
+      to:
+        - operation:
+            ports: ["6432"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
   name: postgres-room-gameplay-callers
   namespace: uno-arena
 spec:
@@ -250,6 +274,7 @@ spec:
               - cluster.local/ns/uno-arena/sa/room-gameplay-timer-worker
               - cluster.local/ns/uno-arena/sa/room-gameplay-integrity-reconciler
               - cluster.local/ns/uno-arena/sa/room-gameplay-player-stream-compactor
+              - cluster.local/ns/uno-arena/sa/room-gameplay-pgbouncer
               - cluster.local/ns/uno-arena/sa/context-bootstrap
               - cluster.local/ns/uno-arena/sa/debezium-connect
               - cluster.local/ns/uno-arena/sa/debezium-server
@@ -322,6 +347,7 @@ spec:
               - cluster.local/ns/uno-arena/sa/room-gameplay-router
               - cluster.local/ns/uno-arena/sa/room-gameplay-runtime
               - cluster.local/ns/uno-arena/sa/room-gameplay-timer-worker
+              - cluster.local/ns/uno-arena/sa/room-gameplay-integrity-reconciler
               - cluster.local/ns/uno-arena/sa/tournament-orchestration
               - cluster.local/ns/uno-arena/sa/tournament-orchestration-provisioning-worker
               - cluster.local/ns/uno-arena/sa/tournament-orchestration-seeding-worker

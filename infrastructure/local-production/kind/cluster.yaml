@@ -5,6 +5,28 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: uno-arena-production
 nodes:
   - role: control-plane
+    # Docker Desktop can briefly stall the API server while this production-like
+    # stack starts. Keep control-plane leaders alive through that local-only load.
+    kubeadmConfigPatches:
+      - |
+        apiVersion: kubeadm.k8s.io/v1beta4
+        kind: ClusterConfiguration
+        controllerManager:
+          extraArgs:
+            - name: leader-elect-lease-duration
+              value: 60s
+            - name: leader-elect-renew-deadline
+              value: 40s
+            - name: leader-elect-retry-period
+              value: 10s
+        scheduler:
+          extraArgs:
+            - name: leader-elect-lease-duration
+              value: 60s
+            - name: leader-elect-renew-deadline
+              value: 40s
+            - name: leader-elect-retry-period
+              value: 10s
     extraPortMappings:
       - containerPort: 30080
         hostPort: 8080

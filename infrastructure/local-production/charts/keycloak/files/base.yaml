@@ -131,6 +131,13 @@ spec:
               mountPath: /opt/keycloak/data/import
             - name: data
               mountPath: /opt/keycloak/data
+          startupProbe:
+            httpGet:
+              path: /realms/master
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90
           readinessProbe:
             httpGet:
               path: /realms/unoarena

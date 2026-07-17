@@ -50,7 +50,84 @@ template="${tmp_dir}/seed-template.yaml"
 complete="${tmp_dir}/seed-complete.yaml"
 missing="${tmp_dir}/seed-missing.yaml"
 wrong_name="${tmp_dir}/seed-wrong-name.yaml"
+registry_config="${tmp_dir}/registry-config.json"
+generated="${tmp_dir}/seed-generated.yaml"
+delegated_registry="${tmp_dir}/registry-delegated.json"
+rejected_generated="${tmp_dir}/seed-rejected.yaml"
+multi_registry="${tmp_dir}/registry-multiple.json"
+multi_rejected_generated="${tmp_dir}/seed-multiple-rejected.yaml"
 "${LOCAL}/bin/render-secret-seed-template" >"${template}"
+ruby -rbase64 -rjson -e '
+  auth = Base64.strict_encode64("test-user:test-token")
+  File.write(ARGV.fetch(0), JSON.generate({"auths" => {"registry.gitlab.com" => {"auth" => auth}}}))
+' "${registry_config}"
+"${LOCAL}/bin/generate-secret-seed" \
+  --registry-config "${registry_config}" --output "${generated}"
+ruby -rjson -ryaml -e '
+  schema = JSON.parse(File.read(ARGV.fetch(0)))
+  document = YAML.load_file(ARGV.fetch(1))
+  values = document.fetch("stringData")
+  abort "generated seed keys differ from schema" unless values.keys == schema.fetch("required")
+  abort "generated seed contains placeholders" if values.value?("REPLACE_WITH_SECRET")
+  abort "generated HMAC rotation baseline differs" unless
+    values.fetch("internal-principal-hmac-key-current") == values.fetch("internal-principal-hmac-key-previous")
+  abort "generated registry config differs" unless
+    JSON.parse(values.fetch("gitlab-registry-dockerconfigjson")) == JSON.parse(File.read(ARGV.fetch(2)))
+  expected_urls = {
+    "identity-database-url" =>
+      "postgres://#{values.fetch("identity-runtime-user")}:#{values.fetch("identity-runtime-password")}@" \
+      "postgres-identity.uno-arena.svc.cluster.local:5432/identity?sslmode=disable",
+    "room-database-url" =>
+      "postgres://#{values.fetch("room-runtime-user")}:#{values.fetch("room-runtime-password")}@" \
+      "postgres-room-gameplay.uno-arena.svc.cluster.local:5432/room_gameplay?sslmode=disable",
+    "room-pgbouncer-database-url" =>
+      "postgres://#{values.fetch("room-runtime-user")}:#{values.fetch("room-runtime-password")}@" \
+      "room-gameplay-pgbouncer.uno-arena.svc.cluster.local:6432/room_gameplay?sslmode=disable",
+    "tournament-database-url" =>
+      "postgres://#{values.fetch("tournament-runtime-user")}:#{values.fetch("tournament-runtime-password")}@" \
+      "postgres-tournament.uno-arena.svc.cluster.local:5432/tournament?sslmode=disable",
+    "ranking-database-url" =>
+      "postgres://#{values.fetch("ranking-runtime-user")}:#{values.fetch("ranking-runtime-password")}@" \
+      "postgres-ranking.uno-arena.svc.cluster.local:5432/ranking?sslmode=disable"
+  }
+  abort "generated database relationships differ" unless
+    expected_urls.all? { |key, value| values.fetch(key) == value }
+  expected_userlist = %("#{values.fetch("room-runtime-user")}" "#{values.fetch("room-runtime-password")}")
+  abort "generated PgBouncer relationship differs" unless
+    values.fetch("room-pgbouncer-userlist") == expected_userlist
+  abort "generated seed mode is not 0600" unless (File.stat(ARGV.fetch(1)).mode & 0o777) == 0o600
+' "${SCHEMA}" "${generated}" "${registry_config}"
+ruby -rjson -e '
+  File.write(ARGV.fetch(0), JSON.generate({
+    "auths" => {"registry.gitlab.com" => {}},
+    "credsStore" => "osxkeychain"
+  }))
+' "${delegated_registry}"
+if "${LOCAL}/bin/generate-secret-seed" \
+  --registry-config "${delegated_registry}" --output "${rejected_generated}" \
+  >"${tmp_dir}/delegated-registry.log" 2>&1; then
+  echo "seed generator accepted delegated registry credentials" >&2
+  exit 1
+fi
+grep -Fq 'registry config must not delegate to a credential store' \
+  "${tmp_dir}/delegated-registry.log"
+[[ ! -e "${rejected_generated}" ]]
+ruby -rbase64 -rjson -e '
+  auth = Base64.strict_encode64("test-user:test-token")
+  File.write(ARGV.fetch(0), JSON.generate({"auths" => {
+    "registry.gitlab.com" => {"auth" => auth},
+    "unrelated.example.com" => {"auth" => auth}
+  }}))
+' "${multi_registry}"
+if "${LOCAL}/bin/generate-secret-seed" \
+  --registry-config "${multi_registry}" --output "${multi_rejected_generated}" \
+  >"${tmp_dir}/multiple-registry.log" 2>&1; then
+  echo "seed generator accepted credentials for an unrelated registry" >&2
+  exit 1
+fi
+grep -Fq 'registry config must contain only registry.gitlab.com auth' \
+  "${tmp_dir}/multiple-registry.log"
+[[ ! -e "${multi_rejected_generated}" ]]
 ruby -rjson -ryaml -e '
   schema = JSON.parse(File.read(ARGV.fetch(0)))
   document = YAML.load_file(ARGV.fetch(1))

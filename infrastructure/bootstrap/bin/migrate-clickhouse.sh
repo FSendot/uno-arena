@@ -51,8 +51,8 @@ if [[ "$(ch_bootstrap "SELECT count() FROM analytics.schema_migration_checksums 
 fi
 
 ledger="${tmp_dir}/ledger.tsv"
-ch_bootstrap "SELECT m.version, c.checksum FROM analytics.schema_migrations FINAL m
-INNER JOIN analytics.schema_migration_checksums FINAL c USING (version) ORDER BY m.version FORMAT TabSeparated" >"${ledger}"
+ch_bootstrap "SELECT m.version, c.checksum FROM analytics.schema_migrations AS m FINAL
+INNER JOIN analytics.schema_migration_checksums AS c FINAL USING (version) ORDER BY m.version FORMAT TabSeparated" >"${ledger}"
 plan="${tmp_dir}/plan.json"
 ruby "${PLAN_TOOL}" "${MIGRATION_DIR}" "${ledger}" >"${plan}"
 ruby -rjson -e '
@@ -75,8 +75,8 @@ while IFS=$'\t' read -r version checksum path; do
   ch_bootstrap "INSERT INTO analytics.schema_migration_attempts (version, status) VALUES ('${version}', 'succeeded')"
 done <"${tmp_dir}/pending.tsv"
 
-ch_bootstrap "SELECT m.version, c.checksum FROM analytics.schema_migrations FINAL m
-INNER JOIN analytics.schema_migration_checksums FINAL c USING (version) ORDER BY m.version FORMAT TabSeparated" >"${ledger}"
+ch_bootstrap "SELECT m.version, c.checksum FROM analytics.schema_migrations AS m FINAL
+INNER JOIN analytics.schema_migration_checksums AS c FINAL USING (version) ORDER BY m.version FORMAT TabSeparated" >"${ledger}"
 ruby "${PLAN_TOOL}" "${MIGRATION_DIR}" "${ledger}" >/dev/null
 latest="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV.fetch(0))).fetch("latest")' "${plan}")"
 echo "migrations clickhouse context=${CONTEXT_NAME} latest=${latest} ok"

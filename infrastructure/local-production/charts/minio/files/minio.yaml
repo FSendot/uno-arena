@@ -47,7 +47,7 @@ spec:
           ports:
             - {name: api, containerPort: 9000}
             - {name: console, containerPort: 9001}
-          readinessProbe: {httpGet: {path: /minio/health/ready, port: api}, initialDelaySeconds: 5}
+          readinessProbe: {httpGet: {path: /minio/health/ready, port: api}, initialDelaySeconds: 5, timeoutSeconds: 10}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, runAsUser: 1000, runAsGroup: 1000}
           resources:
             requests: {cpu: 50m, memory: 128Mi}

@@ -36,9 +36,9 @@ metadata:
     uno-arena.local/debezium-role: kafka-connect
 data:
   # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
-  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
+  SOURCE_IMAGE_REF: quay.io/debezium/connect:3.6.0.Final@sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
   IMAGE_VERSION: 3.6.0.Final
-  MULTIARCH_INDEX_DIGEST: sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
+  MULTIARCH_INDEX_DIGEST: sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada
   # Shared Outbox Event Router field contract (column names match migrations).
   OUTBOX_ROUTER_NOTES: |
     route.by.field=topic
@@ -258,25 +258,28 @@ spec:
             - name: templates
               mountPath: /kafka/uno-arena-templates
               readOnly: true
+          startupProbe:
+            httpGet:
+              path: /
+              port: rest
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
           readinessProbe:
-            exec:
-              command:
-                - /bin/bash
-                - -c
-                - curl -sf http://127.0.0.1:8083/ | grep -q version
+            httpGet:
+              path: /
+              port: rest
             initialDelaySeconds: 20
             periodSeconds: 20
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 18
           livenessProbe:
-            exec:
-              command:
-                - /bin/bash
-                - -c
-                - curl -sf http://127.0.0.1:8083/ | grep -q version
+            httpGet:
+              path: /
+              port: rest
             initialDelaySeconds: 40
             periodSeconds: 30
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 6
           resources:
             requests:

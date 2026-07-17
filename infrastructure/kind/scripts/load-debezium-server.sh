@@ -17,8 +17,8 @@ assert_kind_context
 
 # Must match infrastructure/kind/manifests/80-debezium-server Deployment image.
 DEBEZIUM_SERVER_VERSION="${DEBEZIUM_SERVER_VERSION:-3.6.0.Final}"
-DEBEZIUM_SERVER_INDEX_DIGEST="${DEBEZIUM_SERVER_INDEX_DIGEST:-sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d}"
-DEBEZIUM_SERVER_SOURCE_IMAGE="${DEBEZIUM_SERVER_SOURCE_IMAGE:-quay.io/debezium/server:3.6.0.Final@sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d}"
+DEBEZIUM_SERVER_INDEX_DIGEST="${DEBEZIUM_SERVER_INDEX_DIGEST:-sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2}"
+DEBEZIUM_SERVER_SOURCE_IMAGE="${DEBEZIUM_SERVER_SOURCE_IMAGE:-quay.io/debezium/server:3.6.0.Final@sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2}"
 
 # Prior broken local runtime tag from kind-load staging (remove so crictl cannot reuse bad metadata).
 DEBEZIUM_SERVER_STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"

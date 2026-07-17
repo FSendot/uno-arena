@@ -9,6 +9,9 @@ data:
   config.alloy: |
     discovery.kubernetes "pods" {
       role = "pod"
+      namespaces {
+        names = [{{ .Values.applicationNamespace | quote }}]
+      }
     }
 
     discovery.relabel "pod_logs" {

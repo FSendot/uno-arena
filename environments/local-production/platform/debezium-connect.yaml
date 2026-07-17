@@ -15,4 +15,4 @@ chart:
 values:
   image:
     repository: quay.io/debezium/connect:3.6.0.Final
-    digest: sha256:61d29e5a0316de5dd0a564ec40eaa662d837a05217523e1a1745ecde3d790455
+    digest: sha256:8b6267563ceb0cbfe2c3aa5521c4653cbb8bab9d5042e609f2771283f906bada

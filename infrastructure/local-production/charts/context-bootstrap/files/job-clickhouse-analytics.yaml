@@ -5,8 +5,9 @@ metadata:
   name: bootstrap-clickhouse-analytics
   namespace: uno-arena
   annotations:
-    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
   labels:
     app.kubernetes.io/name: bootstrap-clickhouse-analytics
     app.kubernetes.io/part-of: uno-arena

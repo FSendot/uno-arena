@@ -1,5 +1,13 @@
 profile: ambient
 image: docker.io/istio/pilot@sha256:d158739d5286f7899bc039589d248720c2a9b6622d54eeb7a3fdfbb65200c22c
+autoscaleEnabled: false
+replicaCount: 1
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
 global:
   imagePullPolicy: IfNotPresent
 resources:

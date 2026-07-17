@@ -20,7 +20,44 @@ ruby -e '
   body = File.read(input)
   needle = "        - --kubelet-use-node-status-port\n"
   abort "metrics-server argument anchor missing" unless body.scan(needle).length == 1
-  File.write(output, body.sub(needle, needle + "        - --kubelet-insecure-tls\n"))
+  body = body.sub(needle, needle + "        - --kubelet-insecure-tls\n")
+  liveness = <<~YAML.lines.map { |line| "        #{line}" }.join
+    livenessProbe:
+      failureThreshold: 3
+      httpGet:
+        path: /livez
+        port: https
+        scheme: HTTPS
+      periodSeconds: 10
+  YAML
+  hardened_liveness = liveness
+    .sub("failureThreshold: 3", "failureThreshold: 12")
+    .sub("periodSeconds: 10", "periodSeconds: 10\n          timeoutSeconds: 10")
+  startup = <<~YAML.lines.map { |line| "        #{line}" }.join
+    startupProbe:
+      failureThreshold: 60
+      httpGet:
+        path: /livez
+        port: https
+        scheme: HTTPS
+      periodSeconds: 10
+      timeoutSeconds: 10
+  YAML
+  abort "metrics-server liveness anchor missing" unless body.scan(liveness).length == 1
+  body = body.sub(liveness, hardened_liveness + startup)
+  readiness = <<~YAML.lines.map { |line| "        #{line}" }.join
+    readinessProbe:
+      failureThreshold: 3
+      httpGet:
+        path: /readyz
+        port: https
+        scheme: HTTPS
+      initialDelaySeconds: 20
+      periodSeconds: 10
+  YAML
+  hardened_readiness = readiness.sub("periodSeconds: 10", "periodSeconds: 10\n          timeoutSeconds: 10")
+  abort "metrics-server readiness anchor missing" unless body.scan(readiness).length == 1
+  File.write(output, body.sub(readiness, hardened_readiness))
 ' "${LOCAL_DIR}/vendor/metrics-server/components.yaml" "${tmp_dir}/metrics-server.yaml"
 
 # 00-namespaces.yaml owns the namespace inventory. The upstream cert-manager

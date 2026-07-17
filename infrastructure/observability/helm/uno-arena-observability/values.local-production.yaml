@@ -30,8 +30,11 @@ grafana:
   strategyType: Recreate
   preinstallDisabled: true
   goMemoryLimit: 256MiB
+  dataEmptyDir: {medium: Memory, sizeLimit: 128Mi}
 
 security:
+  # The local-production foundations application owns namespace-wide strict mTLS.
+  managePeerAuthentication: false
   networkPoliciesEnabled: false
 
 postSyncEvidence:
@@ -39,24 +42,31 @@ postSyncEvidence:
 
 # Local production preserves the production topology and alert semantics while
 # reducing scheduling reservations for a laptop-sized three-node kind cluster.
+probes:
+  readinessTimeoutSeconds: 10
+
 resources:
   alloyLogs:
-    requests: {cpu: 10m, memory: 32Mi}
+    requests: {cpu: 250m, memory: 32Mi}
+    limits: {cpu: "2", memory: 512Mi}
   alloyOtlp:
-    requests: {cpu: 20m, memory: 64Mi}
+    requests: {cpu: 250m, memory: 64Mi}
+    limits: {cpu: "2", memory: 512Mi}
   loki:
-    requests: {cpu: 25m, memory: 128Mi}
+    requests: {cpu: 100m, memory: 128Mi}
   tempo:
-    requests: {cpu: 25m, memory: 128Mi}
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "2", memory: 1Gi}
   prometheus:
-    requests: {cpu: 25m, memory: 128Mi}
+    requests: {cpu: 100m, memory: 128Mi}
   alertmanager:
-    requests: {cpu: 10m, memory: 32Mi}
+    requests: {cpu: 25m, memory: 32Mi}
   redisExporter:
-    requests: {cpu: 5m, memory: 16Mi}
+    requests: {cpu: 10m, memory: 16Mi}
   webhookSink:
     requests: {cpu: 5m, memory: 8Mi}
   kubeStateMetrics:
-    requests: {cpu: 10m, memory: 32Mi}
+    requests: {cpu: 20m, memory: 32Mi}
   grafana:
-    requests: {cpu: 25m, memory: 64Mi}
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 512Mi}

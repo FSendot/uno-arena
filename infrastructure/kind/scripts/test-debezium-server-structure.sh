@@ -27,7 +27,7 @@ grep -qEi 'SSE E2E not claimed|Gateway SSE E2E not claimed|not claim' "${LIVE_RE
   || die "live Redis script must disclaim Gateway SSE E2E"
 
 # --- Image: exact quay digest + Never; node-native crictl pull (no kind load / no local runtime tags) ---
-MULTIARCH_DIGEST="sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d"
+MULTIARCH_DIGEST="sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2"
 SOURCE_IMAGE="quay.io/debezium/server:3.6.0.Final@${MULTIARCH_DIGEST}"
 STALE_RUNTIME_TAG="docker.io/uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
 SHORT_STALE_TAG="uno-arena/debezium-server:3.6.0.Final-3754ca3df34b"
@@ -164,7 +164,14 @@ grep -qF 'snapshot.mode=never' "${MANIFEST}" && die "snapshot.mode=never is reti
 # --- Probes + config mount ---
 grep -qF '/q/health/ready' "${MANIFEST}" || die "readinessProbe must hit Quarkus ready"
 grep -qF '/q/health/live' "${MANIFEST}" || die "livenessProbe must hit Quarkus live"
-grep -qF 'mountPath: /debezium/config' "${MANIFEST}" || die "must mount config at /debezium/config"
+grep -qF 'mountPath: /debezium/config/application.properties' "${MANIFEST}" \
+  || die "must mount only application.properties without hiding image-owned config"
+grep -qF 'subPath: application.properties' "${MANIFEST}" \
+  || die "application.properties mount must use subPath"
+grep -qF 'startupProbe:' "${MANIFEST}" \
+  || die "Debezium Server must have a startup probe"
+grep -qF 'failureThreshold: 60' "${MANIFEST}" \
+  || die "Debezium Server startup probe must tolerate local cold starts"
 
 # --- Wiring: apply → Server restart → wait; no false delivery claim ---
 grep -qF '80-debezium-server' "${APPLY}" || die "apply.sh must apply 80-debezium-server"

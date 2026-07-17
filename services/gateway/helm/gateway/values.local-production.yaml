@@ -1,4 +1,6 @@
 # Simulator overlay: render after values.production.yaml.
+replicaCount: 1
+
 env:
   DEPLOYMENT_ENV: local-production
   GATEWAY_BACKEND_HTTP_TIMEOUT: "12s"
@@ -25,7 +27,7 @@ resources:
 
 healthProbes:
   periodSeconds: 20
-  timeoutSeconds: 3
+  timeoutSeconds: 10
   failureThreshold: 6
 
 topologySpread:
@@ -41,9 +43,9 @@ podDisruptionBudget:
   minAvailable: 1
 
 autoscaling:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 4
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 2
   targetCPUUtilizationPercentage: 70
 
 imagePullSecrets:

@@ -16,9 +16,9 @@ metadata:
     uno-arena.local/cdc-pipeline: room-realtime-redis
 data:
   # Workload image = exact SOURCE_IMAGE_REF. Loader: docker exec + crictl pull on kind node.
-  SOURCE_IMAGE_REF: quay.io/debezium/server:3.6.0.Final@sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d
+  SOURCE_IMAGE_REF: quay.io/debezium/server:3.6.0.Final@sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2
   IMAGE_VERSION: 3.6.0.Final
-  MULTIARCH_INDEX_DIGEST: sha256:adec18409dff7bcc2d00511f1d5aee5b7677cd5901ef729576ac02728d30ea9d
+  MULTIARCH_INDEX_DIGEST: sha256:accbc0d52bcd53f1fe745c2c4957eea8c39be9fd000fb9c20b7d33cbd6c2bfc2
   application.properties: |
     # Quarkus / health
     quarkus.http.port=8080
@@ -157,15 +157,24 @@ spec:
               value: "-Xms64m -Xmx256m"
           volumeMounts:
             - name: config
-              mountPath: /debezium/config
+              # Preserve image-owned files such as debezium-jmx-config.yaml.
+              mountPath: /debezium/config/application.properties
+              subPath: application.properties
               readOnly: true
+          startupProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /q/health/ready
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 18
           livenessProbe:
             httpGet:
@@ -173,7 +182,7 @@ spec:
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 20
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 6
           resources:
             requests:

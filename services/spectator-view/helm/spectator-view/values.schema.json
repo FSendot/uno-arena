@@ -83,7 +83,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "minReplicas": { "type": "integer", "minimum": 2 },
+        "minReplicas": { "type": "integer", "minimum": 1 },
         "maxReplicas": { "type": "integer", "minimum": 2 },
         "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
       },

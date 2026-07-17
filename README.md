@@ -29,6 +29,7 @@ This repository contains the current UnoArena design package and the architectur
 
 - [DevOps Checkpoint README](./devops-checkpoint/README.md)
 - [Local GitLab Runner and Staging Runbook](./devops-checkpoint/local-runbook.md)
+- [From-scratch local-production deployment with GitLab CI and Argo CD](./docs/local-production-from-scratch-gitlab-argocd.md)
 
 ## Decision Log
 

@@ -46,46 +46,20 @@ values:
     strategyType: Recreate
     preinstallDisabled: true
     goMemoryLimit: 256MiB
+    dataEmptyDir: {medium: Memory, sizeLimit: 128Mi}
   security:
+    managePeerAuthentication: false
     networkPoliciesEnabled: false
+  postSyncEvidence: {enabled: true}
+  probes: {readinessTimeoutSeconds: 10}
   resources:
-    alloyLogs:
-      requests:
-        cpu: 10m
-        memory: 32Mi
-    alloyOtlp:
-      requests:
-        cpu: 20m
-        memory: 64Mi
-    loki:
-      requests:
-        cpu: 25m
-        memory: 128Mi
-    tempo:
-      requests:
-        cpu: 25m
-        memory: 128Mi
-    prometheus:
-      requests:
-        cpu: 25m
-        memory: 128Mi
-    alertmanager:
-      requests:
-        cpu: 10m
-        memory: 32Mi
-    redisExporter:
-      requests:
-        cpu: 5m
-        memory: 16Mi
-    webhookSink:
-      requests:
-        cpu: 5m
-        memory: 8Mi
-    kubeStateMetrics:
-      requests:
-        cpu: 10m
-        memory: 32Mi
-    grafana:
-      requests:
-        cpu: 25m
-        memory: 64Mi
+    alloyLogs: {requests: {cpu: 250m, memory: 32Mi}, limits: {cpu: "2", memory: 512Mi}}
+    alloyOtlp: {requests: {cpu: 250m, memory: 64Mi}, limits: {cpu: "2", memory: 512Mi}}
+    loki: {requests: {cpu: 100m, memory: 128Mi}}
+    tempo: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: "2", memory: 1Gi}}
+    prometheus: {requests: {cpu: 100m, memory: 128Mi}}
+    alertmanager: {requests: {cpu: 25m, memory: 32Mi}}
+    redisExporter: {requests: {cpu: 10m, memory: 16Mi}}
+    webhookSink: {requests: {cpu: 5m, memory: 8Mi}}
+    kubeStateMetrics: {requests: {cpu: 20m, memory: 32Mi}}
+    grafana: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: "1", memory: 512Mi}}
