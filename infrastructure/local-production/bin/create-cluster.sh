@@ -68,7 +68,7 @@ kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n kube-system get configmap cor
 # restart cannot stall every in-cluster lookup.
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n kube-system patch deployment coredns \
   --type=strategic \
-  -p='{"spec":{"replicas":3,"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule","labelSelector":{"matchLabels":{"k8s-app":"kube-dns"}}}],"containers":[{"name":"coredns","startupProbe":{"httpGet":{"path":"/ready","port":"readiness-probe"},"periodSeconds":10,"timeoutSeconds":5,"failureThreshold":60},"readinessProbe":{"timeoutSeconds":5,"failureThreshold":10},"resources":{"limits":{"cpu":"1"}}}]}}}}'
+  -p='{"spec":{"replicas":3,"template":{"spec":{"affinity":{"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"labelSelector":{"matchLabels":{"k8s-app":"kube-dns"}},"topologyKey":"kubernetes.io/hostname"}]}},"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"DoNotSchedule","labelSelector":{"matchLabels":{"k8s-app":"kube-dns"}}}],"containers":[{"name":"coredns","startupProbe":{"httpGet":{"path":"/ready","port":"readiness-probe"},"periodSeconds":10,"timeoutSeconds":5,"failureThreshold":60},"readinessProbe":{"timeoutSeconds":5,"failureThreshold":10},"resources":{"limits":{"cpu":"1"}}}]}}}}'
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n kube-system rollout restart deployment/coredns
 kubectl --context "${LOCAL_PRODUCTION_CONTEXT}" -n kube-system rollout status \
   deployment/coredns --timeout=300s
