@@ -10,8 +10,8 @@ destinationNamespace: uno-arena
 chart:
   repository: https://gitlab.com/api/v4/projects/83865621/packages/helm/stable
   name: debezium-connect
-  version: 0.1.32
-  packageSha256: 3ba1367959becbeee63a82d65bbc20b749840ad44e61941d13c63db128129667
+  version: 0.1.42
+  packageSha256: '0391120992f2be7eb146ef964d58e70e1e43d3603c7f32ba6477f669f2399fe5'
 values:
   image:
     repository: quay.io/debezium/connect:3.6.0.Final
